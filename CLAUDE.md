@@ -8,7 +8,7 @@ Optimized for **small cash accounts** with T+1 settlement. Not a margin/futures 
 
 - **Python**: venv at `venv/` uses Python 3.13 (symlinked to current snap release). Run via `venv/bin/python`.
 - **Broker**: Alpaca (`alpaca-trade-api` / `alpaca-py`). Do NOT use IB/ib_async imports.
-- **Run tests**: `venv/bin/python -m pytest tests/ -q`  *(365+ tests — all must pass)*
+- **Run tests**: `venv/bin/python -m pytest tests/ -q`  *(369+ tests — all must pass)*
 - **Start engine**: `venv/bin/python AutoTrader.py`
 - **Run backtest**: `venv/bin/python run_backtest.py`
 
@@ -666,6 +666,26 @@ computed from the `elif d.get("fill_price")` fallback.
 Fix: removed the dead `raw_commission` variable and the unreachable branch. The
 `unit_price` logic now directly checks `fill_price`, matching the actual data flow.
 Tests: `TestDashboardBreakEvenIndicator.test_dashboard_no_dead_commission_key`
+
+## Fixed Bugs (Session 24 — May 2026)
+
+### 79. Two Time-Sensitive Tests Failed on Friday After 3 PM
+
+Two tests in `tests/test_trailing_stop_scoring_screener.py` called
+`engine.check_velocity_exits()` without mocking `src.engine.datetime`, and asserted
+`not tc.submit_order.called`. On any Friday after 3 PM ET, the Friday-close rule would fire
+on their positions (profit < `FRIDAY_MIN_PROFIT_PCT`) and call `liquidate()`, breaking both
+assertions:
+
+- `TestHardStop.test_hard_stop_does_not_trigger_within_threshold` — position at 6% drawdown
+  (below 7% hard-stop threshold) but profit −6% < 3% Friday threshold. Friday-close fired.
+- `TestExitOrders.test_velocity_exit_does_not_trigger_before_hold_bars` — fresh position at
+  +1% profit (below 5% velocity-exit threshold) but profit 1% < 3% Friday threshold.
+  Friday-close fired.
+
+Fix: added `patch('src.engine.datetime')` to pin both tests to Wednesday 2024-06-05 10:30 ET
+(same safe-day pattern used in all previously fixed time-sensitive tests). Friday-close rule
+is now permanently inactive in both tests.
 
 ## Survivorship Bias Warning (Backtest)
 The backtest universe is current NASDAQ/NYSE listings. Bankrupt/delisted tickers from the

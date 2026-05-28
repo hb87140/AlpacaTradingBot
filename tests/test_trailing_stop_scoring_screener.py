@@ -1230,8 +1230,14 @@ class TestExitOrders:
         engine.state = {'NEW': self._make_state_entry(days_ago=0, price=100.0)}
 
         snap = _make_snapshot(price=101.0)
+        # Pin to Wednesday to prevent Friday-close rule from firing (profit 1% < 3%).
+        tz_ny = pytz.timezone('US/Eastern')
+        safe_now = tz_ny.localize(datetime(2024, 6, 5, 10, 30))
         with patch.object(engine, '_fetch_snapshot', return_value=snap), \
-             patch.object(engine, 'save_state'):
+             patch.object(engine, 'save_state'), \
+             patch('src.engine.datetime') as mock_dt:
+            mock_dt.now.return_value = safe_now
+            mock_dt.fromisoformat = datetime.fromisoformat
             engine.check_velocity_exits()
 
         assert 'NEW' in engine.state
@@ -1998,8 +2004,13 @@ class TestHardStop:
         engine.state = {'POS': self._state_entry(entry, cur, tz_ny)}
 
         snap = _make_snapshot(price=cur)
+        # Pin to Wednesday so Friday-close rule never fires during this test.
+        safe_now = tz_ny.localize(datetime(2024, 6, 5, 10, 30))
         with patch.object(engine, '_fetch_snapshot', return_value=snap), \
-             patch.object(engine, 'save_state'):
+             patch.object(engine, 'save_state'), \
+             patch('src.engine.datetime') as mock_dt:
+            mock_dt.now.return_value = safe_now
+            mock_dt.fromisoformat = datetime.fromisoformat
             engine.check_velocity_exits()
 
         assert 'POS' in engine.state, "Position within loss threshold must not be force-closed"
