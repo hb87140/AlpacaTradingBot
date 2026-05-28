@@ -172,7 +172,9 @@ def get_state():
             unit_price = None
         cur      = float(d.get("current_price", ep))   # live price written by engine
         sl           = float(d.get("stop_loss",     0))
-        effective_sl = float(d.get("effective_stop", sl))  # IB trail watermark if tracked
+        # Engine writes break-even-floored chandelier stop directly into stop_loss via
+        # _update_position_prices(); no separate effective_stop key in state.
+        effective_sl = sl
         vol      = float(d.get("volume",      0))
         entry_ts = d.get("time", now.isoformat())
         try:

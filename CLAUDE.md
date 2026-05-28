@@ -482,6 +482,28 @@ Fix: added `BUCKET_CASH_PCT` to the `src.config` import and changed to
 Tests: `TestBacktestBucketCashPct.test_bucket_cash_pct_constant_imported_in_backtest`,
 `test_position_qty_reflects_bucket_cash_pct`
 
+## Fixed Bugs (Session 17 — May 2026)
+
+### 66. Dashboard `effective_stop` Dead Code + Stale IB Comment
+
+`dashboard_server.py` `get_state()` read `d.get("effective_stop", sl)` with
+a comment "IB trail watermark if tracked". The `effective_stop` key is **never written**
+to `engine_state.json` — the engine writes the break-even-floored chandelier stop value
+directly to `stop_loss` via `_update_position_prices()`. The fallback always resolved to
+`sl`, making the `get()` call dead code. Additionally, `effective_stop == stop_loss` in
+the API response meant the `↑` break-even indicator on the dashboard table (JS line 748)
+could never fire.
+Fix: replaced with `effective_sl = sl` with a comment explaining why, and removed the
+stale IB reference from the comment.
+
+### 67. Stale "replaces the IB ScannerSubscription" Reference in scanner.py
+
+`src/scanner.py` module docstring opened with
+"Alpaca scanner — replaces the IB ScannerSubscription." — a historical migration note
+leftover from the IB-to-Alpaca rewrite. This is the last remaining IB reference outside
+of test docstrings.
+Fix: updated to "Alpaca candidate scanner."
+
 ## Survivorship Bias Warning (Backtest)
 The backtest universe is current NASDAQ/NYSE listings. Bankrupt/delisted tickers from the
 backtest window are absent. Momentum/breakout strategies are particularly sensitive to this

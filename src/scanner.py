@@ -1,5 +1,5 @@
 """
-Alpaca scanner — replaces the IB ScannerSubscription.
+Alpaca candidate scanner.
 
 Combines two Alpaca screener endpoints into one candidate pool:
   1. get_top_gainers  — stocks with the largest intraday % price gain.
