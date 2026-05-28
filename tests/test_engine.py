@@ -1145,17 +1145,25 @@ class TestPortfolioConcentration:
         conc, _, _ = engine._check_portfolio_concentration(10000.0)
         assert conc == 0.75
 
-    def test_concentration_halt_entries_at_85_percent(self):
+    def test_concentration_halt_entries_at_warn_threshold(self):
+        from src.config import CONCENTRATION_WARN_PCT, CONCENTRATION_HALT_PCT
+        # Place just above the warn threshold (but below halt threshold)
+        price, equity = 150.0, 10000.0
+        warn_qty = (CONCENTRATION_WARN_PCT * equity / price) + 1
+        assert warn_qty * price / equity < CONCENTRATION_HALT_PCT, "qty must be below halt"
         engine = _make_engine()
-        engine.state = {'AAPL': {'qty': 57.0, 'price': 150.0, 'current_price': 150.0}}
-        _, halt_entries, halt_all = engine._check_portfolio_concentration(10000.0)
+        engine.state = {'AAPL': {'qty': warn_qty, 'price': price, 'current_price': price}}
+        _, halt_entries, halt_all = engine._check_portfolio_concentration(equity)
         assert halt_entries is True
         assert halt_all is False
 
-    def test_concentration_halt_all_at_95_percent(self):
+    def test_concentration_halt_all_at_halt_threshold(self):
+        from src.config import CONCENTRATION_HALT_PCT
+        price, equity = 150.0, 10000.0
+        halt_qty = (CONCENTRATION_HALT_PCT * equity / price) + 1
         engine = _make_engine()
-        engine.state = {'AAPL': {'qty': 64.0, 'price': 150.0, 'current_price': 150.0}}
-        _, halt_entries, halt_all = engine._check_portfolio_concentration(10000.0)
+        engine.state = {'AAPL': {'qty': halt_qty, 'price': price, 'current_price': price}}
+        _, halt_entries, halt_all = engine._check_portfolio_concentration(equity)
         assert halt_all is True
         assert halt_entries is True
 

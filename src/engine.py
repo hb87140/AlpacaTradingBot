@@ -1421,8 +1421,8 @@ class VelocityEngine:
         concentration, halt_entries, halt_all = self._check_portfolio_concentration(equity)
         if halt_all:
             logger.error(
-                f"CONCENTRATION: {concentration*100:.0f}% deployed ≥ 95% — "
-                "halting all new orders."
+                f"CONCENTRATION: {concentration*100:.0f}% deployed "
+                f"≥ {CONCENTRATION_HALT_PCT*100:.0f}% — halting all new orders."
             )
             self.check_velocity_exits()
             self._update_position_prices()
@@ -1430,8 +1430,8 @@ class VelocityEngine:
             return
         if halt_entries:
             logger.warning(
-                f"CONCENTRATION: {concentration*100:.0f}% deployed ≥ 85% — "
-                "no new entries."
+                f"CONCENTRATION: {concentration*100:.0f}% deployed "
+                f"≥ {CONCENTRATION_WARN_PCT*100:.0f}% — no new entries."
             )
 
         # 4. VIX risk filter
