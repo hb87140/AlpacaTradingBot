@@ -162,11 +162,8 @@ def get_state():
         qty      = float(d.get("qty",         0))
         if qty <= 0:
             continue
-        raw_commission = d.get("commission")    # None for Alpaca (commission-free)
-        if raw_commission is not None and qty > 0:
-            unit_price = round(ep + float(raw_commission) / qty, 4)
-        elif d.get("fill_price"):
-            # Re-synced from Alpaca: avg_entry_price is already the all-in unit price.
+        if d.get("fill_price"):
+            # Alpaca is commission-free; avg_entry_price is the all-in unit price.
             unit_price = round(ep, 4)
         else:
             unit_price = None
@@ -747,7 +744,7 @@ function render(d) {
       <td>${(+p.qty).toFixed(4)}</td>
       <td>${$f(p.total_amount)}</td>
       <td class="${ucls}">${usign}${$f(unr)}<br><span style="font-size:10px;opacity:.8">${usign}${unrP.toFixed(2)}%</span></td>
-      <td class="sl">${$f(p.effective_stop ?? p.stop_loss)}${p.effective_stop > p.stop_loss ? ' ↑' : ''}</td>
+      <td class="sl">${$f(p.stop_loss)}${p.stop_loss >= p.entry_price ? ' ↑' : ''}</td>
       <td>${vol(p.volume)}</td>
       <td class="${warn?'hw':'hn'}">${p.hold_trading_days??0}d ${((+p.hold_hours)%24).toFixed(0)}h${warn?' ⚠':''}</td>
     </tr>`;

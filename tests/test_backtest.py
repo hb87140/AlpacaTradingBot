@@ -623,3 +623,34 @@ class TestDashboardEquityChartKey:
         assert 'hist.map(e => e.eq)' not in source, (
             "Stale e.eq key must be removed from dashboard JS"
         )
+
+
+class TestDashboardBreakEvenIndicator:
+    """Break-even ↑ indicator must fire when stop_loss ≥ entry_price."""
+
+    def test_break_even_indicator_uses_stop_vs_entry(self):
+        import os
+        path = os.path.join(os.path.dirname(__file__), '..', 'dashboard_server.py')
+        with open(path) as f:
+            source = f.read()
+        assert 'p.stop_loss >= p.entry_price' in source, (
+            "Break-even ↑ indicator must compare stop_loss >= entry_price"
+        )
+        assert 'p.effective_stop > p.stop_loss' not in source, (
+            "Stale effective_stop > stop_loss comparison must be removed — "
+            "they are always equal so the indicator never fired"
+        )
+
+    def test_dashboard_no_dead_commission_key(self):
+        """dashboard_server.py must not check for the 'commission' state key.
+
+        Alpaca is commission-free; the engine never writes 'commission' to state.
+        The raw_commission branch was always dead and has been removed.
+        """
+        import os
+        path = os.path.join(os.path.dirname(__file__), '..', 'dashboard_server.py')
+        with open(path) as f:
+            source = f.read()
+        assert 'raw_commission' not in source, (
+            "Dead raw_commission variable must be removed from dashboard_server.py"
+        )

@@ -8,7 +8,7 @@ Optimized for **small cash accounts** with T+1 settlement. Not a margin/futures 
 
 - **Python**: venv at `venv/` uses Python 3.13 (symlinked to current snap release). Run via `venv/bin/python`.
 - **Broker**: Alpaca (`alpaca-trade-api` / `alpaca-py`). Do NOT use IB/ib_async imports.
-- **Run tests**: `venv/bin/python -m pytest tests/ -q`  *(363+ tests — all must pass)*
+- **Run tests**: `venv/bin/python -m pytest tests/ -q`  *(365+ tests — all must pass)*
 - **Start engine**: `venv/bin/python AutoTrader.py`
 - **Run backtest**: `venv/bin/python run_backtest.py`
 
@@ -22,7 +22,7 @@ src/scanner.py         ← Alpaca screener (top-gainers + most-actives candidate
 backtest/strategy.py   ← offline backtester (yfinance data)
 dashboard_server.py    ← web dashboard for monitoring
 run_backtest.py        ← CLI entry point for backtesting
-tests/                 ← pytest test suite (363+ tests)
+tests/                 ← pytest test suite (365+ tests)
 ```
 
 ## Critical Design Decisions (Do NOT "Fix" These)
@@ -549,6 +549,33 @@ fill prices when a position was loaded from persisted state after a restart.
 Fix: changed to `ep = float(d.get('fill_price') or d.get('price', 0))`.
 Tests: `TestLogStartupSummaryUsesFillPrice.test_uses_fill_price_when_present`,
 `test_falls_back_to_price_when_no_fill_price`
+
+## Fixed Bugs (Session 20 — May 2026)
+
+### 71. Dashboard Break-Even `↑` Indicator Never Fired
+
+JS table column (dashboard_server.py line ~750) used `p.effective_stop > p.stop_loss`
+to decide whether to append the `↑` break-even indicator. `effective_stop` and
+`stop_loss` are always set to the same value in the API response (the engine writes the
+break-even-floored chandelier stop directly into `stop_loss` via `_update_position_prices`;
+no separate `effective_stop` key exists). The comparison was always false — the `↑` never
+appeared regardless of break-even status.
+Fix: changed to `p.stop_loss >= p.entry_price`, which correctly fires when the break-even
+floor is active (stop has been raised to at or above entry).
+Also: removed the dead `?? p.stop_loss` fallback from the same expression since
+`effective_stop` was passed through directly as `stop_loss` anyway.
+Tests: `TestDashboardBreakEvenIndicator.test_break_even_indicator_uses_stop_vs_entry`
+
+### 72. Dead `raw_commission` Code Path in `dashboard_server.py`
+
+`get_state()` computed `raw_commission = d.get("commission")` then checked
+`if raw_commission is not None` to add commission to `unit_price`. Alpaca is
+commission-free; the engine never writes a `commission` key to state. The
+`if raw_commission is not None` branch was always dead — `unit_price` was always
+computed from the `elif d.get("fill_price")` fallback.
+Fix: removed the dead `raw_commission` variable and the unreachable branch. The
+`unit_price` logic now directly checks `fill_price`, matching the actual data flow.
+Tests: `TestDashboardBreakEvenIndicator.test_dashboard_no_dead_commission_key`
 
 ## Survivorship Bias Warning (Backtest)
 The backtest universe is current NASDAQ/NYSE listings. Bankrupt/delisted tickers from the
