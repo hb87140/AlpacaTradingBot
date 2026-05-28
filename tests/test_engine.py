@@ -1882,3 +1882,99 @@ class TestStopAuditUnprotectedPositions:
             "Stop audit must fire even when _get_account_values() raises — "
             "Alpaca API outages must not leave open positions without stop protection"
         )
+
+
+# ── Bug 84: Audit must restore stop_dist when confirming an existing TRAIL ────
+class TestAuditRestoresStopDist:
+    """_audit_stop_orders must update stop_dist in state when it finds a valid
+    trailing stop for a re-synced position that has stop_dist=0.
+
+    Without this fix, after a crash restart _sync_positions adds the position
+    without stop_dist, the audit finds the TRAIL but ignores it, and:
+    - _has_unprotected fires every cycle (audit API calls burn rate-limit quota)
+    - _update_position_prices never updates stop_loss (skips when stop_dist=0)
+    - Dashboard shows stop_loss=0.0 permanently
+    - Break-even floor logic never activates
+    """
+
+    def _make_engine_with_trail_order(self, trail_dist=5.0, fill_price=100.0):
+        """Return engine + a position that was re-synced (no stop_dist) + a mock TRAIL order."""
+        engine = _make_engine()
+
+        # Position as it arrives from _sync_positions after a crash restart
+        engine.state['AAPL'] = {
+            'fill_price': fill_price,
+            'price':      fill_price,
+            'peak_price': fill_price,
+            'qty':        10.0,
+            'stop_loss':  0.0,
+            'stop_dist':  0.0,   # missing after re-sync
+            'time':       '2024-06-05T10:30:00',
+        }
+
+        # Mock a TRAIL SELL order already at Alpaca
+        trail_order = MagicMock()
+        trail_order.symbol      = 'AAPL'
+        trail_order.side        = 'sell'
+        trail_order.order_type  = 'trailing_stop'
+        trail_order.id          = 'trail-order-id'
+        trail_order.trail_price = str(trail_dist)
+
+        engine.trading_client.get_orders.return_value = [trail_order]
+        return engine
+
+    def test_audit_restores_stop_dist_from_existing_trail(self):
+        """When the audit finds an existing TRAIL for a re-synced position with
+        stop_dist=0, it must restore stop_dist and compute stop_loss correctly."""
+        engine = self._make_engine_with_trail_order(trail_dist=5.0, fill_price=100.0)
+
+        engine._audit_stop_orders()
+
+        assert engine.state['AAPL']['stop_dist'] == 5.0, (
+            "stop_dist must be restored from the confirmed TRAIL's trail_price"
+        )
+        assert engine.state['AAPL']['stop_loss'] == 95.0, (
+            "stop_loss must equal fill_price - trail_dist = 100.0 - 5.0 = 95.0"
+        )
+
+    def test_audit_does_not_overwrite_valid_stop_dist(self):
+        """When stop_dist is already set (normal entry path), the audit must not
+        overwrite it — only re-synced positions with stop_dist=0 need restoration."""
+        engine = _make_engine()
+        engine.state['AAPL'] = {
+            'fill_price': 100.0,
+            'price':      100.0,
+            'qty':        10.0,
+            'stop_loss':  92.0,
+            'stop_dist':  8.0,   # already set from original entry
+            'time':       '2024-06-05T10:30:00',
+        }
+
+        trail_order = MagicMock()
+        trail_order.symbol      = 'AAPL'
+        trail_order.side        = 'sell'
+        trail_order.order_type  = 'trailing_stop'
+        trail_order.id          = 'trail-order-id'
+        trail_order.trail_price = '6.0'   # different value — must NOT be applied
+
+        engine.trading_client.get_orders.return_value = [trail_order]
+        engine._audit_stop_orders()
+
+        assert engine.state['AAPL']['stop_dist'] == 8.0, (
+            "stop_dist must remain at the original entry value when already > 0"
+        )
+        assert engine.state['AAPL']['stop_loss'] == 92.0, (
+            "stop_loss must remain unchanged when stop_dist was already set"
+        )
+
+    def test_audit_restore_in_source(self):
+        """Regression guard: the restore logic must be present in engine source."""
+        import inspect
+        from src.engine import VelocityEngine
+        src = inspect.getsource(VelocityEngine._audit_stop_orders)
+        assert "stop_dist', 0)) <= 0" in src, (
+            "Audit must check 'stop_dist <= 0' before restoring from confirmed TRAIL"
+        )
+        assert "fill_price') or pos_data.get('price'" in src, (
+            "Audit must use fill_price (not just price) for stop_loss calculation"
+        )

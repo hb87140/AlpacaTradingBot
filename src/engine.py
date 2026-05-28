@@ -553,10 +553,25 @@ class VelocityEngine:
 
             if trail_orders:
                 kept = trail_orders[0]
-                logger.info(
-                    f"AUDIT: {sym} — trailing stop confirmed "
-                    f"(id={kept.id} trail_price=${kept.trail_price})"
-                )
+                # Restore stop_dist from the live order if state is missing it
+                # (happens after a crash restart where _sync_positions re-adds the
+                # position without stop_dist).  Without this, _has_unprotected fires
+                # every cycle and _update_position_prices skips the stop_loss update.
+                trail_dist = float(kept.trail_price or 0)
+                if trail_dist > 0 and float(pos_data.get('stop_dist', 0)) <= 0:
+                    entry_px = float(pos_data.get('fill_price') or pos_data.get('price', 0))
+                    self.state[sym]['stop_dist'] = trail_dist
+                    self.state[sym]['stop_loss'] = round(entry_px - trail_dist, 2)
+                    self.save_state()
+                    logger.info(
+                        f"AUDIT: {sym} — trailing stop confirmed; restored stop_dist "
+                        f"(id={kept.id} trail_price=${trail_dist:.2f})"
+                    )
+                else:
+                    logger.info(
+                        f"AUDIT: {sym} — trailing stop confirmed "
+                        f"(id={kept.id} trail_price=${kept.trail_price})"
+                    )
                 continue
 
             # No trailing stop found — fetch bars and place one
@@ -604,10 +619,9 @@ class VelocityEngine:
                 except Exception:
                     pass
 
+                entry_px = float(pos_data.get('fill_price') or pos_data.get('price', 0))
                 self.state[sym]['stop_dist'] = chandelier_dist
-                self.state[sym]['stop_loss'] = round(
-                    float(pos_data.get('price', 0)) - chandelier_dist, 2
-                )
+                self.state[sym]['stop_loss'] = round(entry_px - chandelier_dist, 2)
                 self.save_state()
                 logger.info(
                     f"AUDIT: {sym} — chandelier stop placed "

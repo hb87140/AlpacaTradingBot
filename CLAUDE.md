@@ -20,7 +20,7 @@ Never commit `.env` files, credentials, or generated artifacts (`backtest/optimi
 
 - **Python**: venv at `venv/` uses Python 3.13 (symlinked to current snap release). Run via `venv/bin/python`.
 - **Broker**: Alpaca (`alpaca-trade-api` / `alpaca-py`). Do NOT use IB/ib_async imports.
-- **Run tests**: `venv/bin/python -m pytest tests/ -q`  *(378+ tests — all must pass)*
+- **Run tests**: `venv/bin/python -m pytest tests/ -q`  *(381+ tests — all must pass)*
 - **Start engine**: `venv/bin/python AutoTrader.py`
 - **Run backtest**: `venv/bin/python run_backtest.py`
 
@@ -757,6 +757,35 @@ without changing the once-per-day behavior for fully-protected portfolios.
 Tests: `TestStopAuditUnprotectedPositions.test_audit_fires_when_position_has_zero_stop_dist`,
 `test_audit_does_not_fire_twice_when_protected`,
 `test_audit_skips_pending_positions_in_unprotected_check`
+
+## Fixed Bugs (Session 26 — May 2026)
+
+### 84. `_audit_stop_orders` Did Not Restore `stop_dist` When Confirming an Existing TRAIL
+
+After a crash restart, `_sync_positions` re-adds open positions from Alpaca without a
+`stop_dist` key. When `_audit_stop_orders` then ran and found a valid trailing-stop order
+for that position, it logged "confirmed" and skipped to the next symbol — without updating
+`stop_dist` in state. This caused three cascading failures:
+
+1. **`_has_unprotected` fired every cycle**: `stop_dist=0` is the sentinel for "unprotected",
+   so the audit was called on every single `run_cycle()` call — even though the TRAIL already
+   existed at Alpaca. Unnecessary API calls on every cycle.
+2. **Dashboard showed `stop_loss=0.0` permanently**: `_update_position_prices` skips the
+   stop_loss update when `stop_dist=0`. The dashboard position rows showed $0 stop for any
+   position that survived a restart.
+3. **Break-even floor never activated**: The break-even floor logic in `_update_position_prices`
+   (`if sd > 0: effective_stop = max(..., ep)`) also depends on `stop_dist > 0`. Re-synced
+   positions could retrace through entry with no software safety net.
+
+Fix: when the audit confirms an existing TRAIL for a position with `stop_dist <= 0`, it
+restores `stop_dist` from `kept.trail_price` and recomputes `stop_loss = fill_price - trail_dist`.
+When `stop_dist` is already set (normal entry path), the audit leaves it unchanged.
+Also fixed: new-stop placement path was using `pos_data.get('price', 0)` for stop_loss
+computation; changed to `pos_data.get('fill_price') or pos_data.get('price', 0)` to match
+the `fill_price`-first pattern used everywhere else in the codebase.
+Tests: `TestAuditRestoresStopDist.test_audit_restores_stop_dist_from_existing_trail`,
+`test_audit_does_not_overwrite_valid_stop_dist`,
+`test_audit_restore_in_source`
 
 ## Survivorship Bias Warning (Backtest)
 The backtest universe is current NASDAQ/NYSE listings. Bankrupt/delisted tickers from the
