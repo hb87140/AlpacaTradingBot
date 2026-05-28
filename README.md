@@ -1,2 +1,2 @@
-# IBKRVelocitySwingTrader
-Automated Swing Trading Through Interactive Broker
+# AlpacaTradingBot
+Automated Swing Trading Through Alpaca
