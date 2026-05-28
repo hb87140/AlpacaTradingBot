@@ -828,7 +828,7 @@ class VelocityEngine:
         if equity <= 0 or not self.state:
             return 0.0, False, False
         deployed = sum(
-            float(d.get('price', 0)) * float(d.get('qty', 0))
+            float(d.get('current_price', d.get('price', 0))) * float(d.get('qty', 0))
             for d in self.state.values()
         )
         pct = deployed / equity

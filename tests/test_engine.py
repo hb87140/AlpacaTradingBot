@@ -1194,6 +1194,32 @@ class TestPortfolioConcentration:
         assert halt_entries is False
         assert halt_all is False
 
+    def test_concentration_uses_current_price_not_entry_price(self):
+        """Winning position: current_price > entry price — deployed must use current."""
+        engine = _make_engine()
+        # Entry at $100, now trading at $200 (doubled) — 10 shares
+        engine.state = {'AAPL': {'qty': 10.0, 'price': 100.0, 'current_price': 200.0}}
+        conc, _, _ = engine._check_portfolio_concentration(10000.0)
+        # Deployed = 200 * 10 = 2000; pct = 0.20 (not 0.10 from entry price)
+        assert abs(conc - 0.20) < 0.001
+
+    def test_concentration_falls_back_to_price_when_no_current_price(self):
+        """When current_price is absent (pending fill), entry price is the fallback."""
+        engine = _make_engine()
+        engine.state = {'AAPL': {'qty': 10.0, 'price': 150.0}}
+        conc, _, _ = engine._check_portfolio_concentration(10000.0)
+        assert abs(conc - 0.15) < 0.001
+
+    def test_concentration_halt_triggered_by_appreciation(self):
+        """A position that doubled should trigger halt even if cost basis was below 95%."""
+        engine = _make_engine()
+        # Cost basis: 60 * 100 = $6000 = 60% (no halt at equity $10000)
+        # Current: 60 * 170 = $10200 = 102% → halt_all fires
+        engine.state = {'AAPL': {'qty': 60.0, 'price': 100.0, 'current_price': 170.0}}
+        _, halt_entries, halt_all = engine._check_portfolio_concentration(10000.0)
+        assert halt_entries is True
+        assert halt_all is True
+
 
 # ── Dashboard max_positions consistency ──────────────────────────────────────
 class TestDashboardMaxPositions:

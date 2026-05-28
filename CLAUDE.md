@@ -550,6 +550,39 @@ Fix: changed to `ep = float(d.get('fill_price') or d.get('price', 0))`.
 Tests: `TestLogStartupSummaryUsesFillPrice.test_uses_fill_price_when_present`,
 `test_falls_back_to_price_when_no_fill_price`
 
+## Fixed Bugs (Session 22 — May 2026)
+
+### 74. `_check_portfolio_concentration()` Used Entry Price Instead of Current Market Price
+
+`_check_portfolio_concentration()` computed the deployed capital value as:
+
+```python
+deployed = sum(
+    float(d.get('price', 0)) * float(d.get('qty', 0))
+    for d in self.state.values()
+)
+```
+
+`price` is the entry limit price set at order submission — it never updates. As positions
+appreciate, the engine severely underestimates true mark-to-market concentration. A position
+entered at $100 that has risen to $200 is counted at cost basis ($100 × qty), not at current
+value ($200 × qty) — a 2× undercount. The 85% warn and 95% halt thresholds trigger far too
+late, allowing the portfolio to be fully concentrated in winning positions without any warning.
+
+Fix: use `current_price` (updated each cycle by `_sync_positions`) with `price` as a fallback
+for pending-fill positions where `current_price` has not yet been populated:
+
+```python
+deployed = sum(
+    float(d.get('current_price', d.get('price', 0))) * float(d.get('qty', 0))
+    for d in self.state.values()
+)
+```
+
+Tests: `TestPortfolioConcentration.test_concentration_uses_current_price_not_entry_price`,
+`test_concentration_falls_back_to_price_when_no_current_price`,
+`test_concentration_halt_triggered_by_appreciation`
+
 ## Fixed Bugs (Session 21 — May 2026)
 
 ### 73. Dead Imports in `src/engine.py`
