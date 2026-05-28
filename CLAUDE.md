@@ -4,6 +4,18 @@
 Fully automated equity swing trading bot using the **Alpaca** brokerage API.
 Optimized for **small cash accounts** with T+1 settlement. Not a margin/futures system.
 
+## Workflow
+
+After **every set of code edits**, run the full test suite and commit to git:
+
+```bash
+venv/bin/python -m pytest tests/ -q   # all tests must pass
+git add -p                             # stage changed files selectively
+git commit -m "descriptive message"
+```
+
+Never commit `.env` files, credentials, or generated artifacts (`backtest/optimizer_results*.csv`).
+
 ## Environment
 
 - **Python**: venv at `venv/` uses Python 3.13 (symlinked to current snap release). Run via `venv/bin/python`.
