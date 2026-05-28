@@ -550,6 +550,21 @@ Fix: changed to `ep = float(d.get('fill_price') or d.get('price', 0))`.
 Tests: `TestLogStartupSummaryUsesFillPrice.test_uses_fill_price_when_present`,
 `test_falls_back_to_price_when_no_fill_price`
 
+## Fixed Bugs (Session 23 — May 2026)
+
+### 75. Dashboard "Last Updated" Always Blank — Key Mismatch `ts` vs `last_updated`
+
+`_write_dashboard_data()` wrote the current timestamp to dashboard_data.json under the
+key `'ts'`. `get_state()` in `dashboard_server.py` reads `dash_data.get("last_updated")`.
+Due to this key mismatch, `last_updated` was always `None` in the API response, and the
+"Last Updated" time shown in the dashboard JS (`if (d.last_updated) { ... }`) was always
+blank for the entire lifetime of the system.
+
+Fix: renamed `'ts': now_ny.isoformat()` → `'last_updated': now_ny.isoformat()` in the
+`data` dict in `_write_dashboard_data()`.
+
+Tests: `TestWriteDashboardDataNoDeadCommKey.test_writes_last_updated_not_ts`
+
 ## Fixed Bugs (Session 22 — May 2026)
 
 ### 74. `_check_portfolio_concentration()` Used Entry Price Instead of Current Market Price

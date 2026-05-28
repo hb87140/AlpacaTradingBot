@@ -1467,6 +1467,28 @@ class TestWriteDashboardDataNoDeadCommKey:
         assert pos['entry_price'] == 150.0
         assert pos['unit_price'] == 150.0
 
+    def test_writes_last_updated_not_ts(self, tmp_path, monkeypatch):
+        """dashboard_data.json must use 'last_updated', not 'ts', to match get_state() read."""
+        import json as _json
+        monkeypatch.setattr('src.engine.DASHBOARD_FILE', str(tmp_path / 'dashboard.json'))
+        monkeypatch.setattr('src.engine.EQUITY_HIST_FILE', str(tmp_path / 'equity.json'))
+
+        engine = _make_engine()
+        engine._last_equity        = 1000.0
+        engine._last_settled_cash  = 900.0
+        engine._last_vix           = 18.0
+        engine._last_scan_ts       = None
+        engine._next_scan_dt       = None
+        engine._equity_initialized = False
+        engine.state = {}
+
+        with patch('src.engine.ALPACA_PAPER', True):
+            engine._write_dashboard_data(connected=True)
+
+        data = _json.loads((tmp_path / 'dashboard.json').read_text())
+        assert 'last_updated' in data, "dashboard_data.json must have 'last_updated' key"
+        assert 'ts' not in data, "dashboard_data.json must not have stale 'ts' key"
+
 
 class TestLogStartupSummaryUsesFillPrice:
     """_log_startup_summary must prefer fill_price over price for entry cost logging."""

@@ -254,7 +254,7 @@ class VelocityEngine:
             'last_scan':    self._last_scan_ts,
             'next_scan':    self._next_scan_dt,
             'alpaca_paper': ALPACA_PAPER,
-            'ts':           now_ny.isoformat(),
+            'last_updated': now_ny.isoformat(),
         }
         try:
             tmp = DASHBOARD_FILE + '.tmp'
