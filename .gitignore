@@ -1,5 +1,6 @@
 # Secret credentials — never commit
 .env
+.envrc
 
 # Claude Code local settings
 .claude/
@@ -23,26 +24,94 @@ scripts/
 
 # Python
 __pycache__/
-*.py[cod]
+*.py[codz]
+*$py.class
 *.pyo
 *.pyd
+*.so
 .Python
 *.egg-info/
+*.egg
+MANIFEST
 dist/
 build/
+develop-eggs/
+downloads/
+eggs/
 .eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+.installed.cfg
 
 # Virtual environment
 venv/
 env/
 .venv/
+ENV/
+env.bak/
+venv.bak/
+.venv
+
+# Testing / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py.cover
+.hypothesis/
+.pytest_cache/
+cover/
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+.spyderproject
+.spyproject
+.ropeproject
+tempCodeRunnerFile.py
+.ruff_cache/
 
-# OS
+# Type checkers
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+cython_debug/
+
+# Packaging / tools
+pip-log.txt
+pip-delete-this-directory.txt
+.pdm-python
+.pdm-build/
+.pixi
+__pypackages__/
+.pypirc
+
+# Misc
 .DS_Store
 Thumbs.db
+*.manifest
+*.spec
+*.mo
+*.pot
+*.log
+*.sage.py
+*.rdb
+*.aof
+*.pid
+/site
+.abstra/
+.streamlit/secrets.toml
