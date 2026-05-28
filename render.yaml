@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: velocity-trading-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /health
+    # Render free tier: web service with auto-assigned PORT
+    envVars:
+      - key: ALPACA_API_KEY
+        sync: false          # set manually in Render dashboard
+      - key: ALPACA_SECRET_KEY
+        sync: false          # set manually in Render dashboard
+      - key: ALPACA_PAPER
+        value: "true"        # change to "false" for live trading
+      - key: ALPACA_DATA_FEED
+        value: "iex"         # free feed; use "sip" for full tape on paid plan

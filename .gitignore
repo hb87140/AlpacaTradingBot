@@ -1,0 +1,48 @@
+# Secret credentials — never commit
+.env
+
+# Claude Code local settings
+.claude/
+
+# Runtime-generated engine state and dashboard data
+engine_state.json
+dashboard_data.json
+equity_history.json
+
+# Runtime log output
+nohup.out
+dashboard.log
+dashboard.out
+logs/
+
+# Backtest cache (large pickle files)
+backtest/.cache/
+
+# IB Gateway installer binary (321 MB — not appropriate for git history)
+scripts/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

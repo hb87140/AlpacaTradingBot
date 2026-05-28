@@ -1,0 +1,1881 @@
+import json
+import logging
+import os
+import sys
+import time
+from datetime import datetime, timedelta
+from logging.handlers import TimedRotatingFileHandler
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+import pytz
+import yfinance as yf
+
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import (
+    GetOrdersRequest,
+    LimitOrderRequest,
+    MarketOrderRequest,
+    TrailingStopOrderRequest,
+)
+from alpaca.trading.enums import OrderSide, OrderType, QueryOrderStatus, TimeInForce
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.historical.screener import ScreenerClient
+from alpaca.data.requests import MostActivesRequest, StockBarsRequest, StockSnapshotRequest
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+
+from src.config import (
+    BASE_DIR, STATE_FILE, DASHBOARD_FILE, EQUITY_HIST_FILE, LOG_DIR, LOG_FILE,
+    ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_PAPER, ALPACA_DATA_FEED,
+    MAX_POSITIONS_CAP, MIN_BUCKET_SIZE, BUCKET_CASH_PCT,
+    VIX_THRESHOLD, HOLD_TRADING_BARS, PROFIT_MIN_THRESHOLD,
+    ENTRY_START, ENTRY_END, VOL_MULT_FRIDAY, PRE_ENTRY_SYNC_TIME,
+    RSI_PERIOD, ATR_PERIOD, MA_FAST, MA_SLOW, RSI_THRESHOLD,
+    DAILY_HISTORY_DAYS, ORB_BAR_MINUTES,
+    SCAN_MIN_DOLLAR_VOL,
+    SCAN_INTERVAL, ERROR_WAIT,
+    LOG_BACKUP_COUNT,
+    EQUITY_RETRY_INTERVAL,
+    EQUITY_HIST_INTERVAL,
+    TICKER_BLOCKLIST,
+    GAP_MAX_PCT,
+    MAX_DAILY_LOSS_PCT,
+    RSI_MIN_DELTA,
+    HARD_STOP_PCT,
+    BREAK_EVEN_PCT,
+    FRIDAY_CLOSE_HOUR,
+    FRIDAY_MIN_PROFIT_PCT,
+    MIN_CANDLES, RVOL_MIN, SPREAD_MAX_PCT,
+    CORR_MAX, CORR_LOOKBACK, MAX_SECTOR_COUNT, SMA200_SLOPE_LOOKBACK,
+    CHANDELIER_PERIOD, CHANDELIER_MULT,
+    LIMIT_BUF_MIN_PCT, LIMIT_BUF_MAX_PCT,
+    MIN_TREND_SEP,
+    RISK_PER_TRADE_PCT,
+    ADX_THRESHOLD, HIGH200_MIN_PCT,
+    SCAN_MIN_SCORE,
+    ALPACA_SCANNER_TOP,
+    SCAN_MIN_PRICE,
+)
+from src.indicators import apply_all
+from src.scanner import get_candidates
+
+os.makedirs(BASE_DIR, exist_ok=True)
+os.makedirs(LOG_DIR,  exist_ok=True)
+
+_TZ_NY = pytz.timezone('US/Eastern')
+_REAL_DT = datetime  # captured before any test can patch `datetime` in this module
+
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+class _EasternFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        dt = _REAL_DT.fromtimestamp(record.created, _TZ_NY)
+        return dt.strftime('%Y-%m-%d %H:%M:%S %Z')
+
+
+def _log_namer(default_name: str) -> str:
+    if '.log.' in default_name:
+        base, date_suffix = default_name.rsplit('.log.', 1)
+        return f"{base}_{date_suffix}.log"
+    return default_name
+
+
+logger = logging.getLogger('VelocityEngine')
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    _handler = TimedRotatingFileHandler(LOG_FILE, when='midnight', backupCount=LOG_BACKUP_COUNT)
+    _handler.namer = _log_namer
+    _handler.setFormatter(_EasternFormatter('%(asctime)s | %(levelname)s | %(message)s'))
+    _console = logging.StreamHandler(sys.stdout)
+    _console.setFormatter(_EasternFormatter('%(asctime)s | %(levelname)s | %(message)s'))
+    logger.addHandler(_handler)
+    logger.addHandler(_console)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def _tod_frac(elapsed_min: float) -> float:
+    """Cumulative fraction of daily volume expected by elapsed_min.
+
+    First 30 min = exactly 22% of daily volume; by session close (390 min) = 100%.
+    Piecewise-linear approximation fitted from NYSE/NASDAQ composite profiles (2018-2024).
+    """
+    if elapsed_min <= 30.0:
+        return max(0.01, elapsed_min / 30.0 * 0.22)
+    return 0.22 + (elapsed_min - 30.0) / 360.0 * 0.78
+
+
+def _count_trading_days(entry_dt: datetime, now: datetime) -> int:
+    """Count complete Mon-Fri trading sessions elapsed between entry_dt and now."""
+    entry_date = entry_dt.date()
+    now_date   = now.date()
+    count      = 0
+    cursor     = entry_date
+    while cursor < now_date:
+        if cursor.weekday() < 5:
+            count += 1
+        cursor += timedelta(days=1)
+    return count
+
+
+# ── Engine ────────────────────────────────────────────────────────────────────
+class VelocityEngine:
+    def __init__(self):
+        self.trading_client = TradingClient(
+            api_key=ALPACA_API_KEY,
+            secret_key=ALPACA_SECRET_KEY,
+            paper=ALPACA_PAPER,
+        )
+        self.data_client = StockHistoricalDataClient(
+            api_key=ALPACA_API_KEY,
+            secret_key=ALPACA_SECRET_KEY,
+        )
+        # ScreenerClient provides top-gainers (market movers) endpoint
+        self.screener_client = ScreenerClient(
+            api_key=ALPACA_API_KEY,
+            secret_key=ALPACA_SECRET_KEY,
+        )
+        self.state = self.load_state()
+
+        self._last_equity:       float           = 0.0
+        self._last_settled_cash: float           = 0.0
+        self._equity_initialized: bool           = False
+        self._last_vix:          Optional[float] = None
+        self._vix_cache_date:    Optional[str]   = None  # date VIX was last fetched
+        self._last_scan_ts:      Optional[str]   = None
+        self._next_scan_dt:      Optional[str]   = None
+
+        # Daily loss circuit breaker
+        self._day_start_equity: Optional[float] = None
+        self._day_start_date:   Optional[str]   = None
+
+        # Caches — all keyed by symbol
+        self._bar_cache:   Dict[str, dict] = {}   # daily + ORB bars, date-scoped
+        self._spy_cache:   dict            = {}   # SPY trend, date-scoped
+        self._sector_cache: Dict[str, str] = {}   # stable, never invalidated
+
+        # Per-day skip lists to avoid re-running expensive lookups each cycle
+        self._daily_scan_skip:          Dict[str, str] = {}
+        self._insufficient_history_skip: set           = set()
+
+        # Tracks consecutive Alpaca snapshot misses before removing state
+        self._missing_position_counts: Dict[str, int] = {}
+
+        # Date of last stop-order audit so we only run it once per day
+        self._last_audit_date: Optional[str] = None
+
+    # ── Connectivity ──────────────────────────────────────────────────────────
+    def connect(self):
+        """Validate Alpaca credentials and log account mode."""
+        try:
+            account = self.trading_client.get_account()
+            logger.info(
+                f"ENGINE CONNECTED: Alpaca paper={ALPACA_PAPER} | "
+                f"account={account.id} status={account.status} | "
+                f"portfolio=${float(account.portfolio_value):.2f}"
+            )
+            self._write_dashboard_data(connected=True)
+        except Exception as e:
+            logger.critical(f"CONNECTION FAILED: {e}")
+            sys.exit(1)
+
+    def _ensure_connected(self) -> bool:
+        """Alpaca REST is stateless — just ping the account endpoint."""
+        try:
+            self.trading_client.get_account()
+            return True
+        except Exception as e:
+            logger.warning(f"ENGINE: connectivity check failed: {e}")
+            return False
+
+    # ── State persistence ─────────────────────────────────────────────────────
+    def load_state(self) -> dict:
+        if not os.path.exists(STATE_FILE):
+            return {}
+        try:
+            with open(STATE_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"STATE: load failed ({e}), starting empty")
+            return {}
+
+    def _restore_blocked_today(self) -> None:
+        """Reload permanent per-day filter failures from persisted state."""
+        today_str = datetime.now(_TZ_NY).strftime('%Y-%m-%d')
+        for sym, data in self.state.items():
+            skip_reason = data.get('_daily_skip_reason', '')
+            skip_date   = data.get('_daily_skip_date', '')
+            if skip_reason and skip_date == today_str:
+                self._daily_scan_skip[sym] = skip_reason
+
+    def save_state(self):
+        try:
+            tmp = STATE_FILE + '.tmp'
+            with open(tmp, 'w') as f:
+                json.dump(self.state, f, indent=2)
+            os.replace(tmp, STATE_FILE)
+        except Exception as e:
+            logger.error(f"STATE: save failed: {e}")
+
+    # ── Dashboard ─────────────────────────────────────────────────────────────
+    def _write_dashboard_data(self, connected: bool = True):
+        now_ny = datetime.now(_TZ_NY)
+        positions = []
+        for sym, d in self.state.items():
+            ep      = float(d.get('fill_price') or d.get('price', 0))
+            qty     = float(d.get('qty', 0))
+            cur     = float(d.get('current_price', ep))
+            stop    = float(d.get('stop_loss', 0))
+            sd      = float(d.get('stop_dist', 0))
+            peak    = float(d.get('peak_price', ep))
+            eff_stop = max(stop, ep) if peak >= ep * (1 + BREAK_EVEN_PCT) else stop
+            comm    = d.get('commission', None)
+            unit_price = ep if ep else None
+            positions.append({
+                'symbol':        sym,
+                'entry_price':   ep,
+                'unit_price':    unit_price,
+                'current_price': cur,
+                'qty':           qty,
+                'stop_loss':     eff_stop,
+                'stop_dist':     sd,
+                'unrealized_pnl':     d.get('unrealized_pnl', 0),
+                'unrealized_pnl_pct': d.get('unrealized_pnl_pct', 0),
+                'score':         d.get('score'),
+                'entry_time':    d.get('time', ''),
+                'pending':       d.get('pending', False),
+                'pending_exit':  d.get('pending_exit', False),
+            })
+        data = {
+            'connected':    connected,
+            'equity':       self._last_equity,
+            'settled_cash': self._last_settled_cash,
+            'vix':          self._last_vix,
+            'positions':    positions,
+            'last_scan':    self._last_scan_ts,
+            'next_scan':    self._next_scan_dt,
+            'alpaca_paper': ALPACA_PAPER,
+            'ts':           now_ny.isoformat(),
+        }
+        try:
+            tmp = DASHBOARD_FILE + '.tmp'
+            with open(tmp, 'w') as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, DASHBOARD_FILE)
+        except Exception as e:
+            logger.warning(f"DASHBOARD: write failed: {e}")
+
+        # Equity history — sampled at EQUITY_HIST_INTERVAL to keep file small
+        if self._equity_initialized and self._last_equity > 0:
+            try:
+                hist = []
+                if os.path.exists(EQUITY_HIST_FILE):
+                    with open(EQUITY_HIST_FILE, 'r') as f:
+                        hist = json.load(f)
+                entry = {'ts': now_ny.isoformat(), 'equity': round(self._last_equity, 2)}
+                if not hist or (
+                    now_ny - datetime.fromisoformat(hist[-1]['ts'])
+                ).total_seconds() >= EQUITY_HIST_INTERVAL:
+                    hist.append(entry)
+                    tmp = EQUITY_HIST_FILE + '.tmp'
+                    with open(tmp, 'w') as f:
+                        json.dump(hist, f)
+                    os.replace(tmp, EQUITY_HIST_FILE)
+            except Exception:
+                pass
+
+    # ── Account values ────────────────────────────────────────────────────────
+    def _get_account_values(self) -> Tuple[float, float]:
+        """Return (portfolio_value, settled_cash) with retries and last-known fallback."""
+        _MAX_ATTEMPTS = 3
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                account = self.trading_client.get_account()
+                equity  = float(account.portfolio_value)
+                # Alpaca cash account: 'cash' is settled cash available for new purchases.
+                # non_marginable_buying_power is safer for cash accounts but 'cash'
+                # is the correct T+1 settled value.
+                cash = float(account.cash)
+                if equity > 0:
+                    if cash <= 0:
+                        logger.warning(
+                            f"ACCOUNT: cash=${cash:.2f} ≤ 0 — "
+                            "no settled cash for new entries (T+1 settlement)."
+                        )
+                    return equity, max(cash, 0.0)
+                logger.warning(
+                    f"ACCOUNT: attempt {attempt}/{_MAX_ATTEMPTS} — "
+                    f"portfolio_value={equity:.2f} ≤ 0"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"ACCOUNT: attempt {attempt}/{_MAX_ATTEMPTS} failed: {e}"
+                )
+            if attempt < _MAX_ATTEMPTS:
+                time.sleep(2)
+
+        if self._last_equity > 0:
+            logger.warning(
+                f"ACCOUNT: all attempts failed — using last known "
+                f"equity=${self._last_equity:.2f}, settled=${self._last_settled_cash:.2f}"
+            )
+            return self._last_equity, self._last_settled_cash
+
+        logger.critical("ACCOUNT: all attempts failed at startup with no fallback. Exiting.")
+        self.shutdown()
+        sys.exit(1)
+
+    def _fetch_equity_with_retry(self) -> float:
+        """Poll until Alpaca returns a positive portfolio value. Never gives up."""
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                account = self.trading_client.get_account()
+                val = float(account.portfolio_value)
+                if val > 0:
+                    logger.info(f"INIT: portfolio_value=${val:.2f} (attempt {attempt})")
+                    return val
+                logger.warning(
+                    f"INIT: attempt {attempt}: portfolio_value={val:.2f} ≤ 0, "
+                    f"retrying in {EQUITY_RETRY_INTERVAL}s..."
+                )
+            except Exception as e:
+                logger.warning(
+                    f"INIT: attempt {attempt} failed: {e}, "
+                    f"retrying in {EQUITY_RETRY_INTERVAL}s..."
+                )
+            time.sleep(EQUITY_RETRY_INTERVAL)
+
+    # ── Startup ───────────────────────────────────────────────────────────────
+    def _log_startup_summary(self, equity: float):
+        if not self.state:
+            logger.info("INIT: No open positions. Full capital available.")
+            logger.info(
+                f"INIT READY | Equity=${equity:.2f} | "
+                f"Positions=0/{self._calc_max_positions(equity)}"
+            )
+            return
+        total_cost = 0.0
+        logger.info("INIT: ── Open Positions ──────────────────────────────────")
+        for sym, d in self.state.items():
+            ep   = float(d.get('price', 0))
+            qty  = float(d.get('qty', 0))
+            cur  = float(d.get('current_price', ep))
+            sl   = float(d.get('stop_loss', 0))
+            unr  = float(d.get('unrealized_pnl', (cur - ep) * qty))
+            unr_pct = float(d.get('unrealized_pnl_pct', (cur - ep) / ep * 100 if ep else 0))
+            cost = ep * qty
+            total_cost += cost
+            logger.info(
+                f"INIT:  {sym:6s} | entry=${ep:.2f} cur=${cur:.2f} qty={qty:.4g} "
+                f"cost=${cost:.2f} | unreal={unr:+.2f} ({unr_pct:+.1f}%) | SL=${sl:.2f}"
+            )
+        logger.info(
+            f"INIT: Equity=${equity:.2f} | Deployed≈${total_cost:.2f} | "
+            f"Positions={len(self.state)}/{self._calc_max_positions(equity)}"
+        )
+
+    def _initialize(self):
+        """
+        Phase 1 (immediate): fetch equity, sync positions, cancel orphaned buy orders.
+        Phase 2 (timed):     sleep until PRE_ENTRY_SYNC_TIME, then re-sync + audit stops.
+        """
+        logger.info(
+            "MARKET DATA: Alpaca paper trading. "
+            f"Data feed={ALPACA_DATA_FEED.upper()}. "
+            "Real-time bid/ask spread filtering is active."
+        )
+        logger.info("INIT: Fetching account equity from Alpaca...")
+        equity = self._fetch_equity_with_retry()
+        self._last_equity       = equity
+        self._last_settled_cash = equity
+        self._equity_initialized = True
+
+        logger.info("INIT: Phase 1 — syncing positions...")
+        self._sync_positions()
+        self._restore_blocked_today()
+
+        # Cancel orphaned open BUY orders from the previous engine session
+        try:
+            open_orders = self.trading_client.get_orders(
+                GetOrdersRequest(status=QueryOrderStatus.OPEN)
+            )
+            orphaned_buys = [
+                o for o in open_orders
+                if str(o.side) in ('OrderSide.BUY', 'buy')
+                and o.symbol not in self.state
+            ]
+            if orphaned_buys:
+                logger.info(
+                    f"INIT: Cancelling {len(orphaned_buys)} orphaned BUY orders "
+                    f"from previous session."
+                )
+                for o in orphaned_buys:
+                    try:
+                        self.trading_client.cancel_order_by_id(o.id)
+                    except Exception:
+                        pass
+                time.sleep(1)
+        except Exception as e:
+            logger.warning(f"INIT: orphan cleanup failed: {e}")
+
+        if self.state:
+            self._update_position_prices()
+        self._write_dashboard_data(connected=True)
+
+        # ── Phase 2 ──────────────────────────────────────────────────────────
+        self._wait_for_pre_entry_sync()
+
+        logger.info("INIT: Phase 2 — pre-entry re-sync and stop-order audit...")
+        self._sync_positions()
+        if self.state:
+            logger.info("INIT: Auditing stop orders for open positions...")
+            self._audit_stop_orders()
+            self._last_audit_date = datetime.now(_TZ_NY).strftime('%Y-%m-%d')
+            logger.info("INIT: Fetching live prices for open positions...")
+            self._update_position_prices()
+
+        self._log_startup_summary(equity)
+        self._write_dashboard_data(connected=True)
+
+    def _wait_for_pre_entry_sync(self):
+        """Sleep until PRE_ENTRY_SYNC_TIME (09:58 ET) with 5-min heartbeat steps."""
+        h, m   = PRE_ENTRY_SYNC_TIME
+        now_ny = datetime.now(_TZ_NY)
+        target = now_ny.replace(hour=h, minute=m, second=0, microsecond=0)
+
+        if now_ny >= target:
+            logger.info(
+                f"INIT: Already at or past {h:02d}:{m:02d} ET — "
+                "running pre-entry sync immediately."
+            )
+            return
+
+        wait_s = (target - now_ny).total_seconds()
+        logger.info(
+            f"INIT: Waiting {wait_s/60:.1f} min until {h:02d}:{m:02d} ET "
+            f"for pre-entry sync (entry window opens at "
+            f"{ENTRY_START[0]:02d}:{ENTRY_START[1]:02d} ET)."
+        )
+        _HEARTBEAT = 300
+        elapsed = 0.0
+        while elapsed < wait_s:
+            step = min(_HEARTBEAT, wait_s - elapsed)
+            time.sleep(step)
+            elapsed += step
+            if elapsed < wait_s:
+                self._sync_positions()
+                if self.state:
+                    self._update_position_prices()
+                self._write_dashboard_data(connected=True)
+                logger.info(
+                    f"INIT: {(wait_s - elapsed)/60:.1f} min remaining until "
+                    f"{h:02d}:{m:02d} ET sync."
+                )
+
+    # ── Stop-order audit ──────────────────────────────────────────────────────
+    def _audit_stop_orders(self):
+        """Ensure every open position has exactly one chandelier trailing-stop SELL."""
+        if not self.state:
+            return
+
+        now_ny    = datetime.now(_TZ_NY)
+        in_market = (
+            now_ny.weekday() < 5
+            and (9, 30) <= (now_ny.hour, now_ny.minute) < (16, 0)
+        )
+        if not in_market:
+            logger.info(
+                "AUDIT: market is currently closed — trailing stops will be GTC "
+                "and activate at the next RTH open."
+            )
+
+        try:
+            open_orders = self.trading_client.get_orders(
+                GetOrdersRequest(status=QueryOrderStatus.OPEN)
+            )
+        except Exception as e:
+            logger.warning(f"AUDIT: failed to fetch open orders: {e}")
+            return
+
+        # Index SELL orders by symbol
+        sell_by_sym: Dict[str, list] = {}
+        for o in open_orders:
+            if str(o.side) in ('OrderSide.SELL', 'sell'):
+                sell_by_sym.setdefault(o.symbol, []).append(o)
+
+        for sym, pos_data in list(self.state.items()):
+            if pos_data.get('pending') or pos_data.get('pending_exit'):
+                continue
+
+            qty = float(pos_data.get('qty', 0))
+            if qty <= 0:
+                logger.warning(f"AUDIT: {sym} — qty={qty}, cannot place stop")
+                continue
+
+            sell_orders  = sell_by_sym.get(sym, [])
+            trail_orders = [
+                o for o in sell_orders
+                if str(o.order_type) in ('OrderType.TRAILING_STOP', 'trailing_stop')
+            ]
+            non_trail = [
+                o for o in sell_orders
+                if str(o.order_type) not in ('OrderType.TRAILING_STOP', 'trailing_stop')
+            ]
+
+            for o in non_trail:
+                logger.info(
+                    f"AUDIT: {sym} — cancelling non-trailing-stop SELL "
+                    f"(type={o.order_type} id={o.id})"
+                )
+                try:
+                    self.trading_client.cancel_order_by_id(o.id)
+                except Exception as e:
+                    logger.warning(f"AUDIT: {sym} — cancel failed: {e}")
+            if non_trail:
+                time.sleep(1)
+
+            if len(trail_orders) > 1:
+                trail_orders.sort(key=lambda o: o.created_at)
+                for dup in trail_orders[:-1]:
+                    logger.warning(
+                        f"AUDIT: {sym} — duplicate trailing stop (id={dup.id}); cancelling"
+                    )
+                    try:
+                        self.trading_client.cancel_order_by_id(dup.id)
+                    except Exception as e:
+                        logger.warning(f"AUDIT: {sym} — dup cancel failed: {e}")
+                trail_orders = [trail_orders[-1]]
+                time.sleep(1)
+
+            if trail_orders:
+                kept = trail_orders[0]
+                logger.info(
+                    f"AUDIT: {sym} — trailing stop confirmed "
+                    f"(id={kept.id} trail_price=${kept.trail_price})"
+                )
+                continue
+
+            # No trailing stop found — fetch bars and place one
+            logger.info(f"AUDIT: {sym} — no trailing stop found; placing chandelier stop...")
+            try:
+                df = self._fetch_daily_bars(sym)
+                if df is None or len(df) < CHANDELIER_PERIOD:
+                    logger.error(
+                        f"AUDIT: {sym} — insufficient history; position UNPROTECTED."
+                    )
+                    continue
+
+                df_ind = apply_all(df, RSI_PERIOD, ATR_PERIOD, MA_FAST, MA_SLOW,
+                                   SMA200_SLOPE_LOOKBACK, CHANDELIER_PERIOD)
+                atr_chandelier = float(df_ind['ATR_CHAND'].iloc[-1])
+                if np.isnan(atr_chandelier) or atr_chandelier <= 0:
+                    logger.error(
+                        f"AUDIT: {sym} — ATR_CHAND invalid; position UNPROTECTED."
+                    )
+                    continue
+
+                chandelier_dist = round(atr_chandelier * CHANDELIER_MULT, 2)
+                stop_req = TrailingStopOrderRequest(
+                    symbol=sym,
+                    qty=qty,
+                    side=OrderSide.SELL,
+                    time_in_force=TimeInForce.GTC,
+                    trail_price=chandelier_dist,
+                )
+                stop_order = self.trading_client.submit_order(stop_req)
+                time.sleep(2)
+
+                # Refresh to confirm it was accepted
+                try:
+                    confirmed = self.trading_client.get_order_by_id(stop_order.id)
+                    status = str(confirmed.status)
+                    if status in ('OrderStatus.CANCELED', 'canceled',
+                                  'OrderStatus.REJECTED', 'rejected',
+                                  'OrderStatus.EXPIRED', 'expired'):
+                        logger.error(
+                            f"AUDIT: {sym} — trailing stop rejected "
+                            f"(status={status}); position UNPROTECTED."
+                        )
+                        continue
+                except Exception:
+                    pass
+
+                self.state[sym]['stop_dist'] = chandelier_dist
+                self.state[sym]['stop_loss'] = round(
+                    float(pos_data.get('price', 0)) - chandelier_dist, 2
+                )
+                self.save_state()
+                logger.info(
+                    f"AUDIT: {sym} — chandelier stop placed "
+                    f"(trail_price=${chandelier_dist:.2f} id={stop_order.id})"
+                )
+            except Exception as e:
+                logger.error(
+                    f"AUDIT: {sym} — stop placement failed: {e}; position UNPROTECTED."
+                )
+
+    # ── Market data helpers ───────────────────────────────────────────────────
+    def _fetch_daily_bars(self, symbol: str) -> Optional[pd.DataFrame]:
+        """Fetch ~400 calendar days of daily OHLCV bars from Alpaca and return as DataFrame."""
+        start = datetime.now(_TZ_NY) - timedelta(days=DAILY_HISTORY_DAYS)
+        try:
+            req  = StockBarsRequest(
+                symbol_or_symbols=symbol,
+                timeframe=TimeFrame.Day,
+                start=start,
+                feed=ALPACA_DATA_FEED,
+            )
+            bars = self.data_client.get_stock_bars(req)
+            df   = bars[symbol].df.reset_index(drop=True)
+            # Normalise column names to lowercase so apply_all() works
+            df.columns = [c.lower() for c in df.columns]
+            return df[['open', 'high', 'low', 'close', 'volume']]
+        except Exception as e:
+            logger.warning(f"DATA: daily bars fetch failed for {symbol}: {e}")
+            return None
+
+    def _fetch_orb_high(self, symbol: str) -> Optional[float]:
+        """Return the high of today's 9:30–9:45 AM ET bar (Opening Range High)."""
+        now_ny = datetime.now(_TZ_NY)
+        today  = now_ny.date()
+        start  = _TZ_NY.localize(
+            datetime(today.year, today.month, today.day, 9, 30)
+        )
+        # Request up to 9:46 to ensure the 9:30 bar is fully closed
+        end = _TZ_NY.localize(
+            datetime(today.year, today.month, today.day, 9, 46)
+        )
+        try:
+            req  = StockBarsRequest(
+                symbol_or_symbols=symbol,
+                timeframe=TimeFrame(ORB_BAR_MINUTES, TimeFrameUnit.Minute),
+                start=start,
+                end=end,
+                feed=ALPACA_DATA_FEED,
+            )
+            bars = self.data_client.get_stock_bars(req)
+            df   = bars[symbol].df
+            if df.empty:
+                return None
+            return float(df['high'].iloc[-1])
+        except Exception as e:
+            logger.debug(f"DATA: ORB fetch failed for {symbol}: {e}")
+            return None
+
+    def _fetch_snapshot(self, symbol: str) -> Optional[dict]:
+        """Fetch latest quote + daily bar snapshot for live price, spread, and RVOL."""
+        try:
+            req  = StockSnapshotRequest(
+                symbol_or_symbols=[symbol],
+                feed=ALPACA_DATA_FEED,
+            )
+            snaps = self.data_client.get_stock_snapshot(req)
+            snap  = snaps.get(symbol)
+            if snap is None:
+                return None
+
+            # Live price
+            live_price: float = 0.0
+            if snap.latest_trade and snap.latest_trade.price:
+                live_price = float(snap.latest_trade.price)
+            elif snap.minute_bar and snap.minute_bar.close:
+                live_price = float(snap.minute_bar.close)
+
+            # Bid / ask
+            bid = ask = 0.0
+            if snap.latest_quote:
+                bid = float(snap.latest_quote.bid_price or 0)
+                ask = float(snap.latest_quote.ask_price or 0)
+
+            # Today's accumulated volume (from the rolling daily bar)
+            intraday_vol = 0.0
+            if snap.daily_bar:
+                intraday_vol = float(snap.daily_bar.volume or 0)
+
+            return {
+                'live_price':   live_price,
+                'bid':          bid,
+                'ask':          ask,
+                'intraday_vol': intraday_vol,
+            }
+        except Exception as e:
+            logger.debug(f"DATA: snapshot fetch failed for {symbol}: {e}")
+            return None
+
+    def _fetch_vix(self) -> Optional[float]:
+        """Return the latest VIX close via yfinance, cached for the current trading day.
+
+        Caching strategy:
+        - Re-fetches only once per calendar day (yfinance returns end-of-day close).
+        - On network failure, returns the last successfully fetched value so a transient
+          yfinance outage does not lock out new entries for the entire session.
+        - Returns None only when no value has ever been successfully fetched (first-run
+          failure at startup).  Callers must treat None as "filter unavailable, warn but
+          do not halt entries."
+        """
+        today_str = datetime.now(_TZ_NY).strftime('%Y-%m-%d')
+        if self._last_vix is not None and self._vix_cache_date == today_str:
+            return self._last_vix
+
+        try:
+            hist = yf.Ticker("^VIX").history(period="5d")
+            if not hist.empty:
+                val = float(hist['Close'].iloc[-1])
+                self._last_vix       = val
+                self._vix_cache_date = today_str
+                return val
+        except Exception as e:
+            logger.debug(f"VIX: fetch failed: {e}")
+
+        # Return stale cached value rather than blocking entries on network hiccup
+        if self._last_vix is not None:
+            logger.warning(
+                f"VIX: fetch failed — using last known value {self._last_vix:.1f} "
+                f"(cached {self._vix_cache_date})"
+            )
+            return self._last_vix
+
+        return None
+
+    # ── SPY regime ────────────────────────────────────────────────────────────
+    def _fetch_spy_trend(self) -> bool:
+        """Return True when SPY close > SMA50 > SMA200 AND SMA200 slope is rising (bull regime).
+
+        The slope check blocks recovery rallies where price has crossed above a still-falling
+        SMA200 — the highest-false-breakout window.  Matches the backtest SPY regime filter.
+        """
+        today_str = datetime.now(_TZ_NY).strftime('%Y-%m-%d')
+        cached = self._spy_cache
+        if cached.get('date') == today_str and 'trend' in cached:
+            return cached['trend']
+
+        df = self._fetch_daily_bars('SPY')
+        if df is None or len(df) < 200 + SMA200_SLOPE_LOOKBACK:
+            logger.warning("SPY: insufficient history for regime check; assuming bull")
+            return True
+
+        from src.indicators import compute_ma
+        ma50_series  = compute_ma(df['close'], 50)
+        ma200_series = compute_ma(df['close'], 200)
+        ma50         = ma50_series.iloc[-1]
+        ma200        = ma200_series.iloc[-1]
+        last         = df['close'].iloc[-1]
+        sma200_slope = float(ma200_series.iloc[-1] - ma200_series.iloc[-(SMA200_SLOPE_LOOKBACK + 1)])
+        trend = bool(last > ma50 > ma200 and sma200_slope > 0)
+        self._spy_cache = {'date': today_str, 'trend': trend}
+        return trend
+
+    # ── Sector lookup ─────────────────────────────────────────────────────────
+    def _get_sector(self, symbol: str) -> str:
+        """Return GICS sector for a symbol via yfinance, cached permanently.
+
+        Alpaca's asset API only returns asset_class ('us_equity' for all equities),
+        which gives zero diversification signal.  yfinance info['sector'] returns
+        the actual GICS sector (Technology, Healthcare, Financials, …), making
+        MAX_SECTOR_COUNT enforcement meaningful.
+        """
+        if symbol in self._sector_cache:
+            return self._sector_cache[symbol]
+        try:
+            info   = yf.Ticker(symbol).info
+            sector = info.get('sector') or 'Unknown'
+        except Exception:
+            sector = 'Unknown'
+        self._sector_cache[symbol] = sector
+        return sector
+
+    # ── Correlation check ─────────────────────────────────────────────────────
+    def _compute_book_correlation(self, sym: str, df_daily: pd.DataFrame) -> float:
+        """Maximum pairwise return correlation between sym and any open position."""
+        if not self.state:
+            return 0.0
+        lookback = CORR_LOOKBACK
+        ret_sym  = df_daily['close'].pct_change().tail(lookback)
+        max_corr = 0.0
+        for book_sym in self.state:
+            if book_sym == sym:
+                continue
+            cached = self._bar_cache.get(book_sym, {})
+            df_b   = cached.get('bars_daily')
+            if df_b is None:
+                continue
+            ret_b = df_b['close'].pct_change().tail(lookback)
+            try:
+                n = min(len(ret_sym), len(ret_b))
+                if n < 20:
+                    continue
+                corr = float(np.corrcoef(ret_sym.iloc[-n:], ret_b.iloc[-n:])[0, 1])
+                if np.isfinite(corr):
+                    max_corr = max(max_corr, abs(corr))
+            except Exception:
+                pass
+        return max_corr
+
+    # ── Position sizing helpers ───────────────────────────────────────────────
+    def _calc_max_positions(self, equity: float) -> int:
+        if equity < MIN_BUCKET_SIZE:
+            return 0
+        return min(int(equity / MIN_BUCKET_SIZE), MAX_POSITIONS_CAP)
+
+    @staticmethod
+    def _calc_cash_entry_slots(settled: float) -> int:
+        return max(0, int(settled / MIN_BUCKET_SIZE))
+
+    def _check_portfolio_concentration(
+        self, equity: float
+    ) -> Tuple[float, bool, bool]:
+        """Return (deployed_pct, warn, halt).  Warn ≥85%, halt ≥95%."""
+        if equity <= 0 or not self.state:
+            return 0.0, False, False
+        deployed = sum(
+            float(d.get('price', 0)) * float(d.get('qty', 0))
+            for d in self.state.values()
+        )
+        pct = deployed / equity
+        return pct, pct >= 0.85, pct >= 0.95
+
+    # ── Position sync ─────────────────────────────────────────────────────────
+    def _sync_positions(self):
+        """Reconcile self.state against actual Alpaca positions every cycle."""
+        try:
+            alpaca_pos = {p.symbol: p for p in self.trading_client.get_all_positions()}
+        except Exception as e:
+            logger.warning(f"SYNC: position fetch failed: {e}")
+            return
+
+        missing_counts = self._missing_position_counts
+        changed = False
+
+        # Add / update positions found at Alpaca
+        for sym, pos in alpaca_pos.items():
+            qty      = float(pos.qty)
+            avg_cost = float(pos.avg_entry_price or 0)
+            if qty <= 0:
+                continue
+
+            if sym not in self.state:
+                self.state[sym] = {
+                    'price':      round(avg_cost, 2),
+                    'fill_price': round(avg_cost, 2),
+                    'peak_price': round(avg_cost, 2),
+                    'time':       datetime.now(_TZ_NY).isoformat(),
+                    'qty':        round(qty, 4),
+                    'stop_loss':  0.0,
+                    'volume':     0,
+                    'score':      None,
+                }
+                logger.info(
+                    f"SYNC: Added {sym} from Alpaca "
+                    f"(qty={qty} avg_entry=${avg_cost:.2f})"
+                )
+                changed = True
+            else:
+                missing_counts.pop(sym, None)
+
+                if self.state[sym].pop('pending_exit', None):
+                    logger.warning(
+                        f"SYNC: {sym} still present at Alpaca after pending exit; "
+                        "clearing pending_exit and continuing risk management."
+                    )
+                    changed = True
+
+                state_qty = float(self.state[sym].get('qty', 0))
+                if abs(state_qty - qty) > 1e-6:
+                    logger.info(
+                        f"SYNC: {sym} qty updated state={state_qty:g} → Alpaca={qty:g}"
+                    )
+                    self.state[sym]['qty'] = round(qty, 4)
+                    changed = True
+
+                if avg_cost > 0 and float(self.state[sym].get('fill_price', 0)) <= 0:
+                    self.state[sym]['fill_price'] = round(avg_cost, 2)
+                    self.state[sym]['price']      = round(avg_cost, 2)
+                    changed = True
+                if avg_cost > 0 and float(self.state[sym].get('peak_price', 0)) <= 0:
+                    self.state[sym]['peak_price'] = round(avg_cost, 2)
+                    changed = True
+
+                # Confirm pending BUY that Alpaca now shows as a filled position
+                if self.state[sym].get('pending'):
+                    del self.state[sym]['pending']
+                    self.state[sym]['fill_price'] = round(avg_cost, 2)
+                    self.state[sym]['price']      = round(avg_cost, 2)
+                    changed = True
+                    logger.info(f"SYNC: {sym} pending BUY confirmed filled at ${avg_cost:.2f}")
+
+        # Remove state entries whose Alpaca position is gone
+        for sym in list(self.state.keys()):
+            if sym in alpaca_pos:
+                continue
+            if self.state[sym].get('pending'):
+                # Limit BUY not yet filled — keep watching
+                continue
+            if self.state[sym].get('pending_exit'):
+                # MKT SELL in flight — wait for Alpaca to confirm flat
+                miss_count = missing_counts.get(sym, 0) + 1
+                missing_counts[sym] = miss_count
+                if miss_count < 2:
+                    continue
+                # Two consecutive snapshots without the position — assume filled
+                self._cancel_orphaned_sell_orders(sym)
+                del self.state[sym]
+                missing_counts.pop(sym, None)
+                changed = True
+                logger.info(f"SYNC: {sym} confirmed flat after pending_exit")
+                continue
+
+            miss_count = missing_counts.get(sym, 0) + 1
+            missing_counts[sym] = miss_count
+            if miss_count < 2:
+                logger.warning(
+                    f"SYNC: {sym} missing from Alpaca positions (count={miss_count}); "
+                    "deferring removal until second confirming snapshot."
+                )
+                continue
+
+            logger.info(f"SYNC: {sym} removed from state — no Alpaca position found")
+            self._cancel_orphaned_sell_orders(sym)
+            del self.state[sym]
+            missing_counts.pop(sym, None)
+            changed = True
+
+        self._missing_position_counts = missing_counts
+        if changed:
+            self.save_state()
+
+    def _cancel_orphaned_sell_orders(self, symbol: str) -> int:
+        """Cancel leftover SELL orders after Alpaca confirms the position is flat."""
+        cancelled = 0
+        try:
+            orders = self.trading_client.get_orders(
+                GetOrdersRequest(status=QueryOrderStatus.OPEN)
+            )
+        except Exception as e:
+            logger.warning(f"SYNC: {symbol} — orphan SELL query failed: {e}")
+            return 0
+
+        for o in orders:
+            if o.symbol != symbol:
+                continue
+            if str(o.side) not in ('OrderSide.SELL', 'sell'):
+                continue
+            try:
+                self.trading_client.cancel_order_by_id(o.id)
+                cancelled += 1
+            except Exception as e:
+                logger.warning(f"SYNC: {symbol} — orphan cancel failed: {e}")
+
+        if cancelled:
+            logger.info(f"SYNC: {symbol} — cancelled {cancelled} orphaned SELL orders")
+            time.sleep(1)
+        return cancelled
+
+    # ── Price updates ─────────────────────────────────────────────────────────
+    def _update_position_prices(
+        self, prefetched: Optional[Dict[str, float]] = None
+    ):
+        """Fetch live price for every open position and persist unrealised P&L."""
+        if not self.state:
+            return
+        changed = False
+        for sym in list(self.state.keys()):
+            cur: Optional[float] = None
+            if prefetched and sym in prefetched:
+                cur = prefetched[sym]
+            else:
+                snap = self._fetch_snapshot(sym)
+                if snap:
+                    cur = snap.get('live_price')
+
+            if cur and cur > 0:
+                self.state[sym]['current_price'] = round(cur, 2)
+                self.state[sym]['price_checked_at'] = datetime.now(_TZ_NY).isoformat()
+
+                ep  = float(self.state[sym].get('price', 0))
+                qty = float(self.state[sym].get('qty', 0))
+                if ep > 0 and qty > 0:
+                    self.state[sym]['unrealized_pnl']     = round((cur - ep) * qty, 2)
+                    self.state[sym]['unrealized_pnl_pct'] = round((cur - ep) / ep * 100, 2)
+
+                # Update peak and dashboard effective stop
+                sd   = float(self.state[sym].get('stop_dist', 0))
+                peak = max(float(self.state[sym].get('peak_price', cur) or cur), cur)
+                self.state[sym]['peak_price'] = round(peak, 2)
+                if sd > 0:
+                    effective_stop = round(peak - sd, 2)
+                    if ep > 0 and peak >= ep * (1 + BREAK_EVEN_PCT):
+                        effective_stop = max(effective_stop, ep)
+                    self.state[sym]['stop_loss'] = effective_stop
+
+                changed = True
+
+        if changed:
+            self.save_state()
+
+    # ── Technical context ─────────────────────────────────────────────────────
+    def get_technical_context(self, symbol: str) -> Optional[dict]:
+        """Fetch all indicator data needed for entry screening.
+
+        Returns None if data is unavailable or insufficient.
+        """
+        now_ny    = datetime.now(_TZ_NY)
+        today_str = now_ny.strftime('%Y-%m-%d')
+
+        # Bar cache — valid for one trading day
+        cached = self._bar_cache.get(symbol)
+        if cached and cached.get('date') == today_str:
+            bars_daily = cached['bars_daily']
+            orb_high   = cached.get('orb_high')
+        else:
+            bars_daily = self._fetch_daily_bars(symbol)
+            orb_high   = self._fetch_orb_high(symbol)
+            if bars_daily is not None:
+                self._bar_cache[symbol] = {
+                    'date':       today_str,
+                    'bars_daily': bars_daily,
+                    'orb_high':   orb_high,
+                }
+
+        if orb_high is None or orb_high <= 0:
+            logger.debug(f"SCAN {symbol}: ORB high unavailable, skipping")
+            return None
+
+        if bars_daily is None or len(bars_daily) < MIN_CANDLES:
+            logger.debug(
+                f"SCAN {symbol}: insufficient daily bars "
+                f"({len(bars_daily) if bars_daily is not None else 0} < {MIN_CANDLES})"
+            )
+            self._insufficient_history_skip.add(symbol)
+            return None
+
+        df = apply_all(
+            bars_daily, RSI_PERIOD, ATR_PERIOD, MA_FAST, MA_SLOW,
+            SMA200_SLOPE_LOOKBACK, CHANDELIER_PERIOD
+        )
+        if np.isnan(float(df['MA200'].iloc[-1])):
+            logger.debug(f"SCAN {symbol}: MA200 is NaN, skipping")
+            return None
+
+        avg_20d_vol    = float(df['volume'].tail(20).mean())
+        dollar_vol_20d = float((df['close'] * df['volume']).tail(20).mean())
+
+        # Live snapshot — price, bid/ask, and intraday volume
+        snap = self._fetch_snapshot(symbol)
+        if snap is None:
+            logger.debug(f"SCAN {symbol}: snapshot unavailable, skipping")
+            return None
+
+        live_price = snap.get('live_price', 0.0)
+        if not live_price or live_price <= 0:
+            logger.debug(f"SCAN {symbol}: live price unavailable, skipping")
+            return None
+
+        if live_price < SCAN_MIN_PRICE:
+            logger.debug(f"SCAN {symbol}: price ${live_price:.2f} < minimum ${SCAN_MIN_PRICE:.2f}, skipping")
+            return None
+
+        bid = snap.get('bid', 0.0)
+        ask = snap.get('ask', 0.0)
+        if bid > 0 and ask > bid:
+            spread_pct = (ask - bid) / ((bid + ask) / 2)
+        else:
+            spread_pct = 0.0
+
+        intraday_vol = snap.get('intraday_vol', 0.0)
+        market_open  = now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
+        elapsed_min  = max(1.0, (now_ny - market_open).total_seconds() / 60)
+        tod_frac     = _tod_frac(elapsed_min)
+        rvol         = (intraday_vol / avg_20d_vol / tod_frac) if avg_20d_vol > 0 else 0.0
+
+        return {
+            'orb_high':       orb_high,
+            'ma50':           float(df['MA50'].iloc[-1]),
+            'ma200':          float(df['MA200'].iloc[-1]),
+            'atr':            float(df['ATR'].iloc[-1]),
+            'atr_chandelier': float(df['ATR_CHAND'].iloc[-1]),
+            'sma200_slope':   float(df['SMA200_SLOPE'].iloc[-1]),
+            'adx':            float(df['ADX'].iloc[-1]),
+            'high200':        float(df['HIGH200'].iloc[-1]),
+            'rsi':            float(df['RSI'].iloc[-1]),
+            'rsi_prev':       float(df['RSI'].iloc[-2]),
+            'close':          float(df['close'].iloc[-1]),
+            'live_price':     live_price,
+            'spread_pct':     spread_pct,
+            'rvol':           rvol,
+            'volume':         int(df['volume'].iloc[-1]),
+            'dollar_vol_20d': dollar_vol_20d,
+            'avg_20d_vol':    avg_20d_vol,
+            'bid':            bid,
+            'ask':            ask,
+            'price_fetched_at': now_ny,
+            'df_daily':       df,
+        }
+
+    # ── Scoring ───────────────────────────────────────────────────────────────
+    def _score_candidate(self, ctx: dict) -> float:
+        """Score 0-100.  Trend (30) + RVOL (25) + Momentum (25) + Liquidity (20).
+
+        Trend sub-components:
+          MA separation (0-22 pts): rewards stocks well above their MA200 baseline.
+          ADX quality   (0-8 pts) : rewards strong directional momentum (ADX > 25).
+        """
+        ma50        = ctx['ma50']
+        ma200       = ctx['ma200']
+        rsi         = ctx['rsi']
+        rsi_prev    = ctx['rsi_prev']
+        rvol        = ctx.get('rvol', 0.0)
+        spread_pct  = ctx.get('spread_pct', 0.0)
+        adx         = ctx.get('adx', ADX_THRESHOLD)
+
+        trend_sep    = (ma50 - ma200) / ma200 if ma200 > 0 else 0.0
+        ma_sep_score = min(22.0, trend_sep / 0.06 * 22.0)
+        adx_quality  = min(8.0, max(0.0, (adx - 25.0) / 25.0 * 8.0))
+        trend_score  = ma_sep_score + adx_quality
+
+        rvol_excess = max(0.0, rvol - RVOL_MIN)
+        rvol_score  = min(25.0, rvol_excess / (5.0 - RVOL_MIN) * 25.0)
+
+        rsi_delta   = max(0.0, rsi - rsi_prev)
+        rsi_accel   = min(15.0, rsi_delta / 5.0 * 15.0)
+        rsi_quality = min(10.0, max(0.0, (rsi - RSI_THRESHOLD) / 20.0 * 10.0))
+        momentum_score = rsi_accel + rsi_quality
+
+        liq_score = max(0.0, 20.0 * (1.0 - spread_pct / SPREAD_MAX_PCT)) if spread_pct > 0 else 20.0
+
+        return round(trend_score + rvol_score + momentum_score + liq_score, 2)
+
+    # ── Exit management ───────────────────────────────────────────────────────
+    def check_velocity_exits(self) -> Dict[str, float]:
+        """Manage all forced exits: hard stop, break-even, Friday close, velocity exit.
+
+        Returns {symbol: current_price} for positions surviving this cycle.
+        """
+        now_et          = datetime.now(_TZ_NY)
+        is_friday_close = (now_et.weekday() == 4 and now_et.hour >= FRIDAY_CLOSE_HOUR)
+        prefetched: Dict[str, float] = {}
+
+        for sym in list(self.state.keys()):
+            data = self.state[sym]
+            if data.get('pending'):
+                continue
+            if data.get('pending_exit'):
+                continue
+
+            entry_price = float(data.get('price', 0))
+            if entry_price <= 0:
+                logger.warning(f"EXIT: {sym} invalid entry price, skipping.")
+                continue
+
+            snap = self._fetch_snapshot(sym)
+            if snap:
+                cur = snap.get('live_price') or 0.0
+                if cur > 0:
+                    self.state[sym]['current_price'] = round(cur, 2)
+                    self.state[sym]['price_checked_at'] = now_et.isoformat()
+                    prefetched[sym] = cur
+            else:
+                cur = float(data.get('current_price', 0))
+                if cur <= 0:
+                    logger.warning(
+                        f"EXIT: {sym} — no live price; skipping exit checks this cycle."
+                    )
+                    continue
+
+            # 1. Intraday hard stop
+            drawdown = (cur - entry_price) / entry_price
+            if drawdown <= -HARD_STOP_PCT:
+                logger.warning(
+                    f"HARD STOP: {sym} down {drawdown*100:.1f}% from entry "
+                    f"(${cur:.2f} vs ${entry_price:.2f}). Forcing exit."
+                )
+                self.liquidate(sym)
+                continue
+
+            # 2. Break-even floor — software exit to catch what the TRAIL can miss
+            peak_price = max(
+                float(data.get('peak_price', entry_price) or entry_price), cur
+            )
+            if peak_price != float(data.get('peak_price', 0) or 0):
+                self.state[sym]['peak_price'] = round(peak_price, 2)
+            if peak_price >= entry_price * (1 + BREAK_EVEN_PCT) and cur <= entry_price:
+                logger.warning(
+                    f"BREAK-EVEN EXIT: {sym} gave back {BREAK_EVEN_PCT*100:.0f}%+ profit "
+                    f"(peak=${peak_price:.2f}, cur=${cur:.2f}, entry=${entry_price:.2f})."
+                )
+                self.liquidate(sym)
+                continue
+
+            # 3. Friday afternoon close
+            if is_friday_close:
+                friday_profit = (cur - entry_price) / entry_price
+                if friday_profit < FRIDAY_MIN_PROFIT_PCT:
+                    logger.warning(
+                        f"FRIDAY CLOSE: {sym} profit={friday_profit*100:.1f}% < "
+                        f"{FRIDAY_MIN_PROFIT_PCT*100:.0f}% — closing to avoid weekend risk."
+                    )
+                    self.liquidate(sym)
+                    continue
+
+            # 4. Velocity exit — held too long without adequate profit
+            raw_time = data.get('time', '')
+            if not raw_time:
+                continue
+            try:
+                entry_dt = datetime.fromisoformat(raw_time)
+            except (ValueError, TypeError):
+                continue
+            if entry_dt.tzinfo is None:
+                entry_dt = _TZ_NY.localize(entry_dt)
+
+            if _count_trading_days(entry_dt, now_et) >= HOLD_TRADING_BARS:
+                profit = (cur - entry_price) / entry_price
+                if profit < PROFIT_MIN_THRESHOLD:
+                    logger.info(
+                        f"VELOCITY EXIT: {sym} held {HOLD_TRADING_BARS}+ bars "
+                        f"with only {profit*100:.1f}% profit. Freeing capital for T+1."
+                    )
+                    self.liquidate(sym)
+                    continue
+
+            prefetched[sym] = cur
+
+        self.save_state()
+        return prefetched
+
+    # ── Liquidation ───────────────────────────────────────────────────────────
+    def liquidate(self, symbol: str):
+        """Submit a market SELL for the full position.
+
+        - Cancels non-trailing-stop SELL orders first (preserving the trailing stop
+          as last-resort protection if the market sell is rejected).
+        - Sets pending_exit=True; state removal is deferred until _sync_positions()
+          confirms the position is flat (prevents hold-time clock reset on retry).
+        """
+        # Cancel only non-trailing-stop orders
+        try:
+            open_orders = self.trading_client.get_orders(
+                GetOrdersRequest(status=QueryOrderStatus.OPEN)
+            )
+        except Exception as e:
+            logger.warning(f"LIQUIDATE {symbol}: failed to fetch open orders: {e}")
+            open_orders = []
+
+        cancellable = [
+            o for o in open_orders
+            if o.symbol == symbol
+            and str(o.order_type) not in ('OrderType.TRAILING_STOP', 'trailing_stop')
+        ]
+        for o in cancellable:
+            try:
+                self.trading_client.cancel_order_by_id(o.id)
+            except Exception as e:
+                logger.warning(f"LIQUIDATE {symbol}: cancel {o.id} failed: {e}")
+        if cancellable:
+            time.sleep(1)
+
+        # Find the position
+        qty = 0.0
+        try:
+            pos = self.trading_client.get_open_position(symbol)
+            qty = float(pos.qty)
+        except Exception:
+            pass
+
+        if qty <= 0:
+            logger.info(
+                f"LIQUIDATE {symbol}: no Alpaca position found; "
+                "cancelling orphaned exits and removing stale state."
+            )
+            self._cancel_orphaned_sell_orders(symbol)
+            if symbol in self.state:
+                del self.state[symbol]
+                self.save_state()
+            return
+
+        if symbol in self.state:
+            self.state[symbol]['pending_exit'] = True
+            self.save_state()
+
+        sell_req = MarketOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+        )
+        try:
+            trade = self.trading_client.submit_order(sell_req)
+        except Exception as e:
+            if symbol in self.state:
+                self.state[symbol].pop('pending_exit', None)
+                self.save_state()
+            logger.error(
+                f"LIQUIDATE {symbol}: market SELL placement failed: {e}; "
+                "state retained for retry."
+            )
+            return
+
+        # Poll for fill confirmation (up to 30 s)
+        deadline = time.time() + 30
+        status   = ''
+        while time.time() < deadline:
+            try:
+                o = self.trading_client.get_order_by_id(trade.id)
+                status = str(o.status)
+                if status in ('OrderStatus.FILLED', 'filled',
+                              'OrderStatus.CANCELED', 'canceled',
+                              'OrderStatus.REJECTED', 'rejected',
+                              'OrderStatus.EXPIRED', 'expired'):
+                    break
+            except Exception:
+                pass
+            time.sleep(1)
+
+        if status in ('OrderStatus.CANCELED', 'canceled',
+                      'OrderStatus.REJECTED', 'rejected',
+                      'OrderStatus.EXPIRED', 'expired'):
+            if symbol in self.state:
+                self.state[symbol].pop('pending_exit', None)
+                self.save_state()
+            logger.error(
+                f"LIQUIDATE {symbol}: market SELL {status}; "
+                "state retained for retry."
+            )
+            return
+
+        logger.info(
+            f"LIQUIDATE {symbol}: market SELL {status} "
+            f"(qty={qty:g}); state pending until Alpaca confirms flat."
+        )
+
+    # ── Scanner + entry cycle ─────────────────────────────────────────────────
+    def get_institutional_scan(self) -> List[str]:
+        """Fetch candidates: top-gainers (primary) merged with most-actives (supplementary)."""
+        return get_candidates(self.data_client, self.screener_client)
+
+    def run_cycle(self):
+        # 0. Connectivity check
+        if not self._ensure_connected():
+            logger.error("ENGINE: Alpaca connectivity failed — skipping cycle")
+            self._write_dashboard_data(connected=False)
+            return
+
+        # 1. Position sync
+        self._sync_positions()
+
+        # 2. Account values
+        try:
+            equity, settled = self._get_account_values()
+        except SystemExit:
+            raise
+        except Exception as e:
+            logger.error(f"ACCOUNT: values unavailable ({e}); managing positions only.")
+            self.check_velocity_exits()
+            self._update_position_prices()
+            self._write_dashboard_data(connected=True)
+            return
+
+        max_pos        = self._calc_max_positions(equity)
+        capacity_slots = max(0, max_pos - len(self.state))
+        cash_slots     = self._calc_cash_entry_slots(settled)
+        open_slots     = min(capacity_slots, cash_slots)
+        bucket_size    = (settled * BUCKET_CASH_PCT) / open_slots if open_slots > 0 else 0.0
+        self._last_equity       = equity
+        self._last_settled_cash = settled
+        self._equity_initialized = True
+
+        bucket_text = f"${bucket_size:.2f}" if open_slots > 0 else "N/A"
+        logger.info(
+            f"HEARTBEAT: Equity ${equity:.2f} | Settled ${settled:.2f} | "
+            f"EntrySlots {open_slots}/{max_pos} | CashSlots {cash_slots} | "
+            f"Bucket {bucket_text} | Positions: {list(self.state.keys()) or 'none'}"
+        )
+
+        # Daily loss circuit breaker
+        today_str = datetime.now(_TZ_NY).strftime('%Y-%m-%d')
+        if self._day_start_date != today_str:
+            self._day_start_date   = today_str
+            self._day_start_equity = equity
+            # Clear day-scoped caches on date rollover
+            self._daily_scan_skip.clear()
+            self._insufficient_history_skip.clear()
+        elif (
+            self._day_start_equity is not None
+            and equity < self._day_start_equity * (1 - MAX_DAILY_LOSS_PCT)
+        ):
+            logger.warning(
+                f"CIRCUIT BREAKER: daily loss limit hit "
+                f"(equity ${equity:.2f} vs open ${self._day_start_equity:.2f} "
+                f"= {(1-equity/self._day_start_equity)*100:.1f}% loss). "
+                "No new entries for the rest of today."
+            )
+            self.check_velocity_exits()
+            self._update_position_prices()
+            self._write_dashboard_data(connected=True)
+            return
+
+        # 3. Portfolio concentration guard
+        concentration, halt_entries, halt_all = self._check_portfolio_concentration(equity)
+        if halt_all:
+            logger.error(
+                f"CONCENTRATION: {concentration*100:.0f}% deployed ≥ 95% — "
+                "halting all new orders."
+            )
+            self.check_velocity_exits()
+            self._update_position_prices()
+            self._write_dashboard_data(connected=True)
+            return
+        if halt_entries:
+            logger.warning(
+                f"CONCENTRATION: {concentration*100:.0f}% deployed ≥ 85% — "
+                "no new entries."
+            )
+
+        # 4. VIX risk filter
+        vix_price = self._fetch_vix()
+        if vix_price is None:
+            # Never fetched successfully — warn but allow entries; the 12-rule screener
+            # will gate quality independently.  Blocking all entries on a DNS hiccup
+            # at startup is worse than trading without the VIX macro filter.
+            logger.warning("VIX: unavailable at startup — proceeding without VIX filter.")
+        else:
+            self._last_vix = vix_price
+            if vix_price > VIX_THRESHOLD:
+                logger.warning(f"VIX HIGH ({vix_price:.2f}). Risk Off — no new entries.")
+                self.check_velocity_exits()
+                self._update_position_prices()
+                self._write_dashboard_data(connected=True)
+                return
+
+        # 5. Manage existing positions
+        prefetched = self.check_velocity_exits()
+
+        # 6. Daily stop-order audit (once per day)
+        if self._last_audit_date != today_str and self.state:
+            self._audit_stop_orders()
+            self._last_audit_date = today_str
+
+        # 7. Entry window check
+        now_ny = datetime.now(_TZ_NY)
+        if not (now_ny.weekday() < 5 and ENTRY_START <= (now_ny.hour, now_ny.minute) <= ENTRY_END):
+            self._update_position_prices(prefetched)
+            self._write_dashboard_data(connected=True)
+            return
+
+        # Block new entries on Friday after FRIDAY_CLOSE_HOUR (weekend gap risk)
+        if now_ny.weekday() == 4 and now_ny.hour >= FRIDAY_CLOSE_HOUR:
+            self._update_position_prices(prefetched)
+            self._write_dashboard_data(connected=True)
+            return
+
+        if halt_entries or open_slots <= 0:
+            if open_slots <= 0:
+                logger.info(
+                    f"SCAN: no entry slots "
+                    f"(capacity={capacity_slots}, cash_slots={cash_slots})"
+                )
+            self._update_position_prices(prefetched)
+            self._write_dashboard_data(connected=True)
+            return
+
+        # 8. SPY regime
+        spy_trend = self._fetch_spy_trend()
+        if not spy_trend:
+            logger.warning("REGIME: SPY below SMA50/SMA200 — no new entries this cycle.")
+            self._update_position_prices(prefetched)
+            self._write_dashboard_data(connected=True)
+            return
+
+        is_friday      = (now_ny.weekday() == 4)
+        dol_vol_thresh = SCAN_MIN_DOLLAR_VOL * (VOL_MULT_FRIDAY if is_friday else 1.0)
+
+        # 9. Scan and score candidates
+        watchlist = self.get_institutional_scan()
+        logger.info(
+            f"SCAN: {len(watchlist)} candidates → {watchlist}"
+            + (f" [FRIDAY: dolVol threshold ${dol_vol_thresh/1e6:.0f}M]" if is_friday else "")
+        )
+
+        book_sectors: Dict[str, int] = {}
+        for book_sym in self.state:
+            s = self._get_sector(book_sym)
+            book_sectors[s] = book_sectors.get(s, 0) + 1
+
+        signals = []
+        for sym in watchlist:
+            if sym in self.state:
+                logger.info(f"SCAN {sym}: SKIP — already in portfolio")
+                continue
+            if sym in TICKER_BLOCKLIST:
+                continue
+            if sym in self._daily_scan_skip:
+                logger.debug(
+                    f"SCAN {sym}: SKIP — day-filtered ({self._daily_scan_skip[sym]})"
+                )
+                continue
+            if sym in self._insufficient_history_skip:
+                continue
+
+            ctx = self.get_technical_context(sym)
+            if not ctx:
+                continue
+
+            price        = ctx['live_price']
+            orb_h        = ctx['orb_high']
+            ma50         = ctx['ma50']
+            ma200        = ctx['ma200']
+            rsi          = ctx['rsi']
+            rsi_p        = ctx['rsi_prev']
+            atr          = ctx['atr']
+            atr_chand    = ctx['atr_chandelier']
+            adx          = ctx['adx']
+            high200      = ctx['high200']
+            sma200_slope = ctx['sma200_slope']
+            rvol         = ctx.get('rvol', 0.0)
+            spread_pct   = ctx.get('spread_pct', 0.0)
+            dol_vol_20d  = ctx['dollar_vol_20d']
+
+            # ── Permanent per-day filter checks (MA/ADX/52w-high/dollar-vol) ─
+            c_trend     = price > ma50 and ma50 > ma200
+            c_trend_sep = ma200 > 0 and (ma50 - ma200) / ma200 >= MIN_TREND_SEP
+            c_adx       = adx > ADX_THRESHOLD
+            c_52w_high  = high200 > 0 and price >= high200 * HIGH200_MIN_PCT
+            c_dol_vol   = dol_vol_20d >= dol_vol_thresh
+
+            if not (c_trend and c_trend_sep and c_adx and c_52w_high and c_dol_vol):
+                perm_fails = []
+                if not c_trend:      perm_fails.append('MA50<MA200')
+                if not c_trend_sep:  perm_fails.append(f'TrendSep<{MIN_TREND_SEP*100:.0f}%')
+                if not c_adx:        perm_fails.append(f'ADX≤{ADX_THRESHOLD}')
+                if not c_52w_high:   perm_fails.append(f'52wHigh<{HIGH200_MIN_PCT*100:.0f}%')
+                if not c_dol_vol:    perm_fails.append(f'DolVol<{dol_vol_thresh/1e6:.0f}M')
+                reason = ', '.join(perm_fails)
+                self._daily_scan_skip[sym] = reason
+                # Persist into state so the skip survives an intraday restart
+                if sym in self.state:
+                    self.state[sym]['_daily_skip_reason'] = reason
+                    self.state[sym]['_daily_skip_date']   = today_str
+                logger.debug(f"SCAN {sym}: SKIP (day) — {reason}")
+                continue
+
+            # ── Cycle-by-cycle filter checks ─────────────────────────────────
+            c_slope   = sma200_slope > 0
+            c_rvol    = rvol >= RVOL_MIN
+            c_spread  = spread_pct <= SPREAD_MAX_PCT
+            c_orb     = price > orb_h
+            c_gap     = price <= orb_h * (1 + GAP_MAX_PCT)
+            c_rsi_delta = (rsi - rsi_p) >= RSI_MIN_DELTA
+            c_rsi_lvl   = rsi > RSI_THRESHOLD
+
+            scan_detail = (
+                f"SCAN {sym}: price=${price:.2f} ORB=${orb_h:.2f} "
+                f"MA50=${ma50:.2f} MA200=${ma200:.2f} SMA200slope={sma200_slope:+.3f} "
+                f"ADX={adx:.1f} RVOL={rvol:.1f}(≥{RVOL_MIN}) "
+                f"spread={spread_pct*100:.2f}% RSI={rsi:.1f}(Δ{rsi-rsi_p:+.1f}) "
+                f"DolVol20d=${dol_vol_20d/1e6:.0f}M | "
+                f"Trend={c_trend} TrendSep={c_trend_sep} ADX={c_adx} "
+                f"52wHigh={c_52w_high} Slope={c_slope} RVOL={c_rvol} "
+                f"Spread={c_spread} ORB={c_orb} Gap={c_gap} "
+                f"RSIδ={c_rsi_delta} RSI>={RSI_THRESHOLD}={c_rsi_lvl}"
+            )
+
+            if not (c_rvol and c_spread and c_orb and c_gap and c_rsi_delta and c_rsi_lvl):
+                failed = [n for n, v in [
+                    (f'RVOL≥{RVOL_MIN}', c_rvol),
+                    (f'Spread≤{SPREAD_MAX_PCT*100:.1f}%', c_spread),
+                    ('price>ORB', c_orb),
+                    (f'gap≤{GAP_MAX_PCT*100:.0f}%', c_gap),
+                    (f'RSIδ≥{RSI_MIN_DELTA}', c_rsi_delta),
+                    (f'RSI>{RSI_THRESHOLD}', c_rsi_lvl),
+                ] if not v]
+                logger.debug(f"{scan_detail}")
+                logger.debug(f"SCAN {sym}: NO SIGNAL — failed: {failed}")
+                continue
+
+            # ── Correlation + sector clustering (expensive — only for passing ─
+            df_daily = ctx.get('df_daily')
+            if df_daily is not None and self.state:
+                max_corr = self._compute_book_correlation(sym, df_daily)
+                if max_corr > CORR_MAX:
+                    logger.debug(
+                        f"SCAN {sym}: SKIP — corr={max_corr:.2f} > {CORR_MAX}"
+                    )
+                    continue
+
+            sector = self._get_sector(sym)
+            if book_sectors.get(sector, 0) >= MAX_SECTOR_COUNT:
+                logger.debug(
+                    f"SCAN {sym}: SKIP — sector '{sector}' already at "
+                    f"{book_sectors[sector]}/{MAX_SECTOR_COUNT} positions"
+                )
+                continue
+
+            score = self._score_candidate(ctx)
+            if score < SCAN_MIN_SCORE:
+                logger.debug(
+                    f"SCAN {sym}: SKIP — score={score:.1f} < min {SCAN_MIN_SCORE:.0f}"
+                )
+                continue
+            signals.append((score, sym, ctx))
+            logger.info(scan_detail)
+            logger.info(
+                f"SIGNAL {sym}: score={score:.1f}/100 | "
+                f"RVOL={rvol:.1f}x TrendSep={(ma50-ma200)/ma200*100:.1f}% "
+                f"RSIδ={rsi-rsi_p:.1f} spread={spread_pct*100:.2f}%"
+            )
+
+        if not signals:
+            logger.info("SCAN: No signals this cycle")
+            self._update_position_prices(prefetched)
+            self._write_dashboard_data(connected=True)
+            return
+
+        signals.sort(key=lambda x: x[0], reverse=True)
+        ranked = [(s, sym) for s, sym, _ in signals]
+        logger.info(
+            f"RANKED: {ranked} — attempting up to {min(open_slots, len(signals))}"
+        )
+
+        placed = 0
+        for score, sym, ctx in signals:
+            if placed >= open_slots:
+                break
+
+            # Re-fetch live price if the scan snapshot is stale (>60 s)
+            fetched_at = ctx.get('price_fetched_at', now_ny)
+            age_s = (datetime.now(_TZ_NY) - fetched_at).total_seconds()
+            if age_s > 60:
+                snap2 = self._fetch_snapshot(sym)
+                if snap2 and snap2.get('live_price', 0) > 0:
+                    new_price = snap2['live_price']
+                    drift = abs(new_price - ctx['live_price']) / ctx['live_price']
+                    if drift > 0.02:
+                        logger.warning(
+                            f"SKIP {sym}: price drifted {drift*100:.2f}% since scan"
+                        )
+                        continue
+                    price = new_price
+                    ask_now = snap2.get('ask', 0.0)
+                else:
+                    logger.warning(f"SKIP {sym}: stale price and reprice failed")
+                    continue
+            else:
+                price   = ctx['live_price']
+                ask_now = ctx.get('ask', 0.0)
+
+            atr          = ctx['atr']
+            atr_chand    = ctx['atr_chandelier']
+            rvol_now     = ctx.get('rvol', RVOL_MIN)
+
+            if np.isnan(atr) or atr <= 0:
+                logger.warning(f"SKIP {sym}: invalid ATR ({atr:.4f})")
+                continue
+
+            # Adaptive limit price — ATR/RVOL scaled slippage buffer above ask
+            ref       = ask_now if ask_now > 0 else price
+            atr_15min = atr / (26 ** 0.5)
+            rvol_scale = (rvol_now / RVOL_MIN) ** 0.5
+            drift_buf  = max(
+                ref * LIMIT_BUF_MIN_PCT,
+                min(atr_15min * rvol_scale, ref * LIMIT_BUF_MAX_PCT),
+            )
+            limit_price = round(ref + drift_buf, 2)
+            logger.debug(
+                f"LIMIT {sym}: ref=${ref:.2f} drift=${drift_buf:.3f} "
+                f"→ limit=${limit_price:.2f}"
+            )
+
+            chandelier_dist = round(atr_chand * CHANDELIER_MULT, 2)
+            hard_stop_dist  = round(limit_price * HARD_STOP_PCT, 2)
+            risk_stop_dist  = max(min(chandelier_dist, hard_stop_dist), 0.01)
+
+            risk_per_trade = equity * RISK_PER_TRADE_PCT
+            qty_by_risk    = int(risk_per_trade / risk_stop_dist) if risk_stop_dist > 0 else 0
+            qty_by_bucket  = int(bucket_size / limit_price)
+            qty            = min(qty_by_risk, qty_by_bucket)
+            if qty < 1:
+                logger.warning(
+                    f"SKIP {sym}: qty=0 after sizing "
+                    f"(risk={qty_by_risk} bucket={qty_by_bucket})"
+                )
+                continue
+
+            order_cost = round(qty * limit_price, 2)
+            if settled < order_cost:
+                logger.warning(
+                    f"SKIP {sym}: insufficient settled cash "
+                    f"(need ${order_cost:.2f}, have ${settled:.2f})"
+                )
+                continue
+
+            # ── Submit limit buy ──────────────────────────────────────────────
+            buy_req = LimitOrderRequest(
+                symbol=sym,
+                qty=qty,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
+                limit_price=limit_price,
+            )
+            try:
+                buy_order = self.trading_client.submit_order(buy_req)
+            except Exception as e:
+                logger.warning(f"SKIP {sym}: limit BUY submission failed: {e}")
+                continue
+
+            # Mark as pending so the slot is visible in the dashboard
+            self.state[sym] = {
+                'price':    limit_price,
+                'time':     datetime.now(_TZ_NY).isoformat(),
+                'qty':      qty,
+                'stop_loss': round(limit_price - chandelier_dist, 2),
+                'stop_dist': chandelier_dist,
+                'peak_price': limit_price,
+                'volume':   ctx.get('volume', 0),
+                'score':    score,
+                'pending':  True,
+                'entry_order_id': str(buy_order.id),
+            }
+            self.save_state()
+
+            logger.info(
+                f"BUY SUBMITTED: {sym} | score={score:.1f} qty={qty} "
+                f"limit=${limit_price:.2f} | "
+                f"Chandelier dist=${chandelier_dist:.2f} | "
+                f"order_id={buy_order.id}"
+            )
+
+            # ── Poll for fill (up to 30 s) ────────────────────────────────────
+            fill_price = None
+            filled_qty = 0.0
+            deadline   = time.time() + 30
+            while time.time() < deadline:
+                try:
+                    o = self.trading_client.get_order_by_id(buy_order.id)
+                    status = str(o.status)
+                    if status in ('OrderStatus.FILLED', 'filled'):
+                        fill_price = float(o.filled_avg_price or limit_price)
+                        filled_qty = float(o.filled_qty or qty)
+                        break
+                    if status in (
+                        'OrderStatus.CANCELED', 'canceled',
+                        'OrderStatus.REJECTED', 'rejected',
+                        'OrderStatus.EXPIRED', 'expired',
+                    ):
+                        logger.warning(
+                            f"ENTRY {sym}: BUY {status}; removing from state."
+                        )
+                        del self.state[sym]
+                        self.save_state()
+                        fill_price = None
+                        break
+                except Exception:
+                    pass
+                time.sleep(1)
+
+            if fill_price is None or fill_price <= 0:
+                # Not filled within timeout — cancel and move on
+                try:
+                    self.trading_client.cancel_order_by_id(buy_order.id)
+                except Exception:
+                    pass
+                if sym in self.state and self.state[sym].get('pending'):
+                    del self.state[sym]
+                    self.save_state()
+                logger.warning(
+                    f"ENTRY {sym}: BUY not filled within timeout; cancelled."
+                )
+                continue
+
+            # ── Submit chandelier trailing stop ───────────────────────────────
+            stop_req = TrailingStopOrderRequest(
+                symbol=sym,
+                qty=filled_qty,
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.GTC,
+                trail_price=chandelier_dist,
+            )
+            try:
+                stop_order = self.trading_client.submit_order(stop_req)
+            except Exception as stop_err:
+                logger.error(
+                    f"ENTRY {sym}: trailing stop placement failed ({stop_err}). "
+                    "Position open WITHOUT stop — audit will retry next cycle."
+                )
+                stop_order = None
+
+            # Update state with confirmed fill details
+            self.state[sym] = {
+                'fill_price':     round(fill_price, 2),
+                'price':          round(fill_price, 2),
+                'entry_order_id': str(buy_order.id),
+                'time':           datetime.now(_TZ_NY).isoformat(),
+                'qty':            filled_qty,
+                'stop_loss':      round(fill_price - chandelier_dist, 2),
+                'stop_dist':      chandelier_dist,
+                'peak_price':     round(fill_price, 2),
+                'volume':         ctx.get('volume', 0),
+                'score':          score,
+            }
+            if stop_order:
+                self.state[sym]['stop_order_id'] = str(stop_order.id)
+            self.save_state()
+
+            actual_cost = round(filled_qty * fill_price, 2)
+            settled    -= actual_cost
+            placed     += 1
+
+            capacity_slots = max(0, max_pos - len(self.state))
+            cash_slots     = self._calc_cash_entry_slots(settled)
+            open_slots     = min(capacity_slots, cash_slots)
+            bucket_size    = (settled * BUCKET_CASH_PCT) / open_slots if open_slots > 0 else 0.0
+
+            logger.info(
+                f"ORDER CONFIRMED: {sym} | score={score:.1f} qty={filled_qty:g} "
+                f"limit=${limit_price:.2f} fill=${fill_price:.2f} "
+                f"chandelier=${round(fill_price-chandelier_dist,2):.2f} "
+                f"(dist=${chandelier_dist:.2f}) | settled remaining=${settled:.2f}"
+            )
+
+        self._update_position_prices(prefetched)
+        self._write_dashboard_data(connected=True)
+
+    # ── Main loop ─────────────────────────────────────────────────────────────
+    def run(self):
+        logger.info("=" * 40)
+        logger.info("ENGINE DEPLOYED — Alpaca Paper Trading")
+        logger.info("=" * 40)
+        self._initialize()
+        logger.info("ENGINE READY: Starting main loop...")
+        while True:
+            try:
+                self.run_cycle()
+                now_ny = datetime.now(_TZ_NY)
+                self._last_scan_ts = now_ny.strftime("%H:%M:%S %Z")
+                self._next_scan_dt = (now_ny + timedelta(seconds=SCAN_INTERVAL)).isoformat()
+                self._write_dashboard_data(connected=True)
+                time.sleep(SCAN_INTERVAL)
+            except Exception:
+                logger.exception("RUNTIME ERROR")
+                self._next_scan_dt = (
+                    datetime.now(_TZ_NY) + timedelta(seconds=ERROR_WAIT)
+                ).isoformat()
+                self._write_dashboard_data(connected=self._ensure_connected())
+                time.sleep(ERROR_WAIT)
+
+    def shutdown(self):
+        """Cancel all pending BUY orders and disconnect cleanly."""
+        logger.info("SHUTDOWN: cancelling pending BUY orders...")
+        try:
+            open_orders = self.trading_client.get_orders(
+                GetOrdersRequest(status=QueryOrderStatus.OPEN)
+            )
+            for o in open_orders:
+                if str(o.side) in ('OrderSide.BUY', 'buy'):
+                    try:
+                        self.trading_client.cancel_order_by_id(o.id)
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning(f"SHUTDOWN: order cancel failed: {e}")
+        logger.info("SHUTDOWN: complete.")

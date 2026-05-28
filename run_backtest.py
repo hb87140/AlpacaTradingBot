@@ -1,0 +1,115 @@
+#!/usr/bin/env python
+"""
+CLI entry-point for the Velocity Strategy forward backtester.
+
+Defaults to 2025-01-01 → today (out-of-sample relative to the
+2023-2024 development period).
+
+Key design decisions:
+  • RVOL threshold 1.2× (daily close; not intraday 2.5×)
+  • ATR-based position sizing (2% equity risk per trade)
+  • Break-even stop floor at 4% profit
+  • Trading-bar hold count (not calendar days)
+  • 0.1% entry slippage; commission configurable via --commission-per-order
+    (default $0.00 — Alpaca is commission-free)
+  • Data caching to backtest/.cache/ (use --no-cache to force re-download)
+  • Filter funnel stats printed after each run
+
+Usage:
+    venv/bin/python run_backtest.py
+    venv/bin/python run_backtest.py --start 2025-01-01 --end 2026-05-01
+    venv/bin/python run_backtest.py --capital 1400
+    venv/bin/python run_backtest.py --no-spy-filter
+    venv/bin/python run_backtest.py --rvol 1.2 --hold-bars 7
+    venv/bin/python run_backtest.py --trades
+    venv/bin/python run_backtest.py --no-cache        # force fresh download
+"""
+
+import argparse
+import sys
+import os
+from datetime import date
+
+sys.path.insert(0, os.path.dirname(__file__))
+
+from backtest.strategy import VelocityBacktest
+from src.config import (
+    BACKTEST_SCAN_COUNT, BACKTEST_INITIAL_CAPITAL, BACKTEST_COMMISSION_PER_ORDER,
+    BACKTEST_RVOL_MIN, BREAK_EVEN_PCT,
+    CHANDELIER_MULT, CHANDELIER_PERIOD, PROFIT_MIN_THRESHOLD,
+    BACKTEST_HOLD_BARS, BACKTEST_SLIPPAGE, BACKTEST_EXIT_SLIPPAGE,
+    MAX_POSITIONS_CAP, MIN_BUCKET_SIZE,
+)
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Velocity Strategy Forward Backtester")
+    break_even_default = f"{BREAK_EVEN_PCT:.0%}".replace("%", "%%")
+    p.add_argument("--start",           default="2025-01-01",        help="Start date YYYY-MM-DD")
+    p.add_argument("--end",             default=date.today().isoformat(), help="End date YYYY-MM-DD (default: today)")
+    p.add_argument("--capital",         default=BACKTEST_INITIAL_CAPITAL, type=float,
+                   help=f"Starting capital USD (default: ${BACKTEST_INITIAL_CAPITAL:,.0f})")
+    p.add_argument("--scan-count",      default=BACKTEST_SCAN_COUNT,      type=int,
+                   help="Top-N daily scanner picks; 0 means all scanner-passed stocks (default: all)")
+    p.add_argument("--commission-per-order", default=BACKTEST_COMMISSION_PER_ORDER, type=float,
+                   help=f"Backtest commission assumption per order (default: ${BACKTEST_COMMISSION_PER_ORDER:.2f}; Alpaca is commission-free)")
+    p.add_argument("--hold-bars",       default=BACKTEST_HOLD_BARS,   type=int,
+                   help=f"Trading bars before velocity-exit check (default: {BACKTEST_HOLD_BARS} = matches live HOLD_TRADING_BARS=2)")
+    p.add_argument("--rvol",            default=BACKTEST_RVOL_MIN,    type=float,
+                   help=f"Daily RVOL threshold (default: {BACKTEST_RVOL_MIN}×)")
+    p.add_argument("--break-even-pct",  default=BREAK_EVEN_PCT,       type=float,
+                   help=f"Break-even stop activation threshold (default: {break_even_default})")
+    p.add_argument("--no-spy-filter",   action="store_true",
+                   help="Disable SPY regime filter (allow entries in bear market)")
+    p.add_argument("--vix-filter",      action="store_true",
+                   help="Enable VIX > 35 regime gate")
+    p.add_argument("--trades",          action="store_true",
+                   help="Print top-20 trade log after summary")
+    p.add_argument("--no-cache",        action="store_true",
+                   help="Force fresh data download (ignore backtest/.cache/)")
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+    print("\nVELOCITY STRATEGY — FORWARD BACKTEST")
+    print(f"{'─' * 50}")
+    print(f"  Period        : {args.start} → {args.end}")
+    print(f"  Capital       : ${args.capital:,.2f}")
+    _init_slots      = min(int(args.capital / MIN_BUCKET_SIZE), MAX_POSITIONS_CAP) if args.capital >= MIN_BUCKET_SIZE else 0
+    _init_bucket_str = f"${args.capital / _init_slots:,.2f}" if _init_slots > 0 else "N/A"
+    print(f"  Max pos       : {MAX_POSITIONS_CAP} cap  |  Dynamic max = floor(equity / ${MIN_BUCKET_SIZE:.0f}/slot)  |  Initial slots={_init_slots}, bucket≈{_init_bucket_str}")
+    print("  Entry rules   : 12-filter production screener")
+    print(f"  RVOL min      : {args.rvol:.1f}× (daily close proxy)")
+    print(f"  Exit          : Chandelier (ATR{CHANDELIER_PERIOD}×{CHANDELIER_MULT}) + 7% hard stop + {args.break_even_pct:.0%} break-even")
+    print(f"  Velocity exit : profit_min {PROFIT_MIN_THRESHOLD:.0%} after {args.hold_bars} bars")
+    print(f"  Hold bars     : {args.hold_bars} trading days before velocity check")
+    print("  Position size : ATR-based (2% equity risk) capped by bucket")
+    print(f"  Slippage      : {BACKTEST_SLIPPAGE:.1%} entry, {BACKTEST_EXIT_SLIPPAGE:.1%} exit (mkt orders)  |  Commission: ${args.commission_per_order*2:.2f}/round-trip")
+    print(f"  SPY filter    : {'OFF' if args.no_spy_filter else 'ON (SPY > SMA50 > SMA200)'}")
+    print(f"  VIX filter    : {'ON (VIX > 35 blocks entries)' if args.vix_filter else 'OFF'}")
+    print(f"  Cache         : {'OFF (forced re-download)' if args.no_cache else 'ON (backtest/.cache/)'}")
+    print()
+
+    bt = VelocityBacktest(
+        start          = args.start,
+        end            = args.end,
+        capital        = args.capital,
+        scan_count     = args.scan_count,
+        commission_per_order = args.commission_per_order,
+        hold_bars      = args.hold_bars,
+        rvol_min       = args.rvol,
+        break_even_pct = args.break_even_pct,
+        use_spy_filter = not args.no_spy_filter,
+        use_vix_filter = args.vix_filter,
+        use_cache      = not args.no_cache,
+    )
+    result = bt.run()
+    VelocityBacktest.print_report(result, capital=args.capital)
+
+    if args.trades:
+        VelocityBacktest.print_trades(result)
+
+
+if __name__ == "__main__":
+    main()
