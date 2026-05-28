@@ -19,6 +19,9 @@ logs/
 # Backtest cache (large pickle files)
 backtest/.cache/
 
+# Backtest optimizer output (generated artifacts, not source code)
+backtest/optimizer_results*.csv
+
 # IB Gateway installer binary (321 MB — not appropriate for git history)
 scripts/
 

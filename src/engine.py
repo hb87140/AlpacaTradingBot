@@ -57,7 +57,7 @@ from src.config import (
     ALPACA_SCANNER_TOP,
     SCAN_MIN_PRICE,
 )
-from src.indicators import apply_all
+from src.indicators import apply_all, compute_ma
 from src.scanner import get_candidates
 
 os.makedirs(BASE_DIR, exist_ok=True)
@@ -229,7 +229,6 @@ class VelocityEngine:
             sd      = float(d.get('stop_dist', 0))
             peak    = float(d.get('peak_price', ep))
             eff_stop = max(stop, ep) if peak >= ep * (1 + BREAK_EVEN_PCT) else stop
-            comm    = d.get('commission', None)
             unit_price = ep if ep else None
             positions.append({
                 'symbol':        sym,
@@ -359,7 +358,7 @@ class VelocityEngine:
         total_cost = 0.0
         logger.info("INIT: ── Open Positions ──────────────────────────────────")
         for sym, d in self.state.items():
-            ep   = float(d.get('price', 0))
+            ep   = float(d.get('fill_price') or d.get('price', 0))
             qty  = float(d.get('qty', 0))
             cur  = float(d.get('current_price', ep))
             sl   = float(d.get('stop_loss', 0))
@@ -756,7 +755,6 @@ class VelocityEngine:
             logger.warning("SPY: insufficient history for regime check; assuming bull")
             return True
 
-        from src.indicators import compute_ma
         ma50_series  = compute_ma(df['close'], 50)
         ma200_series = compute_ma(df['close'], 200)
         ma50         = ma50_series.iloc[-1]
@@ -1400,6 +1398,7 @@ class VelocityEngine:
             # Clear day-scoped caches on date rollover
             self._daily_scan_skip.clear()
             self._insufficient_history_skip.clear()
+            self._bar_cache.clear()
         elif (
             self._day_start_equity is not None
             and equity < self._day_start_equity * (1 - MAX_DAILY_LOSS_PCT)
@@ -1641,6 +1640,11 @@ class VelocityEngine:
         for score, sym, ctx in signals:
             if placed >= open_slots:
                 break
+
+            # Each fill poll blocks up to 30 s — re-run exits before the next entry
+            # so hard-stop / break-even protection stays current across multi-signal cycles
+            if placed > 0:
+                self.check_velocity_exits()
 
             # Re-fetch live price if the scan snapshot is stale (>60 s)
             fetched_at = ctx.get('price_fetched_at', now_ny)

@@ -8,7 +8,7 @@ Optimized for **small cash accounts** with T+1 settlement. Not a margin/futures 
 
 - **Python**: venv at `venv/` uses Python 3.13 (symlinked to current snap release). Run via `venv/bin/python`.
 - **Broker**: Alpaca (`alpaca-trade-api` / `alpaca-py`). Do NOT use IB/ib_async imports.
-- **Run tests**: `venv/bin/python -m pytest tests/ -q`  *(357+ tests — all must pass)*
+- **Run tests**: `venv/bin/python -m pytest tests/ -q`  *(363+ tests — all must pass)*
 - **Start engine**: `venv/bin/python AutoTrader.py`
 - **Run backtest**: `venv/bin/python run_backtest.py`
 
@@ -22,7 +22,7 @@ src/scanner.py         ← Alpaca screener (top-gainers + most-actives candidate
 backtest/strategy.py   ← offline backtester (yfinance data)
 dashboard_server.py    ← web dashboard for monitoring
 run_backtest.py        ← CLI entry point for backtesting
-tests/                 ← pytest test suite (352+ tests)
+tests/                 ← pytest test suite (363+ tests)
 ```
 
 ## Critical Design Decisions (Do NOT "Fix" These)
@@ -503,6 +503,52 @@ stale IB reference from the comment.
 leftover from the IB-to-Alpaca rewrite. This is the last remaining IB reference outside
 of test docstrings.
 Fix: updated to "Alpaca candidate scanner."
+
+## Fixed Bugs (Session 19 — May 2026)
+
+### 68. `_bar_cache` Never Cleared on Day Rollover — Memory Growth + Stale ORB Data
+
+`run_cycle()` day-rollover block cleared `_daily_scan_skip` and `_insufficient_history_skip`
+but not `_bar_cache`. The bar cache stores daily OHLCV bars and ORB highs keyed by symbol.
+Without clearing on rollover, stale yesterday bars persisted in memory indefinitely, and any
+symbol not re-fetched on the new day would still hold yesterday's ORB high — a stale breakout
+level that could silently pass or block today's ORB filter incorrectly.
+Fix: added `self._bar_cache.clear()` to the day-rollover block alongside the other cache clears.
+Tests: `TestBarCacheClearedOnDayRollover.test_bar_cache_cleared_on_new_day`,
+`test_bar_cache_not_cleared_same_day`
+
+### 69. Dead `comm` Variable in `_write_dashboard_data()`
+
+Line 232 of `src/engine.py` computed `comm = d.get('commission', None)` immediately after
+computing `eff_stop`. `comm` was then never referenced — not in the output dict, not in any
+conditional, nowhere. Alpaca is commission-free and the engine never writes a `commission`
+key to state, so `d.get('commission', None)` always returned `None`. Pure dead code.
+Fix: removed the line entirely.
+Tests: `TestWriteDashboardDataNoDeadCommKey.test_commission_key_absent_from_output`
+
+### 70. Risk Management Gap — Software Exits Not Checked During Multi-Signal Entry Polling
+
+`check_velocity_exits()` ran once per cycle (step 5), before the entry loop. Each BUY
+attempt then blocked up to 30 seconds polling for fill confirmation. With 2-3 signals in
+one cycle, existing positions could go 60-90 seconds without software hard-stop or
+break-even checks — the Alpaca trailing stop is the GTC backstop, but the 7% intraday
+software hard stop would not fire during this window.
+Fix: added `if placed > 0: self.check_velocity_exits()` at the top of the entry loop body
+(after the `placed >= open_slots` break check). This re-runs software exits before each
+second and subsequent entry attempt, capping the monitoring gap at one fill poll (≤30 s)
+regardless of how many signals are queued.
+Tests: `TestExitRecheckBetweenEntries.test_check_velocity_exits_called_between_signals`
+
+### Minor. `_log_startup_summary()` Used `price` Instead of `fill_price`
+
+Line 362 of `src/engine.py` read `ep = float(d.get('price', 0))`. Everywhere else in the
+codebase (e.g., `_write_dashboard_data`) the pattern is
+`float(d.get('fill_price') or d.get('price', 0))` — preferring the confirmed fill price
+over the pending limit price. The startup log was showing limit prices instead of actual
+fill prices when a position was loaded from persisted state after a restart.
+Fix: changed to `ep = float(d.get('fill_price') or d.get('price', 0))`.
+Tests: `TestLogStartupSummaryUsesFillPrice.test_uses_fill_price_when_present`,
+`test_falls_back_to_price_when_no_fill_price`
 
 ## Survivorship Bias Warning (Backtest)
 The backtest universe is current NASDAQ/NYSE listings. Bankrupt/delisted tickers from the

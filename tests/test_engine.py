@@ -1358,3 +1358,185 @@ class TestPendingExitBlocksDuplicateSell:
             engine.check_velocity_exits()
 
         mock_liq.assert_not_called()
+
+
+# ── Session 19 fixes ──────────────────────────────────────────────────────────
+
+class TestBarCacheClearedOnDayRollover:
+    """_bar_cache must be cleared when the trading date rolls over."""
+
+    def _run_cycle_at(self, engine, fake_now):
+        with patch.object(engine, '_ensure_connected', return_value=True), \
+             patch.object(engine, '_sync_positions'), \
+             patch.object(engine, '_get_account_values', return_value=(1400.0, 1400.0)), \
+             patch.object(engine, '_fetch_vix', return_value=20.0), \
+             patch.object(engine, 'check_velocity_exits', return_value={}), \
+             patch.object(engine, '_audit_stop_orders'), \
+             patch.object(engine, '_update_position_prices'), \
+             patch.object(engine, '_write_dashboard_data'), \
+             patch.object(engine, 'save_state'), \
+             patch.object(engine, 'get_institutional_scan', return_value=[]), \
+             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch('src.engine.datetime') as mock_dt, \
+             patch('time.sleep'):
+            mock_dt.now.return_value  = fake_now
+            mock_dt.fromisoformat     = datetime.fromisoformat
+            engine._last_equity       = 1400.0
+            engine._equity_initialized = True
+            engine._day_start_equity  = 1400.0
+            engine.run_cycle()
+
+    def test_bar_cache_cleared_on_new_day(self):
+        engine = _make_engine()
+        engine._bar_cache      = {'AAPL': {'bars': [1, 2, 3]}, 'MSFT': {'bars': [4, 5]}}
+        engine._day_start_date = '2024-06-04'
+        engine.state = {}
+
+        fake_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))
+        self._run_cycle_at(engine, fake_now)
+
+        assert engine._bar_cache == {}
+
+    def test_bar_cache_not_cleared_same_day(self):
+        engine = _make_engine()
+        engine._bar_cache      = {'AAPL': {'bars': [1, 2, 3]}}
+        engine._day_start_date = '2024-06-05'
+        engine.state = {}
+
+        fake_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))
+        self._run_cycle_at(engine, fake_now)
+
+        assert 'AAPL' in engine._bar_cache
+
+
+class TestWriteDashboardDataNoDeadCommKey:
+    """_write_dashboard_data must not compute or use a 'commission' variable."""
+
+    def test_commission_key_absent_from_output(self, tmp_path, monkeypatch):
+        import json as _json
+        monkeypatch.setattr('src.engine.DASHBOARD_FILE', str(tmp_path / 'dashboard.json'))
+        monkeypatch.setattr('src.engine.EQUITY_HIST_FILE', str(tmp_path / 'equity.json'))
+
+        engine = _make_engine()
+        engine._last_equity        = 1000.0
+        engine._last_settled_cash  = 900.0
+        engine._last_vix           = 18.0
+        engine._last_scan_ts       = None
+        engine._next_scan_dt       = None
+        engine._equity_initialized = False
+        engine.state = {
+            'AAPL': {
+                'fill_price': 150.0, 'qty': 10, 'stop_loss': 140.0,
+                'stop_dist': 10.0, 'peak_price': 155.0,
+                'time': '2024-06-05T10:00:00', 'score': 75.0,
+            }
+        }
+
+        with patch('src.engine.ALPACA_PAPER', True):
+            engine._write_dashboard_data(connected=True)
+
+        data = _json.loads((tmp_path / 'dashboard.json').read_text())
+        pos = data['positions'][0]
+        assert 'commission' not in pos
+        assert pos['entry_price'] == 150.0
+        assert pos['unit_price'] == 150.0
+
+
+class TestLogStartupSummaryUsesFillPrice:
+    """_log_startup_summary must prefer fill_price over price for entry cost logging."""
+
+    def test_uses_fill_price_when_present(self, caplog):
+        engine = _make_engine()
+        engine.state = {
+            'AAPL': {
+                'fill_price': 155.0,
+                'price':      150.0,  # stale pending price — should be ignored
+                'qty':        10.0,
+                'stop_loss':  140.0,
+                'current_price': 157.0,
+            }
+        }
+        with caplog.at_level(logging.INFO, logger='VelocityEngine'):
+            engine._log_startup_summary(equity=5000.0)
+
+        # cost line should be based on fill_price (155), not pending price (150)
+        assert '155.00' in caplog.text
+
+    def test_falls_back_to_price_when_no_fill_price(self, caplog):
+        engine = _make_engine()
+        engine.state = {
+            'MSFT': {
+                'price':      200.0,
+                'qty':        5.0,
+                'stop_loss':  185.0,
+                'current_price': 202.0,
+            }
+        }
+        with caplog.at_level(logging.INFO, logger='VelocityEngine'):
+            engine._log_startup_summary(equity=5000.0)
+
+        assert '200.00' in caplog.text
+
+
+class TestExitRecheckBetweenEntries:
+    """check_velocity_exits must be called again before each second+ entry attempt."""
+
+    def test_check_velocity_exits_called_between_signals(self):
+        """With 2 signals and the first filling, exits are re-checked before the second."""
+        engine = _make_engine()
+        engine.state = {}
+
+        fake_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))
+        signals_ctx = {
+            'orb_high': 100.0, 'ma50': 105.0, 'ma200': 90.0,
+            'rsi': 60.0, 'rsi_prev': 58.5, 'atr': 2.0, 'atr_chandelier': 2.0,
+            'close': 110.0, 'live_price': 110.0, 'adx': 25.0, 'high200': 121.0,
+            'rvol': 3.0, 'spread_pct': 0.002, 'dollar_vol_20d': 300_000_000,
+            'sma200_slope': 0.1, 'avg_20d_vol': 5_000_000, 'df_daily': None,
+            'ask': 110.0, 'price_fetched_at': fake_now,
+        }
+
+        mock_filled = MagicMock(
+            status='filled',
+            filled_avg_price='110.0',
+            filled_qty='5.0',
+            id='order-123',
+        )
+        mock_order = MagicMock(id='order-123')
+
+        exit_call_count = []
+
+        def fake_check_exits():
+            exit_call_count.append(1)
+            return {}
+
+        with patch.object(engine, '_ensure_connected', return_value=True), \
+             patch.object(engine, '_sync_positions'), \
+             patch.object(engine, '_get_account_values', return_value=(5000.0, 5000.0)), \
+             patch.object(engine, '_fetch_vix', return_value=20.0), \
+             patch.object(engine, 'check_velocity_exits', side_effect=fake_check_exits), \
+             patch.object(engine, '_audit_stop_orders'), \
+             patch.object(engine, '_update_position_prices'), \
+             patch.object(engine, '_write_dashboard_data'), \
+             patch.object(engine, 'save_state'), \
+             patch.object(engine, 'get_institutional_scan', return_value=['AAPL', 'MSFT']), \
+             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, 'get_technical_context', return_value=signals_ctx), \
+             patch.object(engine.trading_client, 'submit_order', return_value=mock_order), \
+             patch.object(engine.trading_client, 'get_order_by_id', return_value=mock_filled), \
+             patch('src.engine.datetime') as mock_dt, \
+             patch('time.sleep'):
+            mock_dt.now.return_value = fake_now
+            mock_dt.fromisoformat    = datetime.fromisoformat
+            engine._last_equity       = 5000.0
+            engine._equity_initialized = True
+            engine._day_start_date    = fake_now.strftime('%Y-%m-%d')
+            engine._day_start_equity  = 5000.0
+            engine.run_cycle()
+
+        # First call: step 5 of run_cycle before the entry loop.
+        # Second call: inside the loop after placed=1, before the second signal.
+        assert len(exit_call_count) >= 2, (
+            f"check_velocity_exits called {len(exit_call_count)} time(s); "
+            "expected ≥2 (pre-loop + between entries)"
+        )
