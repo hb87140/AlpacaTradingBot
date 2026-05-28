@@ -552,7 +552,32 @@ Tests: `TestLogStartupSummaryUsesFillPrice.test_uses_fill_price_when_present`,
 
 ## Fixed Bugs (Session 23 — May 2026)
 
-### 75. Dashboard "Last Updated" Always Blank — Key Mismatch `ts` vs `last_updated`
+### 78. Hardcoded Risk Thresholds Should Be Config Constants
+
+Three inline numeric literals were used in `src/engine.py` that belong in `src/config.py`:
+
+- `pct >= 0.85` and `pct >= 0.95` in `_check_portfolio_concentration()` — the portfolio
+  concentration warn/halt thresholds. A trader adjusting risk tolerance should change these
+  in `src/config.py`, not hunt through the engine.
+- `if drift > 0.02` in the entry-loop re-price gate — the 2% price-drift threshold that
+  skips an entry if the live price has moved too far since the scan snapshot.
+
+Fix: added `CONCENTRATION_WARN_PCT = 0.85`, `CONCENTRATION_HALT_PCT = 0.95`, and
+`REPRICE_DRIFT_MAX_PCT = 0.02` to `src/config.py`. Imported and replaced all three
+hardcoded literals in `src/engine.py`.
+No new tests needed — existing concentration tests still validate behavior at the correct
+threshold values (unchanged).
+
+### 77. Hardcoded "Paper Trading" in `_initialize()` and `run()` Log Messages
+
+`_initialize()` logged `"MARKET DATA: Alpaca paper trading."` and `run()` logged
+`"ENGINE DEPLOYED — Alpaca Paper Trading"` regardless of the `ALPACA_PAPER` setting.
+When a trader switches to live trading (`ALPACA_PAPER=False`), the logs would misleadingly
+say "paper trading" for the entire session — a serious operational confusion.
+Fix: both messages now use `"PAPER" if ALPACA_PAPER else "LIVE"` so the log correctly
+reflects the active trading mode.
+
+### 76. Dashboard "Last Updated" Always Blank — Key Mismatch `ts` vs `last_updated`
 
 `_write_dashboard_data()` wrote the current timestamp to dashboard_data.json under the
 key `'ts'`. `get_state()` in `dashboard_server.py` reads `dash_data.get("last_updated")`.

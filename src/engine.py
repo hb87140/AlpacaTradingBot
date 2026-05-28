@@ -56,6 +56,8 @@ from src.config import (
     SCAN_MIN_SCORE,
     ALPACA_SCANNER_TOP,
     SCAN_MIN_PRICE,
+    CONCENTRATION_WARN_PCT, CONCENTRATION_HALT_PCT,
+    REPRICE_DRIFT_MAX_PCT,
 )
 from src.indicators import apply_all, compute_ma
 from src.scanner import get_candidates
@@ -380,8 +382,9 @@ class VelocityEngine:
         Phase 1 (immediate): fetch equity, sync positions, cancel orphaned buy orders.
         Phase 2 (timed):     sleep until PRE_ENTRY_SYNC_TIME, then re-sync + audit stops.
         """
+        mode = "PAPER" if ALPACA_PAPER else "LIVE"
         logger.info(
-            "MARKET DATA: Alpaca paper trading. "
+            f"MARKET DATA: Alpaca {mode} trading. "
             f"Data feed={ALPACA_DATA_FEED.upper()}. "
             "Real-time bid/ask spread filtering is active."
         )
@@ -832,7 +835,7 @@ class VelocityEngine:
             for d in self.state.values()
         )
         pct = deployed / equity
-        return pct, pct >= 0.85, pct >= 0.95
+        return pct, pct >= CONCENTRATION_WARN_PCT, pct >= CONCENTRATION_HALT_PCT
 
     # ── Position sync ─────────────────────────────────────────────────────────
     def _sync_positions(self):
@@ -1654,7 +1657,7 @@ class VelocityEngine:
                 if snap2 and snap2.get('live_price', 0) > 0:
                     new_price = snap2['live_price']
                     drift = abs(new_price - ctx['live_price']) / ctx['live_price']
-                    if drift > 0.02:
+                    if drift > REPRICE_DRIFT_MAX_PCT:
                         logger.warning(
                             f"SKIP {sym}: price drifted {drift*100:.2f}% since scan"
                         )
@@ -1847,7 +1850,8 @@ class VelocityEngine:
     # ── Main loop ─────────────────────────────────────────────────────────────
     def run(self):
         logger.info("=" * 40)
-        logger.info("ENGINE DEPLOYED — Alpaca Paper Trading")
+        mode = "PAPER" if ALPACA_PAPER else "LIVE"
+        logger.info(f"ENGINE DEPLOYED — Alpaca {mode} Trading")
         logger.info("=" * 40)
         self._initialize()
         logger.info("ENGINE READY: Starting main loop...")
