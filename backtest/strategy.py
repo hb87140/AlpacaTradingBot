@@ -94,6 +94,7 @@ from src.config import (
     BACKTEST_HOLD_BARS, BACKTEST_SLIPPAGE, BACKTEST_EXIT_SLIPPAGE,
     VOL_MULT_FRIDAY, FRIDAY_MIN_PROFIT_PCT,
     ADX_THRESHOLD, HIGH200_MIN_PCT,
+    SCAN_MIN_SCORE, BUCKET_CASH_PCT,
 )
 from src.indicators import apply_all
 
@@ -511,11 +512,13 @@ class VelocityBacktest:
             rvol_excess = max(0.0, rvol - self._rvol_min)
             rvol_pts    = min(25.0, rvol_excess / (5.0 - self._rvol_min) * 25.0)
             rsi_delta   = (rsi - prev_rsi) if not (pd.isna(rsi) or pd.isna(prev_rsi)) else 0.0
-            accel       = min(max(rsi_delta * 1.5, 0.0), 15.0)
+            accel       = min(max(rsi_delta / 5.0 * 15.0, 0.0), 15.0)
             rsi_lvl_pts = min(10.0, max(0.0, (rsi - RSI_THRESHOLD) / 20.0 * 10.0))
             momentum_pts = accel + rsi_lvl_pts
 
             score = trend_pts + rvol_pts + momentum_pts
+            if score < SCAN_MIN_SCORE:
+                continue
             scored.append((sym, score, rvol))
 
         scored.sort(key=lambda x: x[1], reverse=True)
@@ -705,23 +708,19 @@ class VelocityBacktest:
                 t.__dict__['_bars_held'] = t.__dict__.get('_bars_held', 0) + 1
                 bars_held = t.__dict__['_bars_held']
 
-                atr_chand      = t.__dict__.get('_atr_chand', float(row['ATR']))
-                chandelier_pct = t.__dict__.get('_chandelier_pct', 0.0)
+                atr_chand  = t.__dict__.get('_atr_chand', float(row['ATR']))
+                chand_dist = t.__dict__.get('_chand_dist', atr_chand * self._chandelier_mult)
 
                 # Track peak high since entry (Chandelier ratchet)
                 peak_high = max(t.__dict__.get('_peak_high', t.entry_price),
                                 float(row['high']))
                 t.__dict__['_peak_high'] = peak_high
 
-                # Chandelier stop: mirrors live IBKR TRAIL — stop = peak × (1 − pct%)
-                # where pct is locked in at entry.  Dollar-based (peak − ATR×mult)
-                # diverges from live behaviour as the stock rises because the % gap
-                # grows in absolute dollars while IBKR's pct stays fixed.
-                if chandelier_pct > 0:
-                    chand_stop = peak_high * (1.0 - chandelier_pct)
-                else:
-                    # Fallback for legacy Trade objects that pre-date the pct field
-                    chand_stop = peak_high - atr_chand * self._chandelier_mult
+                # Chandelier stop: fixed dollar distance from peak — matches Alpaca
+                # TrailingStopOrderRequest(trail_price=chand_dist) semantics exactly.
+                # The stop rises as the stock rises but always stays chand_dist below
+                # the peak, never widening or narrowing in percentage terms.
+                chand_stop = peak_high - chand_dist
 
                 # Hard stop: flat 7% below entry
                 hard_stop = t.entry_price * (1 - HARD_STOP_PCT)
@@ -876,7 +875,7 @@ class VelocityBacktest:
                         # Bucket = settled_cash / cash-qualified entry slots.  Max
                         # position count compounds with equity, but spending remains
                         # constrained by settled cash.
-                        bucket        = settled_cash / entry_slots
+                        bucket        = settled_cash * BUCKET_CASH_PCT / entry_slots
 
                         risk_dollars  = equity_mtm * RISK_PER_TRADE_PCT
                         qty_risk      = risk_dollars / risk_stop_dist
@@ -896,12 +895,11 @@ class VelocityBacktest:
                             qty         = qty,
                             round_trip_commission = self._round_trip_cost,
                         )
-                        # Store chandelier as % of entry — matches live IBKR TRAIL
-                        # semantics where stop = peak × (1 − pct%).  Dollar-based
-                        # tracking (peak − ATR×mult) diverges as price rises; the
-                        # live order exits later at a lower absolute dollar level.
-                        t.__dict__['_chandelier_pct'] = chand_dist / entry_price
-                        t.__dict__['_atr_chand']      = atr_chand_val
+                        # Store dollar distance — matches Alpaca trail_price semantics.
+                        # Stop always stays exactly chand_dist below the peak,
+                        # rising with the price but never changing in dollar terms.
+                        t.__dict__['_chand_dist'] = chand_dist
+                        t.__dict__['_atr_chand']  = atr_chand_val
                         t.__dict__['_peak_high']      = entry_price
                         t.__dict__['_bars_held']      = 0
                         open_positions[sym]        = t

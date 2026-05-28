@@ -488,3 +488,138 @@ class TestBacktestDynamicSlots:
             "With 3 daily signals and only 2 dynamic slots, at least 1 entry "
             "must be skipped due to the slot ceiling"
         )
+
+
+# ── SCAN_MIN_SCORE gate in _daily_scan ────────────────────────────────────────
+class TestDailyScanMinScore:
+    """_daily_scan must drop candidates whose composite score < SCAN_MIN_SCORE (30).
+
+    Live engine applies this gate in run_cycle(); backtest must mirror it so that
+    low-conviction setups are not entered during backtesting.
+    """
+
+    def _make_weak_signal_df(self, n: int = 300) -> pd.DataFrame:
+        """A DataFrame that passes 12-rule hard filters but has a very weak
+        trend (MA50 ≈ MA200) producing near-zero trend_pts and a low total score."""
+        from src.indicators import apply_all as _apply
+
+        np.random.seed(77)
+        # Flat price — MA50 ≈ MA200 → trend separation ≈ 0 → trend_pts ≈ 0
+        close = np.full(n, 50.0) + np.random.randn(n) * 0.05
+        high  = close + 0.05
+        low   = close - 0.05
+        idx   = pd.date_range("2023-01-01", periods=n, freq='B')
+
+        df = pd.DataFrame({'open': close, 'high': high, 'low': low,
+                           'close': close,
+                           'volume': SCAN_MIN_VOLUME + 1_000_000}, index=idx)
+        df = _apply(df)
+        df['prev_high']          = df['high'].shift(1)
+        df['avg_vol_20']         = df['volume'].rolling(20).mean()
+        df['avg_dollar_vol_20']  = (df['close'] * df['volume']).rolling(20).mean()
+        return df
+
+    def test_low_score_candidate_excluded_from_scan_output(self, monkeypatch):
+        """_daily_scan must return an empty list when all candidates score < SCAN_MIN_SCORE."""
+        from src.config import SCAN_MIN_SCORE
+
+        df = self._make_weak_signal_df()
+        bt = VelocityBacktest(start="2023-01-01", end="2024-01-01", use_cache=False)
+        monkeypatch.setattr(bt, '_download', lambda: bt._data.update({"WEAK": df}))
+
+        # Spy on _daily_scan output across all days
+        scan_results = []
+        original_scan = bt._daily_scan
+        def capturing_scan(today):
+            result = original_scan(today)
+            scan_results.append(result)
+            return result
+        monkeypatch.setattr(bt, '_daily_scan', capturing_scan)
+
+        bt.run()
+
+        # No day should return WEAK if its score is below SCAN_MIN_SCORE
+        from src.config import SCAN_MIN_SCORE
+        for day_result in scan_results:
+            syms = [s for s, _ in day_result]
+            assert "WEAK" not in syms or len(day_result) == 0, (
+                "Low-scoring symbol must not appear in _daily_scan output"
+            )
+
+    def test_scan_min_score_constant_imported_in_backtest(self):
+        """Backtest module must import SCAN_MIN_SCORE from src.config."""
+        import backtest.strategy as bs
+        assert hasattr(bs, 'SCAN_MIN_SCORE'), (
+            "backtest/strategy.py must import SCAN_MIN_SCORE from src.config"
+        )
+        from src.config import SCAN_MIN_SCORE
+        assert bs.SCAN_MIN_SCORE == SCAN_MIN_SCORE
+
+
+# ── BUCKET_CASH_PCT applied in _run_loop bucket calculation ──────────────────
+class TestBacktestBucketCashPct:
+    """_run_loop must apply BUCKET_CASH_PCT (0.90) when sizing position buckets.
+
+    Live engine: bucket_size = settled_cash * BUCKET_CASH_PCT / open_slots
+    Backtest must match — otherwise it over-deploys by ~11% per position and
+    may enter trades the live engine would skip (cash exactly at threshold).
+    """
+
+    def test_bucket_cash_pct_constant_imported_in_backtest(self):
+        """Backtest module must import BUCKET_CASH_PCT from src.config."""
+        import backtest.strategy as bs
+        assert hasattr(bs, 'BUCKET_CASH_PCT'), (
+            "backtest/strategy.py must import BUCKET_CASH_PCT from src.config"
+        )
+        from src.config import BUCKET_CASH_PCT
+        assert bs.BUCKET_CASH_PCT == BUCKET_CASH_PCT
+
+    def test_position_qty_reflects_bucket_cash_pct(self, monkeypatch):
+        """Entries must be sized with 10% reserve: bucket = cash * 0.90 / slots.
+
+        We run backtest with initial capital = 1 × MIN_BUCKET_SIZE ($500).
+        With BUCKET_CASH_PCT=0.90 the effective bucket is $450, so qty must be
+        based on $450, not $500.  We verify by checking that no single entry
+        exceeds 90% of settled cash / entry_price.
+        """
+        from src.config import MIN_BUCKET_SIZE, BUCKET_CASH_PCT
+
+        df = _make_df(n=300, seed=1, trend=0.3)
+        bt = VelocityBacktest(
+            start="2023-01-01", end="2024-01-01",
+            capital=MIN_BUCKET_SIZE,   # $500 → 1 slot
+            use_cache=False,
+        )
+        monkeypatch.setattr(bt, '_download', lambda: bt._data.update({"BULL": df}))
+        result = bt.run()
+
+        for t in result.trades:
+            # qty * entry_price must be ≤ BUCKET_CASH_PCT fraction of capital
+            deployed = t.qty * t.entry_price
+            max_allowed = MIN_BUCKET_SIZE * BUCKET_CASH_PCT
+            assert deployed <= max_allowed + 1.0, (  # +$1 tolerance for rounding
+                f"Entry deployed ${deployed:.2f} > ${max_allowed:.2f} "
+                f"(BUCKET_CASH_PCT={BUCKET_CASH_PCT})"
+            )
+
+
+# ── Dashboard JS equity chart key ─────────────────────────────────────────────
+class TestDashboardEquityChartKey:
+    """dashboard_server.py JS chart must read e.equity, not e.eq.
+
+    Engine writes {"ts": ..., "equity": ...} to equity_history.json.
+    The JS `hist.map(e => e.eq)` was a stale key that made every chart
+    data point undefined — the chart was always blank.
+    """
+
+    def test_dashboard_js_uses_equity_key_not_eq(self):
+        import os
+        path = os.path.join(os.path.dirname(__file__), '..', 'dashboard_server.py')
+        with open(path) as f:
+            source = f.read()
+        assert 'hist.map(e => e.equity)' in source, (
+            "JS equity chart must read e.equity (not e.eq) to match engine JSON output"
+        )
+        assert 'hist.map(e => e.eq)' not in source, (
+            "Stale e.eq key must be removed from dashboard JS"
+        )

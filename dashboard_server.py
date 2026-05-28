@@ -99,7 +99,7 @@ def _pnl(equity_now: float) -> dict:
         cutoff = now - timedelta(days=days_ago)
         past   = [e for e in history if _parse_ts(e["ts"]) <= cutoff]
         if past:
-            return float(past[-1]["eq"])
+            return float(past[-1]["equity"])
         # No snapshot older than the lookback — not enough history yet
         return None
 
@@ -110,8 +110,8 @@ def _pnl(equity_now: float) -> dict:
         pct    = round(amount / base * 100, 2)
         return {"amount": amount, "pct": pct}
 
-    # Overall: oldest snapshot in history (first real IBKR reading)
-    overall_base = float(history[0]["eq"]) if history else None
+    # Overall: oldest snapshot in history (first Alpaca account reading)
+    overall_base = float(history[0]["equity"]) if history else None
 
     return {
         "daily":   _entry(_find_base(1)),
@@ -136,11 +136,10 @@ def get_state():
     dash_data = _read_json(DASHBOARD_FILE)
 
     equity         = float(dash_data.get("equity") or 0)
-    # settled_cash: SettledCash written by the engine every cycle from the IBKR
-    # accountSummary API.  It represents uninvested cash and does NOT change with
-    # unrealized P&L — making it the correct "Cash Available" figure.
-    # Falls back to equity − position_value for dashboard_data.json files written
-    # by an older engine version that did not include this field.
+    # settled_cash: written by the engine every cycle from the Alpaca account API.
+    # Represents uninvested cash and does NOT change with unrealized P&L —
+    # the correct "Cash Available" figure for T+1 cash-account constraints.
+    # Falls back to equity − position_value when the field is absent.
     raw_settled = dash_data.get("settled_cash")
     position_value = sum(
         float(d.get("current_price", d.get("price", 0))) * float(d.get("qty", 0))
@@ -163,12 +162,11 @@ def get_state():
         qty      = float(d.get("qty",         0))
         if qty <= 0:
             continue
-        raw_commission = d.get("commission")    # None until IB commission report arrives
+        raw_commission = d.get("commission")    # None for Alpaca (commission-free)
         if raw_commission is not None and qty > 0:
-            # Normal entry: fill_price is ex-commission; add per-share commission.
             unit_price = round(ep + float(raw_commission) / qty, 4)
         elif d.get("fill_price"):
-            # Re-synced from IBKR: avgCost already includes commission in cost basis.
+            # Re-synced from Alpaca: avg_entry_price is already the all-in unit price.
             unit_price = round(ep, 4)
         else:
             unit_price = None
@@ -497,7 +495,7 @@ footer a{color:var(--dim);text-decoration:none;}
   <div class="panel">
     <div class="ptitle stat-title"><span class="icon">📡</span> MARKET STATUS</div>
     <div class="slist">
-      <div class="srow"><span class="slabel">IB GATEWAY</span>  <span class="sval" id="gw">—</span></div>
+      <div class="srow"><span class="slabel">ALPACA API</span>   <span class="sval" id="gw">—</span></div>
       <div class="srow"><span class="slabel">MARKET</span>       <span class="sval" id="mkt">—</span></div>
       <div class="srow"><span class="slabel">TIME&nbsp;(ET)</span>  <span class="sval c" id="clock">—</span></div>
       <div class="srow"><span class="slabel">VIX</span>          <span class="sval" id="vix">—</span></div>
@@ -766,7 +764,7 @@ async function refreshChart() {
       const d = new Date(e.ts);
       return d.toLocaleDateString('en-US', {month:'short', day:'numeric', timeZone:'America/New_York'});
     });
-    const data = hist.map(e => e.eq);
+    const data = hist.map(e => e.equity);
     const baseline = data[0];
     const borderColor = data[data.length-1] >= baseline ? '#00d68f' : '#ff4d6d';
     const gradientColor = data[data.length-1] >= baseline
@@ -841,7 +839,7 @@ _COND_JS = (
     f'["1",  "ORB Breakout",    "en", "Live price above the Opening Range High ({ORB_BAR_MINUTES}-min bar, 09:30-09:45 ET) — ORB above confirmed momentum"],\n'
     f'  ["2",  "Trend Filter",    "en", "Price > MA{MA_FAST} > MA{MA_SLOW} — full institutional uptrend required; MA{MA_FAST} ≥ {MIN_TREND_SEP*100:.0f}% above MA{MA_SLOW}"],\n'
     f'  ["3",  "Momentum Hook",   "en", "RSI({RSI_PERIOD}) rising by ≥ {RSI_MIN_DELTA:.0f} point AND RSI > {RSI_THRESHOLD} — acceleration, not exhaustion"],\n'
-    f'  ["4",  "Universe Filter", "en", "IB scan: Top % gainers ≥ {SCAN_MIN_GAIN_PCT:.0f}% | Price > ${SCAN_MIN_PRICE:.0f}'
+    f'  ["4",  "Universe Filter", "en", "Alpaca scan: Top % gainers ≥ {SCAN_MIN_GAIN_PCT:.0f}% | Price > ${SCAN_MIN_PRICE:.0f}'
     f' | RVOL ≥ {RVOL_MIN:.1f}× intraday | Vol > {SCAN_MIN_VOLUME/1e6:.0f}M'
     f' | Spread ≤ {SPREAD_MAX_PCT*100:.1f}%"],\n'
     f'  ["5",  "SPY Regime",      "en", "SPY > SMA50 > SMA200 — market-regime gate; suspends all new entries in bear markets"],\n'
@@ -849,12 +847,12 @@ _COND_JS = (
     f'  ["7",  "VIX Filter",      "en", "VIX ≤ {VIX_THRESHOLD} required — VIX > {VIX_THRESHOLD} suspends all new entries (Risk-Off)"],\n'
     f'  ["8",  "Session Window",  "en", "Entries only {ENTRY_START[0]:02d}:{ENTRY_START[1]:02d}–{ENTRY_END[0]:02d}:{ENTRY_END[1]:02d} ET, Monday–Friday (30-min post-open buffer to avoid ORB noise)"],\n'
     f'  ["9",  "Position Limit",  "en", "Max {MAX_POSITIONS_CAP} concurrent positions (dynamic: floor(equity/${MIN_BUCKET_SIZE:.0f})); new entries still require settled cash; max {MAX_SECTOR_COUNT} in same sector; correlation ≤ {CORR_MAX:.2f} with any open position"],\n'
-    f'  ["10", "Score Ranking",   "en", "All IBKR scanner results are evaluated; scored: Trend 30pts + Rel.Volume 25pts + Momentum 25pts + Liquidity 20pts = 100"],\n'
+    f'  ["10", "Score Ranking",   "en", "All Alpaca scanner results are evaluated; scored: Trend 30pts + Rel.Volume 25pts + Momentum 25pts + Liquidity 20pts = 100"],\n'
     f'  ["11", "Friday Filter",   "en", "Dollar-volume threshold doubled to 2× on Fridays for higher conviction"],\n'
     f'  ["12", "Chandelier Stop", "en", "Chandelier trailing stop = ATR({CHANDELIER_PERIOD})×{CHANDELIER_MULT:.1f} from peak; bucket = settled cash × {BUCKET_CASH_PCT*100:.0f}% ÷ open slots ({int(BUCKET_CASH_PCT*100)}% reserve avoids overdraft), recalculated every 60-sec cycle"],\n'
     f'];\n'
     f'const EXIT_CONDITIONS = [\n'
-    f'  ["1", "Chandelier Trail", "ex", "TRAIL SELL at ATR({CHANDELIER_PERIOD})×{CHANDELIER_MULT:.1f} from peak price; IB raises stop automatically as price climbs — only stop type used"],\n'
+    f'  ["1", "Chandelier Trail", "ex", "TRAIL SELL at ATR({CHANDELIER_PERIOD})×{CHANDELIER_MULT:.1f} from peak price; Alpaca raises stop automatically as price climbs — only stop type used"],\n'
     f'  ["2", "Velocity Exit",    "ex", "After {HOLD_TRADING_BARS} trading day(s): if profit < {PROFIT_MIN_THRESHOLD*100:.0f}%, force-liquidate via Market SELL; frees capital for T+2 settlement"],\n'
     f'  ["3", "Hard Stop",        "ex", "{HARD_STOP_PCT*100:.0f}% drawdown from fill price triggers immediate Market SELL regardless of ATR distance"],\n'
     f'  ["4", "Break-Even Floor", "ex", "Once profit exceeds {BREAK_EVEN_PCT*100:.0f}%, chandelier stop floored at fill price — eliminates risk of turning a winner into a loser"],\n'

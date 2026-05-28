@@ -8,7 +8,7 @@ Optimized for **small cash accounts** with T+1 settlement. Not a margin/futures 
 
 - **Python**: venv at `venv/` uses Python 3.13 (symlinked to current snap release). Run via `venv/bin/python`.
 - **Broker**: Alpaca (`alpaca-trade-api` / `alpaca-py`). Do NOT use IB/ib_async imports.
-- **Run tests**: `venv/bin/python -m pytest tests/ -q`  *(352+ tests — all must pass)*
+- **Run tests**: `venv/bin/python -m pytest tests/ -q`  *(357+ tests — all must pass)*
 - **Start engine**: `venv/bin/python AutoTrader.py`
 - **Run backtest**: `venv/bin/python run_backtest.py`
 
@@ -379,6 +379,108 @@ only the exception message, discarding the full traceback. Silent, hard-to-diagn
 crashes resulted — only the exception type and message were visible in the log.
 Fix: changed to `logger.exception("RUNTIME ERROR")` which automatically appends the full
 traceback to the log entry.
+
+## Fixed Bugs (Session 15 — May 2026)
+
+### 57. Backtest RSI Acceleration Formula 2× Divergence from Live Engine
+
+`_daily_scan` in `backtest/strategy.py` computed RSI acceleration as `rsi_delta * 1.5`,
+while the live `_score_candidate` uses `rsi_delta / 5.0 * 15.0` (= `rsi_delta * 3.0`).
+At the same RSI delta, the backtest awarded half the points the live engine would, causing
+the two to rank candidates differently. A stock with a 5-point RSI jump scored 7.5 in the
+backtest but 15.0 in live — a 2× gap on the momentum component (25 pts max total).
+Fix: changed backtest formula to `min(max(rsi_delta / 5.0 * 15.0, 0.0), 15.0)`.
+Both live engine and backtest now use the same RSI acceleration scale.
+
+### 58. Backtest Chandelier Stop Used Percentage Tracking Instead of Dollar Distance
+
+The Alpaca `TrailingStopOrderRequest` uses `trail_price` — a **fixed dollar amount** below
+the peak. As the stock rises, the stop rises by the same dollar amount, keeping a constant
+dollar gap. The backtest had switched to percentage-of-peak tracking (`chand_stop = peak ×
+(1 − pct)`), which widens the dollar gap as the stock rises (stop falls further below peak
+in absolute terms). This made the backtest stops looser than live ones on big winners —
+overstating performance by letting winning trades run longer before stopping out than Alpaca
+would actually allow.
+Fix: reverted to dollar tracking (`chand_stop = peak_high − chand_dist`) where `chand_dist`
+is fixed at entry. Stored as `t.__dict__['_chand_dist']` (replacing the removed
+`_chandelier_pct` key). Now matches Alpaca `trail_price` semantics exactly.
+
+### 59. Dashboard P&L Panel Permanently Broken (Key Mismatch)
+
+The engine wrote equity snapshots with key `"equity"` to `equity_history.json`, but
+`dashboard_server.py` read them with key `"eq"`. Every call to `_find_base()` raised
+`KeyError: 'eq'`, causing the `/api/state` endpoint to 500 and the P&L panel to show
+`—` for Daily / Weekly / Monthly / Overall. The equity chart still worked (it reads the
+raw JSON directly, not through `_pnl()`).
+Fix: changed `dashboard_server.py` lines 102 and 114 from `e["eq"]` to `e["equity"]`.
+Also updated the comment at line 114 from "first real IBKR reading" to "first Alpaca
+account reading".
+
+### 60. Dashboard Showed "IB GATEWAY" / "IBKR" / "IB scan" / "IB raises" (Wrong Broker)
+
+Multiple strings in `dashboard_server.py` still referenced the old Interactive Brokers
+broker that was replaced with Alpaca in an earlier session:
+
+- Status panel header: "IB GATEWAY" → "ALPACA API"
+- Comment: "IBKR accountSummary API" → "Alpaca account API"
+- Comment: "Re-synced from IBKR" → "Re-synced from Alpaca"
+- Entry condition 4: "IB scan:" → "Alpaca scan:"
+- Entry condition 10: "All IBKR scanner results" → "All Alpaca scanner results"
+- Exit condition 1: "IB raises stop automatically" → "Alpaca raises stop automatically"
+
+Fix: all six occurrences updated to Alpaca terminology.
+
+### 61. Inline Import `compute_ma` Inside `_fetch_spy_trend` Method
+
+`_fetch_spy_trend` in `src/engine.py` contained `from src.indicators import compute_ma`
+as an in-method import. Python caches imports, so there is no runtime cost, but it hides
+the module dependency, breaks linters, and misleads readers about the module's imports.
+Fix: added `compute_ma` to the module-level import line `from src.indicators import
+apply_all, compute_ma`. The inline import line inside the method is removed.
+
+### 62. Optimizer CSV Result Files Committed as Source Code
+
+`backtest/optimizer_results.csv` and `backtest/optimizer_results_partial.csv` are generated
+output artifacts produced by `scripts/run_optimizer.py`. They were committed to git as if
+they were source code, adding 2049 lines each of generated data to the repository.
+Fix: added `backtest/optimizer_results*.csv` to `.gitignore` so future optimizer runs do
+not pollute the commit history.
+
+## Fixed Bugs (Session 16 — May 2026)
+
+### 63. Dashboard Equity Chart Always Blank (Stale JS Key `e.eq`)
+
+`dashboard_server.py` JS `refreshChart()` function mapped history entries with
+`hist.map(e => e.eq)`. The engine writes `{"ts": ..., "equity": ...}` to
+`equity_history.json`, so `e.eq` was always `undefined` — every data point was
+`undefined`, rendering an empty chart.
+Session 15 fixed the Python `_pnl()` reads (`e["equity"]`) but missed this JS line.
+Fix: changed to `hist.map(e => e.equity)`.
+Test: `TestDashboardEquityChartKey.test_dashboard_js_uses_equity_key_not_eq`
+
+### 64. Backtest `_daily_scan()` Missing `SCAN_MIN_SCORE` Gate
+
+`_daily_scan()` computed composite scores and sorted by them, but never filtered
+out candidates below `SCAN_MIN_SCORE=30`. Low-conviction stocks scoring 1–29 (passing
+all 12 binary rules but weak on trend/RVOL/RSI) were returned to `_run_loop()` and
+could be entered. The live engine applies `if score < SCAN_MIN_SCORE: continue` in
+`run_cycle()` — backtest was silent-diverging on every such candidate.
+Fix: added `SCAN_MIN_SCORE` to the `src.config` import and inserted
+`if score < SCAN_MIN_SCORE: continue` inside `_daily_scan()` before `scored.append()`.
+Tests: `TestDailyScanMinScore.test_low_score_candidate_excluded_from_scan_output`,
+`test_scan_min_score_constant_imported_in_backtest`
+
+### 65. Backtest Bucket Calculation Missing `BUCKET_CASH_PCT` Reserve
+
+`_run_loop()` sized position buckets as `bucket = settled_cash / entry_slots`.
+The live engine applies a 10% cash reserve: `bucket_size = settled_cash * BUCKET_CASH_PCT / open_slots`
+(`BUCKET_CASH_PCT=0.90`). The backtest was deploying ~11.1% more per position than
+live allows, and could enter trades when cash was between `MIN_BUCKET_SIZE` and
+`MIN_BUCKET_SIZE / BUCKET_CASH_PCT` — slots the live engine would reject.
+Fix: added `BUCKET_CASH_PCT` to the `src.config` import and changed to
+`bucket = settled_cash * BUCKET_CASH_PCT / entry_slots`.
+Tests: `TestBacktestBucketCashPct.test_bucket_cash_pct_constant_imported_in_backtest`,
+`test_position_qty_reflects_bucket_cash_pct`
 
 ## Survivorship Bias Warning (Backtest)
 The backtest universe is current NASDAQ/NYSE listings. Bankrupt/delisted tickers from the
