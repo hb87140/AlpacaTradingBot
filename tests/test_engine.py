@@ -1596,3 +1596,289 @@ class TestExitRecheckBetweenEntries:
             f"check_velocity_exits called {len(exit_call_count)} time(s); "
             "expected ≥2 (pre-loop + between entries)"
         )
+
+
+# ── Bug 81: Live reprice minimum price check ──────────────────────────────────
+
+class TestRepriceMinPriceCheck:
+    """run_cycle() must reject a candidate if the refreshed live price is below
+    SCAN_MIN_PRICE, even when the scan-snapshot price was above the floor.
+
+    Scenario: scan captured price=$25 (passes floor).  By the time of reprice
+    (>60s stale), the live price has crashed to $15.  The engine must skip the
+    entry rather than place a buy below the minimum price.
+    """
+
+    def test_skip_entry_when_reprice_below_scan_min_price(self):
+        from src.config import SCAN_MIN_PRICE
+        engine = _make_engine()
+        engine.state = {}
+
+        # Scan snapshot was above floor; price_fetched_at is >60 s ago so reprice fires
+        stale_ts = _TZ_NY.localize(datetime(2024, 6, 5, 10, 0, 0))
+        fake_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))  # 30 min later
+
+        ctx = {
+            'orb_high': 24.0, 'ma50': 25.0, 'ma200': 22.0,
+            'rsi': 60.0, 'rsi_prev': 58.5, 'atr': 0.5, 'atr_chandelier': 0.5,
+            'close': 25.0, 'live_price': 25.0, 'adx': 25.0, 'high200': 28.0,
+            'rvol': 3.0, 'spread_pct': 0.002, 'dollar_vol_20d': 300_000_000,
+            'sma200_slope': 0.1, 'avg_20d_vol': 5_000_000, 'df_daily': None,
+            'ask': 25.0, 'price_fetched_at': stale_ts,  # intentionally stale
+        }
+
+        # Reprice returns a price below SCAN_MIN_PRICE
+        stale_snap = {'live_price': SCAN_MIN_PRICE - 5.0, 'ask': SCAN_MIN_PRICE - 5.0}
+
+        with patch.object(engine, '_ensure_connected', return_value=True), \
+             patch.object(engine, '_sync_positions'), \
+             patch.object(engine, '_get_account_values', return_value=(5000.0, 5000.0)), \
+             patch.object(engine, '_fetch_vix', return_value=20.0), \
+             patch.object(engine, 'check_velocity_exits', return_value={}), \
+             patch.object(engine, '_audit_stop_orders'), \
+             patch.object(engine, '_update_position_prices'), \
+             patch.object(engine, '_write_dashboard_data'), \
+             patch.object(engine, 'save_state'), \
+             patch.object(engine, 'get_institutional_scan', return_value=['AAPL']), \
+             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, 'get_technical_context', return_value=ctx), \
+             patch.object(engine, '_fetch_snapshot', return_value=stale_snap), \
+             patch('src.engine.datetime') as mock_dt, \
+             patch('time.sleep'):
+            mock_dt.now.return_value  = fake_now
+            mock_dt.fromisoformat     = datetime.fromisoformat
+            engine._last_equity        = 5000.0
+            engine._equity_initialized = True
+            engine._day_start_date     = fake_now.strftime('%Y-%m-%d')
+            engine._day_start_equity   = 5000.0
+            engine.run_cycle()
+
+        # No order should have been submitted — the sub-floor reprice must have skipped it
+        assert not engine.trading_client.submit_order.called, (
+            "submit_order must not be called when reprice resolves below SCAN_MIN_PRICE"
+        )
+
+    def test_reprice_min_price_check_in_engine_source(self):
+        """src/engine.py reprice path must contain the SCAN_MIN_PRICE guard."""
+        import os
+        path = os.path.join(os.path.dirname(__file__), '..', 'src', 'engine.py')
+        with open(path) as f:
+            source = f.read()
+        assert 'if new_price < SCAN_MIN_PRICE' in source, (
+            "src/engine.py reprice path must reject new_price < SCAN_MIN_PRICE"
+        )
+
+
+# ── Bug 82: Immediate stop audit for unprotected positions ─────────────────────
+
+class TestStopAuditUnprotectedPositions:
+    """_audit_stop_orders must fire immediately when a confirmed position has
+    stop_dist <= 0, not only on the daily date-change trigger.
+
+    Scenario: engine already ran today's audit (same date). A new position is
+    added mid-day with stop_dist=0 (e.g., stop placement failed silently).
+    On the next run_cycle(), the audit must fire again to protect it.
+    """
+
+    def _run_cycle_with_state(self, engine, fake_now, state):
+        engine.state = state
+        audit_calls = []
+
+        def capturing_audit():
+            audit_calls.append(1)
+
+        with patch.object(engine, '_ensure_connected', return_value=True), \
+             patch.object(engine, '_sync_positions'), \
+             patch.object(engine, '_get_account_values', return_value=(5000.0, 5000.0)), \
+             patch.object(engine, '_fetch_vix', return_value=20.0), \
+             patch.object(engine, 'check_velocity_exits', return_value={}), \
+             patch.object(engine, '_audit_stop_orders', side_effect=capturing_audit), \
+             patch.object(engine, '_update_position_prices'), \
+             patch.object(engine, '_write_dashboard_data'), \
+             patch.object(engine, 'save_state'), \
+             patch.object(engine, 'get_institutional_scan', return_value=[]), \
+             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch('src.engine.datetime') as mock_dt, \
+             patch('time.sleep'):
+            mock_dt.now.return_value  = fake_now
+            mock_dt.fromisoformat     = datetime.fromisoformat
+            engine._last_equity        = 5000.0
+            engine._equity_initialized = True
+            engine._day_start_date     = fake_now.strftime('%Y-%m-%d')
+            engine._day_start_equity   = 5000.0
+            engine.run_cycle()
+
+        return audit_calls
+
+    def test_audit_fires_when_position_has_zero_stop_dist(self):
+        """Audit must run mid-day when a confirmed position has stop_dist=0."""
+        engine = _make_engine()
+        fake_now = _TZ_NY.localize(datetime(2024, 6, 5, 11, 0))
+
+        # Mark today's audit as already done
+        engine._last_audit_date = fake_now.strftime('%Y-%m-%d')
+
+        # Confirmed position (not pending) with stop_dist=0 — no trail protection
+        state = {
+            'AAPL': {
+                'fill_price': 150.0, 'qty': 10, 'stop_loss': 140.0,
+                'stop_dist': 0.0,  # unprotected — audit must re-run
+                'peak_price': 152.0, 'time': '2024-06-05T10:00:00', 'score': 75.0,
+            }
+        }
+        audit_calls = self._run_cycle_with_state(engine, fake_now, state)
+
+        assert len(audit_calls) == 1, (
+            "audit_stop_orders must be called when any confirmed position has stop_dist <= 0, "
+            "even if today's date-based audit already ran"
+        )
+
+    def test_audit_does_not_fire_twice_when_protected(self):
+        """Audit must NOT fire a second time on same day when all positions are protected."""
+        engine = _make_engine()
+        fake_now = _TZ_NY.localize(datetime(2024, 6, 5, 11, 0))
+
+        # Mark today's audit as already done
+        engine._last_audit_date = fake_now.strftime('%Y-%m-%d')
+
+        # Confirmed position with a valid stop distance
+        state = {
+            'AAPL': {
+                'fill_price': 150.0, 'qty': 10, 'stop_loss': 140.0,
+                'stop_dist': 10.0,  # protected — no re-audit needed
+                'peak_price': 152.0, 'time': '2024-06-05T10:00:00', 'score': 75.0,
+            }
+        }
+        audit_calls = self._run_cycle_with_state(engine, fake_now, state)
+
+        assert len(audit_calls) == 0, (
+            "audit_stop_orders must NOT be called mid-day when all positions already have "
+            "a valid stop_dist (audit already ran today)"
+        )
+
+    def test_audit_skips_pending_positions_in_unprotected_check(self):
+        """Pending-buy positions with stop_dist=0 must NOT trigger the unprotected audit.
+
+        A pending position has no fill yet and therefore no stop order — this is
+        expected and must not cause spurious audit calls.
+        """
+        engine = _make_engine()
+        fake_now = _TZ_NY.localize(datetime(2024, 6, 5, 11, 0))
+
+        engine._last_audit_date = fake_now.strftime('%Y-%m-%d')
+
+        state = {
+            'NVDA': {
+                'price': 800.0, 'qty': 1, 'stop_dist': 0.0,
+                'pending': True,  # not yet filled — stop_dist=0 is normal
+                'time': '2024-06-05T10:55:00', 'score': 80.0,
+            }
+        }
+        audit_calls = self._run_cycle_with_state(engine, fake_now, state)
+
+        assert len(audit_calls) == 0, (
+            "Pending-buy positions with stop_dist=0 must NOT trigger an unprotected-position "
+            "audit — they have no fill yet so no stop order is expected"
+        )
+
+    def test_audit_fires_during_vix_high_early_return(self):
+        """Stop audit must fire even when VIX is elevated and run_cycle() returns early.
+
+        High-VIX early returns skip new entries — but positions already open still
+        need their protective stops audited.  The audit runs at step 1.5 (before
+        all account/VIX gates) so it cannot be bypassed by early exits.
+        """
+        engine = _make_engine()
+        fake_now = _TZ_NY.localize(datetime(2024, 6, 5, 11, 0))
+
+        # Today's audit has NOT yet run
+        engine._last_audit_date = '2024-06-04'
+
+        state = {
+            'AAPL': {
+                'fill_price': 150.0, 'qty': 10, 'stop_loss': 140.0,
+                'stop_dist': 0.0,  # unprotected
+                'peak_price': 152.0, 'time': '2024-06-05T10:00:00', 'score': 75.0,
+            }
+        }
+        engine.state = state
+        audit_calls = []
+
+        def capturing_audit():
+            audit_calls.append(1)
+
+        # VIX is 40 — above VIX_THRESHOLD — will cause early return before entry
+        with patch.object(engine, '_ensure_connected', return_value=True), \
+             patch.object(engine, '_sync_positions'), \
+             patch.object(engine, '_get_account_values', return_value=(5000.0, 5000.0)), \
+             patch.object(engine, '_fetch_vix', return_value=40.0), \
+             patch.object(engine, 'check_velocity_exits', return_value={}), \
+             patch.object(engine, '_audit_stop_orders', side_effect=capturing_audit), \
+             patch.object(engine, '_update_position_prices'), \
+             patch.object(engine, '_write_dashboard_data'), \
+             patch.object(engine, 'save_state'), \
+             patch.object(engine, 'get_institutional_scan', return_value=[]), \
+             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch('src.engine.datetime') as mock_dt, \
+             patch('time.sleep'):
+            mock_dt.now.return_value  = fake_now
+            mock_dt.fromisoformat     = datetime.fromisoformat
+            engine._last_equity        = 5000.0
+            engine._equity_initialized = True
+            engine._day_start_date     = fake_now.strftime('%Y-%m-%d')
+            engine._day_start_equity   = 5000.0
+            engine.run_cycle()
+
+        assert len(audit_calls) == 1, (
+            "Stop audit must fire even when VIX is high and run_cycle() returns early — "
+            "unprotected positions need stops placed regardless of entry gates"
+        )
+
+    def test_audit_fires_when_account_values_fail(self):
+        """Stop audit must fire even when _get_account_values() raises.
+
+        When the Alpaca API is temporarily down, run_cycle() returns early after the
+        account-values exception.  The stop audit runs at step 1.5 (before that
+        exception path) so it still protects open positions.
+        """
+        engine = _make_engine()
+        fake_now = _TZ_NY.localize(datetime(2024, 6, 5, 11, 0))
+
+        # Today's audit has NOT yet run
+        engine._last_audit_date = '2024-06-04'
+
+        state = {
+            'AAPL': {
+                'fill_price': 150.0, 'qty': 10, 'stop_loss': 140.0,
+                'stop_dist': 0.0,  # unprotected
+                'peak_price': 152.0, 'time': '2024-06-05T10:00:00', 'score': 75.0,
+            }
+        }
+        engine.state = state
+        audit_calls = []
+
+        def capturing_audit():
+            audit_calls.append(1)
+
+        with patch.object(engine, '_ensure_connected', return_value=True), \
+             patch.object(engine, '_sync_positions'), \
+             patch.object(engine, '_get_account_values', side_effect=RuntimeError("API down")), \
+             patch.object(engine, 'check_velocity_exits', return_value={}), \
+             patch.object(engine, '_audit_stop_orders', side_effect=capturing_audit), \
+             patch.object(engine, '_update_position_prices'), \
+             patch.object(engine, '_write_dashboard_data'), \
+             patch.object(engine, 'save_state'), \
+             patch('src.engine.datetime') as mock_dt, \
+             patch('time.sleep'):
+            mock_dt.now.return_value  = fake_now
+            mock_dt.fromisoformat     = datetime.fromisoformat
+            engine._last_equity        = 5000.0
+            engine._equity_initialized = True
+            engine._day_start_date     = fake_now.strftime('%Y-%m-%d')
+            engine._day_start_equity   = 5000.0
+            engine.run_cycle()
+
+        assert len(audit_calls) == 1, (
+            "Stop audit must fire even when _get_account_values() raises — "
+            "Alpaca API outages must not leave open positions without stop protection"
+        )

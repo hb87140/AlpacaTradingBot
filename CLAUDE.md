@@ -8,7 +8,7 @@ Optimized for **small cash accounts** with T+1 settlement. Not a margin/futures 
 
 - **Python**: venv at `venv/` uses Python 3.13 (symlinked to current snap release). Run via `venv/bin/python`.
 - **Broker**: Alpaca (`alpaca-trade-api` / `alpaca-py`). Do NOT use IB/ib_async imports.
-- **Run tests**: `venv/bin/python -m pytest tests/ -q`  *(369+ tests — all must pass)*
+- **Run tests**: `venv/bin/python -m pytest tests/ -q`  *(378+ tests — all must pass)*
 - **Start engine**: `venv/bin/python AutoTrader.py`
 - **Run backtest**: `venv/bin/python run_backtest.py`
 
@@ -22,7 +22,7 @@ src/scanner.py         ← Alpaca screener (top-gainers + most-actives candidate
 backtest/strategy.py   ← offline backtester (yfinance data)
 dashboard_server.py    ← web dashboard for monitoring
 run_backtest.py        ← CLI entry point for backtesting
-tests/                 ← pytest test suite (365+ tests)
+tests/                 ← pytest test suite (376+ tests)
 ```
 
 ## Critical Design Decisions (Do NOT "Fix" These)
@@ -686,6 +686,65 @@ assertions:
 Fix: added `patch('src.engine.datetime')` to pin both tests to Wednesday 2024-06-05 10:30 ET
 (same safe-day pattern used in all previously fixed time-sensitive tests). Friday-close rule
 is now permanently inactive in both tests.
+
+## Fixed Bugs (Session 25 — May 2026)
+
+### 80. Backtest Entry-Price Below SCAN_MIN_PRICE Not Rejected
+
+`_daily_scan` in `backtest/strategy.py` filtered candidates by `close >= SCAN_MIN_PRICE ($20)`,
+but the actual entry proxy `max(open, prev_high) * (1 + BACKTEST_SLIPPAGE)` could resolve below
+$20 even when the close passes the filter. Example: stock closes $25 but opens $5 (gap-up day or
+data artefact); entry proxy = $5.005 < $20. The live engine rejects sub-$20 prices in
+`get_technical_context` before any signal reaches the entry loop. The backtest had no equivalent
+guard on the entry proxy — it would attempt to size and place the trade at the sub-floor price.
+Fix: added `if entry_price < SCAN_MIN_PRICE: continue` immediately after computing `entry_price`
+in `_daily_scan`, after the slippage multiplication.
+Tests: `TestBacktestEntryPriceFloor.test_entry_below_scan_min_price_not_entered`,
+`test_entry_price_floor_check_in_source`
+
+### 81. Live Reprice Path Does Not Re-Check SCAN_MIN_PRICE After Refreshing Price
+
+`run_cycle()` refreshes the live price for scan snapshots older than 60 seconds. The drift
+check (`REPRICE_DRIFT_MAX_PCT = 2%`) validates that the price hasn't moved too far, but there
+was no check that the refreshed price is still above the $20 minimum. A stock that was $22 at
+scan time could fall to $15 by the time the reprice fires — the engine would proceed to place
+a limit buy at $15, violating the liquidity and momentum profile that requires `price > $20`.
+The live `get_technical_context` only checks the scan-snapshot price, not the reprice.
+Fix: added `if new_price < SCAN_MIN_PRICE: continue` before the drift check in the reprice
+block of `run_cycle()`, with a `logger.warning` matching the existing skip-log pattern.
+Tests: `TestRepriceMinPriceCheck.test_skip_entry_when_reprice_below_scan_min_price`,
+`test_reprice_min_price_check_in_engine_source`
+
+### 83. Stop Audit Skipped by Early-Return Paths (VIX High, Account Failure, Circuit Breaker)
+
+`run_cycle()` ran `_audit_stop_orders()` at step 6, after the VIX check, account-values
+fetch, circuit breaker, and concentration halt. All four early-return paths called
+`check_velocity_exits()` but returned before reaching step 6. During a sustained high-VIX
+session or while the Alpaca API was temporarily down, any position with `stop_dist=0`
+(stop placement failed silently) received zero protection for the entire period — the
+audit that would place a new stop order was permanently bypassed.
+Fix: moved the stop audit to step 1.5 (after `_sync_positions`, before `_get_account_values`),
+using a private `_audit_today` variable so there is no name collision with `today_str`
+computed later for the circuit breaker. The old step 6 block was removed. The audit now
+fires unconditionally on any path that reached `_sync_positions`, which is every path that
+passed the connectivity check.
+Tests: `TestStopAuditUnprotectedPositions.test_audit_fires_during_vix_high_early_return`,
+`test_audit_fires_when_account_values_fail`
+
+### 82. Stop Audit Not Triggered Immediately for Unprotected Positions
+
+`run_cycle()` ran `_audit_stop_orders()` only once per trading day (keyed on
+`_last_audit_date`). If a position entered mid-day had its trailing stop silently fail
+(e.g., Alpaca order rejected asynchronously), its `stop_dist` would remain `0` and no
+protective stop would be in force for the rest of the day — until the next morning's audit.
+Fix: added an `has_unprotected` check that scans `self.state` for confirmed positions (not
+`pending` or `pending_exit`) with `stop_dist <= 0`. The audit condition is now:
+`if (self._last_audit_date != today_str or has_unprotected) and self.state:`.
+This triggers an immediate re-audit whenever any live position is found without a stop,
+without changing the once-per-day behavior for fully-protected portfolios.
+Tests: `TestStopAuditUnprotectedPositions.test_audit_fires_when_position_has_zero_stop_dist`,
+`test_audit_does_not_fire_twice_when_protected`,
+`test_audit_skips_pending_positions_in_unprotected_check`
 
 ## Survivorship Bias Warning (Backtest)
 The backtest universe is current NASDAQ/NYSE listings. Bankrupt/delisted tickers from the

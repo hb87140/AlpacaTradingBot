@@ -864,6 +864,11 @@ class VelocityBacktest:
                         raw_entry   = max(float(row['open']), float(row['prev_high']))
                         entry_price = round(raw_entry * (1 + BACKTEST_SLIPPAGE), 4)
 
+                        # Reject if the actual entry proxy is sub-floor (close may be ≥ $20
+                        # while open / prev_high is not — e.g., a gap-up day starting near $2)
+                        if entry_price < SCAN_MIN_PRICE:
+                            continue
+
                         # ATR-based position sizing: risk 2% of equity per trade
                         atr_chand_val   = float(row['ATR_CHAND'])
                         chand_dist      = atr_chand_val * self._chandelier_mult

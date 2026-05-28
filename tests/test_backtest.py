@@ -654,3 +654,66 @@ class TestDashboardBreakEvenIndicator:
         assert 'raw_commission' not in source, (
             "Dead raw_commission variable must be removed from dashboard_server.py"
         )
+
+
+# ── Bug 80: Backtest entry-price floor ────────────────────────────────────────
+class TestBacktestEntryPriceFloor:
+    """Backtest must reject entries where the entry proxy (max(open, prev_high) * slippage)
+    is below SCAN_MIN_PRICE, even if the daily close passes the filter.
+
+    E.g., a gap-up day where open = $5, prev_high = $4, close = $25 should not
+    be entered: raw_entry = $5, entry_price ≈ $5.005 < $20 minimum.
+    """
+
+    def _make_cheap_open_df(self, n: int = 300) -> pd.DataFrame:
+        """DataFrame where close is ≥ $20 throughout but open is below $20 for most bars.
+
+        This triggers the entry-price floor: _daily_scan accepts the close ($25),
+        but the actual entry proxy max(open=$5, prev_high=$4) resolves to $5, which
+        is below SCAN_MIN_PRICE.
+        """
+        from src.indicators import apply_all as _apply
+
+        np.random.seed(42)
+        # Close is above $20 so the close-based price-floor filter passes
+        close     = np.full(n, 25.0)
+        high      = close + 0.05
+        low       = close - 0.05
+        # Open is $5 — below SCAN_MIN_PRICE — simulates a day where the stock
+        # opened far below its close (e.g., wild spread or data artefact)
+        open_     = np.full(n, 5.0)
+        idx       = pd.date_range("2023-01-01", periods=n, freq='B')
+        df = pd.DataFrame({'open': open_, 'high': high, 'low': low,
+                           'close': close,
+                           'volume': SCAN_MIN_VOLUME + 1_000_000}, index=idx)
+        df = _apply(df)
+        df['prev_high']          = df['high'].shift(1)
+        df['avg_vol_20']         = df['volume'].rolling(20).mean()
+        df['avg_dollar_vol_20']  = (df['close'] * df['volume']).rolling(20).mean()
+        return df
+
+    def test_entry_below_scan_min_price_not_entered(self, monkeypatch):
+        """No trade may be entered when the entry proxy resolves below SCAN_MIN_PRICE."""
+        from src.config import SCAN_MIN_PRICE
+
+        df = self._make_cheap_open_df()
+        bt = VelocityBacktest(start="2023-01-01", end="2024-01-01", use_cache=False)
+        monkeypatch.setattr(bt, '_download', lambda: bt._data.update({"CHEAP": df}))
+        result = bt.run()
+
+        for t in result.trades:
+            assert t.entry_price >= SCAN_MIN_PRICE, (
+                f"Trade entered at ${t.entry_price:.2f} < SCAN_MIN_PRICE=${SCAN_MIN_PRICE:.2f}; "
+                "entry proxy below floor must be rejected"
+            )
+
+    def test_entry_price_floor_check_in_source(self):
+        """backtest/strategy.py must contain the entry-price floor guard after entry_price computation."""
+        import os
+        path = os.path.join(os.path.dirname(__file__), '..', 'backtest', 'strategy.py')
+        with open(path) as f:
+            source = f.read()
+        assert 'if entry_price < SCAN_MIN_PRICE' in source, (
+            "backtest/strategy.py must reject entry_price < SCAN_MIN_PRICE "
+            "(close may pass the floor filter while open/prev_high do not)"
+        )

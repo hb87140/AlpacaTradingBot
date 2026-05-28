@@ -1365,6 +1365,18 @@ class VelocityEngine:
         # 1. Position sync
         self._sync_positions()
 
+        # 1.5. Stop-order audit — runs before all account/VIX/entry gates so that
+        # positions are protected even when account summary or regime data is unavailable
+        _audit_today = datetime.now(_TZ_NY).strftime('%Y-%m-%d')
+        _has_unprotected = any(
+            float(d.get('stop_dist', 0)) <= 0
+            for d in self.state.values()
+            if not d.get('pending') and not d.get('pending_exit')
+        )
+        if (self._last_audit_date != _audit_today or _has_unprotected) and self.state:
+            self._audit_stop_orders()
+            self._last_audit_date = _audit_today
+
         # 2. Account values
         try:
             equity, settled = self._get_account_values()
@@ -1452,11 +1464,6 @@ class VelocityEngine:
 
         # 5. Manage existing positions
         prefetched = self.check_velocity_exits()
-
-        # 6. Daily stop-order audit (once per day)
-        if self._last_audit_date != today_str and self.state:
-            self._audit_stop_orders()
-            self._last_audit_date = today_str
 
         # 7. Entry window check
         now_ny = datetime.now(_TZ_NY)
@@ -1656,6 +1663,11 @@ class VelocityEngine:
                 snap2 = self._fetch_snapshot(sym)
                 if snap2 and snap2.get('live_price', 0) > 0:
                     new_price = snap2['live_price']
+                    if new_price < SCAN_MIN_PRICE:
+                        logger.warning(
+                            f"SKIP {sym}: refreshed price ${new_price:.2f} < min ${SCAN_MIN_PRICE:.2f}"
+                        )
+                        continue
                     drift = abs(new_price - ctx['live_price']) / ctx['live_price']
                     if drift > REPRICE_DRIFT_MAX_PCT:
                         logger.warning(
