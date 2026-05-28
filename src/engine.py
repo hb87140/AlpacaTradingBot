@@ -19,10 +19,10 @@ from alpaca.trading.requests import (
     MarketOrderRequest,
     TrailingStopOrderRequest,
 )
-from alpaca.trading.enums import OrderSide, OrderType, QueryOrderStatus, TimeInForce
+from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.historical.screener import ScreenerClient
-from alpaca.data.requests import MostActivesRequest, StockBarsRequest, StockSnapshotRequest
+from alpaca.data.requests import StockBarsRequest, StockSnapshotRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from src.config import (

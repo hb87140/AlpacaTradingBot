@@ -550,6 +550,23 @@ Fix: changed to `ep = float(d.get('fill_price') or d.get('price', 0))`.
 Tests: `TestLogStartupSummaryUsesFillPrice.test_uses_fill_price_when_present`,
 `test_falls_back_to_price_when_no_fill_price`
 
+## Fixed Bugs (Session 21 — May 2026)
+
+### 73. Dead Imports in `src/engine.py`
+
+Two imports were present but never used:
+
+- `OrderType` from `alpaca.trading.enums` — the engine never calls `OrderType.X`; all
+  order-type comparisons use `str(o.order_type)` against hardcoded string literals like
+  `'OrderType.TRAILING_STOP'`.  The enum class itself was dead weight.
+- `MostActivesRequest` from `alpaca.data.requests` — this request type is used in
+  `src/scanner.py` (`get_most_actives`), never in `engine.py`.  It was left behind as
+  a stale import after scanner logic was extracted into its own module.
+
+Fix: removed both unused imports from `src/engine.py`.
+Tests: existing 365 tests all pass; no new tests needed (import presence is not a
+behavioral property worth testing).
+
 ## Fixed Bugs (Session 20 — May 2026)
 
 ### 71. Dashboard Break-Even `↑` Indicator Never Fired
