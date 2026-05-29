@@ -649,6 +649,10 @@ class VelocityEngine:
             # Normalise column names to lowercase so apply_all() works
             df.columns = [c.lower() for c in df.columns]
             return df[['open', 'high', 'low', 'close', 'volume']]
+        except KeyError:
+            # Symbol has no bars in Alpaca (warrant, delisted, non-stock) — skip for the day
+            self._insufficient_history_skip.add(symbol)
+            return None
         except Exception as e:
             logger.warning(f"DATA: daily bars fetch failed for {symbol}: {e}")
             return None
@@ -1049,23 +1053,23 @@ class VelocityEngine:
             orb_high   = cached.get('orb_high')
         else:
             bars_daily = self._fetch_daily_bars(symbol)
-            orb_high   = self._fetch_orb_high(symbol)
-            if bars_daily is not None:
-                self._bar_cache[symbol] = {
-                    'date':       today_str,
-                    'bars_daily': bars_daily,
-                    'orb_high':   orb_high,
-                }
+            if bars_daily is None:
+                # No history (warrant, delisted, transient error) — already added to
+                # _insufficient_history_skip by KeyError handler; skip ORB fetch too
+                return None
+            orb_high = self._fetch_orb_high(symbol)
+            self._bar_cache[symbol] = {
+                'date':       today_str,
+                'bars_daily': bars_daily,
+                'orb_high':   orb_high,
+            }
 
         if orb_high is None or orb_high <= 0:
             logger.debug(f"SCAN {symbol}: ORB high unavailable, skipping")
             return None
 
-        if bars_daily is None or len(bars_daily) < MIN_CANDLES:
-            logger.debug(
-                f"SCAN {symbol}: insufficient daily bars "
-                f"({len(bars_daily) if bars_daily is not None else 0} < {MIN_CANDLES})"
-            )
+        if len(bars_daily) < MIN_CANDLES:
+            logger.debug(f"SCAN {symbol}: insufficient daily bars ({len(bars_daily)} < {MIN_CANDLES})")
             self._insufficient_history_skip.add(symbol)
             return None
 

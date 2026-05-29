@@ -15,7 +15,25 @@ engine's 12-rule entry screener, which performs all quality filtering.
 from __future__ import annotations
 
 import logging
+import re
 from typing import List
+
+# Warrants (BASE+W), rights (BASE.RT), warrant series (BASE.WS), and other
+# non-standard instruments never qualify — filter them before hitting the API.
+_NON_STOCK_RE = re.compile(
+    r'\.'            # contains a period  (e.g. GLED.RT, GRAF.WS)
+    r'|WS$|WD$|WT$'  # warrant-series / warrant-deed suffixes
+    r'|RT$|RW$'      # rights suffixes
+)
+
+def _is_non_stock(sym: str) -> bool:
+    """Return True for warrants, rights, and other non-standard instruments."""
+    if _NON_STOCK_RE.search(sym):
+        return True
+    # 5+ char symbols ending in W are almost always warrants (4-char base + W suffix)
+    if len(sym) >= 5 and sym.endswith('W'):
+        return True
+    return False
 
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.historical.screener import ScreenerClient
@@ -83,7 +101,7 @@ def get_candidates(
     seen:   set       = set()
     result: List[str] = []
     for sym in gainers + actives:
-        if sym not in seen:
+        if sym not in seen and not _is_non_stock(sym):
             seen.add(sym)
             result.append(sym)
 
