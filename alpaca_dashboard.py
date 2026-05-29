@@ -100,7 +100,8 @@ def _pnl(equity_now: float) -> dict:
         cutoff = now - timedelta(days=days_ago)
         past   = [e for e in history if _parse_ts(e["ts"]) <= cutoff]
         if past:
-            return float(past[-1]["equity"])
+            e = past[-1]
+            return float(e.get("equity") or e.get("eq") or 0) or None
         return None
 
     def _entry(base: Optional[float]) -> dict:
@@ -111,7 +112,11 @@ def _pnl(equity_now: float) -> dict:
         return {"amount": amount, "pct": pct}
 
     # Overall: oldest snapshot in history (first Alpaca account reading)
-    overall_base = float(history[0]["equity"]) if history else None
+    if history:
+        h0 = history[0]
+        overall_base = float(h0.get("equity") or h0.get("eq") or 0) or None
+    else:
+        overall_base = None
 
     return {
         "daily":   _entry(_find_base(1)),
