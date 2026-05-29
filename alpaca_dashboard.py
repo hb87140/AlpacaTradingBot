@@ -2,9 +2,9 @@
 """
 VelocityEngine Web Dashboard
 ─────────────────────────────
-Standalone FastAPI server — completely independent of the AutoTrader.
+Standalone FastAPI server — completely independent of the trading engine.
 
-Start:   venv/bin/python dashboard_server.py
+Start:   venv/bin/python alpaca_dashboard.py
 Open:    http://localhost:8080
 
 The server only reads JSON files written by the engine:
@@ -12,7 +12,7 @@ The server only reads JSON files written by the engine:
   • dashboard_data.json  — equity, VIX, connection status, scan times
   • equity_history.json  — rolling 60-day equity snapshots for P&L
 
-Closing/restarting this server never affects the running AutoTrader.
+Closing/restarting this server never affects the running alpaca_auto_trader.
 """
 
 import collections

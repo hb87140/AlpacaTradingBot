@@ -226,6 +226,7 @@ class TestInitialize:
         }})
         with patch.object(engine, '_sync_positions'),       \
              patch.object(engine, '_restore_blocked_today'), \
+             patch.object(engine, '_wait_for_pre_entry_sync'), \
              patch.object(engine, '_audit_stop_orders') as mock_audit, \
              patch.object(engine, '_update_position_prices'),          \
              patch.object(engine, '_write_dashboard_data'), \
@@ -237,6 +238,7 @@ class TestInitialize:
         engine = _make_engine(state={})
         with patch.object(engine, '_sync_positions'),       \
              patch.object(engine, '_restore_blocked_today'), \
+             patch.object(engine, '_wait_for_pre_entry_sync'), \
              patch.object(engine, '_audit_stop_orders') as mock_audit, \
              patch.object(engine, '_update_position_prices'),          \
              patch.object(engine, '_write_dashboard_data'), \
@@ -248,6 +250,7 @@ class TestInitialize:
         engine = _make_engine(state={})
         with patch.object(engine, '_sync_positions'),    \
              patch.object(engine, '_restore_blocked_today'), \
+             patch.object(engine, '_wait_for_pre_entry_sync'), \
              patch.object(engine, '_update_position_prices') as mock_up, \
              patch.object(engine, '_write_dashboard_data'), \
              patch.object(engine, '_log_startup_summary'):
@@ -440,6 +443,7 @@ class TestInitializeAuditDateSet:
         assert engine._last_audit_date is None
         with patch.object(engine, '_sync_positions'), \
              patch.object(engine, '_restore_blocked_today'), \
+             patch.object(engine, '_wait_for_pre_entry_sync'), \
              patch.object(engine, '_audit_stop_orders'),         \
              patch.object(engine, '_update_position_prices'),    \
              patch.object(engine, '_write_dashboard_data'), \
@@ -452,6 +456,7 @@ class TestInitializeAuditDateSet:
         engine = _make_engine(state={})
         with patch.object(engine, '_sync_positions'), \
              patch.object(engine, '_restore_blocked_today'), \
+             patch.object(engine, '_wait_for_pre_entry_sync'), \
              patch.object(engine, '_write_dashboard_data'), \
              patch.object(engine, '_log_startup_summary'):
             engine._initialize()

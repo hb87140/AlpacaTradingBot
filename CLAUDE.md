@@ -21,40 +21,27 @@ Never commit `.env` files, credentials, or generated artifacts (`backtest/optimi
 - **Python**: venv at `venv/` uses Python 3.13 (symlinked to current snap release). Run via `venv/bin/python`.
 - **Broker**: Alpaca (`alpaca-trade-api` / `alpaca-py`). Do NOT use IB/ib_async imports.
 - **Run tests**: `venv/bin/python -m pytest tests/ -q`  *(381+ tests — all must pass)*
-- **Start engine**: `venv/bin/python AutoTrader.py`
+- **Start engine**: `venv/bin/python alpaca_auto_trader.py`
 - **Run backtest**: `venv/bin/python run_backtest.py`
 
 ## Architecture
 ```
-AutoTrader.py          ← entry point (signal handling, restart loop)
+alpaca_auto_trader.py  ← entry point (signal handling, restart loop)
 src/engine.py          ← core trading engine (VelocityEngine class)
 src/config.py          ← all tunable parameters (edit here, not inline)
 src/indicators.py      ← technical indicators (ATR, RSI, MA, etc.)
 src/scanner.py         ← Alpaca screener (top-gainers + most-actives candidate pool)
 backtest/strategy.py   ← offline backtester (yfinance data)
-dashboard_server.py    ← web dashboard for monitoring
+alpaca_dashboard.py    ← web dashboard for monitoring
 run_backtest.py        ← CLI entry point for backtesting
-tests/                 ← pytest test suite (376+ tests)
+tests/                 ← pytest test suite (381+ tests)
 ```
 
 ## Critical Design Decisions (Do NOT "Fix" These)
 
-### goodAfterTime = 10:00 AM ET on TRAIL Orders — CONDITIONAL
-
-TRAIL orders set `goodAfterTime = today 10:00 AM ET` **only when the current time is
-before 10:00 AM**. If it is already past 10 AM the field is omitted entirely — a past
-`goodAfterTime` causes IB error 201 "Invalid effective time" and the stop is rejected.
-This applies to both `_audit_stop_orders` (line ~923) and the entry-flow TRAIL placement.
-Since `ENTRY_START = (10,0)`, entries never fire before 10 AM, so the entry-flow TRAIL
-never sets `goodAfterTime` in practice. The audit path sets it only on cold starts before
-10 AM (e.g., pre-market restart). Do NOT change this back to unconditional.
-
 ### Cash Account — No Margin
 This system trades a **cash account only**. There is no leverage. Position sizing is
 based on settled cash / open slots, not margin. Do not introduce leverage concepts.
-
-### ib_async Package
-Always use `from ib_async import ...`. Never suggest or change to `ib_insync`.
 
 ### T+1 Settlement Awareness
 Exit logic and capital bucketing account for T+1 settlement days. Settled cash
@@ -312,7 +299,7 @@ Fix:
 - `engine.py`: added `'fill_price': round(avg_cost, 2)` and `'peak_price': round(avg_cost, 2)`
   to the re-sync dict. IBKR's `avgCost` already includes commission in the cost basis, so no
   separate `commission` field is needed — `fill_price` IS the all-in unit price.
-- `dashboard_server.py`: `unit_price` now shows `fill_price` directly when `commission` is
+- `alpaca_dashboard.py`: `unit_price` now shows `fill_price` directly when `commission` is
   absent but `fill_price` is set (re-synced case). Only falls back to `None` ("pending") when
   neither `fill_price` nor `commission` is available. `score` remains `None` after re-sync —
   it cannot be recovered once state is lost.
@@ -420,17 +407,17 @@ is fixed at entry. Stored as `t.__dict__['_chand_dist']` (replacing the removed
 ### 59. Dashboard P&L Panel Permanently Broken (Key Mismatch)
 
 The engine wrote equity snapshots with key `"equity"` to `equity_history.json`, but
-`dashboard_server.py` read them with key `"eq"`. Every call to `_find_base()` raised
+`alpaca_dashboard.py` read them with key `"eq"`. Every call to `_find_base()` raised
 `KeyError: 'eq'`, causing the `/api/state` endpoint to 500 and the P&L panel to show
 `—` for Daily / Weekly / Monthly / Overall. The equity chart still worked (it reads the
 raw JSON directly, not through `_pnl()`).
-Fix: changed `dashboard_server.py` lines 102 and 114 from `e["eq"]` to `e["equity"]`.
+Fix: changed `alpaca_dashboard.py` lines 102 and 114 from `e["eq"]` to `e["equity"]`.
 Also updated the comment at line 114 from "first real IBKR reading" to "first Alpaca
 account reading".
 
 ### 60. Dashboard Showed "IB GATEWAY" / "IBKR" / "IB scan" / "IB raises" (Wrong Broker)
 
-Multiple strings in `dashboard_server.py` still referenced the old Interactive Brokers
+Multiple strings in `alpaca_dashboard.py` still referenced the old Interactive Brokers
 broker that was replaced with Alpaca in an earlier session:
 
 - Status panel header: "IB GATEWAY" → "ALPACA API"
@@ -462,7 +449,7 @@ not pollute the commit history.
 
 ### 63. Dashboard Equity Chart Always Blank (Stale JS Key `e.eq`)
 
-`dashboard_server.py` JS `refreshChart()` function mapped history entries with
+`alpaca_dashboard.py` JS `refreshChart()` function mapped history entries with
 `hist.map(e => e.eq)`. The engine writes `{"ts": ..., "equity": ...}` to
 `equity_history.json`, so `e.eq` was always `undefined` — every data point was
 `undefined`, rendering an empty chart.
@@ -498,7 +485,7 @@ Tests: `TestBacktestBucketCashPct.test_bucket_cash_pct_constant_imported_in_back
 
 ### 66. Dashboard `effective_stop` Dead Code + Stale IB Comment
 
-`dashboard_server.py` `get_state()` read `d.get("effective_stop", sl)` with
+`alpaca_dashboard.py` `get_state()` read `d.get("effective_stop", sl)` with
 a comment "IB trail watermark if tracked". The `effective_stop` key is **never written**
 to `engine_state.json` — the engine writes the break-even-floored chandelier stop value
 directly to `stop_loss` via `_update_position_prices()`. The fallback always resolved to
@@ -592,7 +579,7 @@ reflects the active trading mode.
 ### 76. Dashboard "Last Updated" Always Blank — Key Mismatch `ts` vs `last_updated`
 
 `_write_dashboard_data()` wrote the current timestamp to dashboard_data.json under the
-key `'ts'`. `get_state()` in `dashboard_server.py` reads `dash_data.get("last_updated")`.
+key `'ts'`. `get_state()` in `alpaca_dashboard.py` reads `dash_data.get("last_updated")`.
 Due to this key mismatch, `last_updated` was always `None` in the API response, and the
 "Last Updated" time shown in the dashboard JS (`if (d.last_updated) { ... }`) was always
 blank for the entire lifetime of the system.
@@ -656,7 +643,7 @@ behavioral property worth testing).
 
 ### 71. Dashboard Break-Even `↑` Indicator Never Fired
 
-JS table column (dashboard_server.py line ~750) used `p.effective_stop > p.stop_loss`
+JS table column (alpaca_dashboard.py line ~750) used `p.effective_stop > p.stop_loss`
 to decide whether to append the `↑` break-even indicator. `effective_stop` and
 `stop_loss` are always set to the same value in the API response (the engine writes the
 break-even-floored chandelier stop directly into `stop_loss` via `_update_position_prices`;
@@ -668,7 +655,7 @@ Also: removed the dead `?? p.stop_loss` fallback from the same expression since
 `effective_stop` was passed through directly as `stop_loss` anyway.
 Tests: `TestDashboardBreakEvenIndicator.test_break_even_indicator_uses_stop_vs_entry`
 
-### 72. Dead `raw_commission` Code Path in `dashboard_server.py`
+### 72. Dead `raw_commission` Code Path in `alpaca_dashboard.py`
 
 `get_state()` computed `raw_commission = d.get("commission")` then checked
 `if raw_commission is not None` to add commission to `unit_price`. Alpaca is
@@ -786,6 +773,33 @@ the `fill_price`-first pattern used everywhere else in the codebase.
 Tests: `TestAuditRestoresStopDist.test_audit_restores_stop_dist_from_existing_trail`,
 `test_audit_does_not_overwrite_valid_stop_dist`,
 `test_audit_restore_in_source`
+
+## Fixed Bugs (Session 27 — May 2026)
+
+### 85. Five `TestInitialize` Tests Hung Before 09:58 AM ET
+
+Five tests in `tests/test_startup_init.py` called `engine._initialize()` without mocking
+`_wait_for_pre_entry_sync`. When run before 09:58 AM ET, `_wait_for_pre_entry_sync` computed
+a wait of several hours and entered a real `time.sleep(300)` loop — blocking the entire test
+process indefinitely. The tests appeared to pass only when run during trading hours (after 09:58 AM).
+
+Affected tests (all in `TestInitialize` and `TestInitializeAuditDateSet`):
+- `test_audits_stops_when_positions_exist`
+- `test_skips_audit_when_no_positions`
+- `test_skips_price_update_when_no_positions`
+- `test_last_audit_date_set_after_startup_audit`
+- `test_last_audit_date_not_set_when_no_positions`
+
+Fix: added `patch.object(engine, '_wait_for_pre_entry_sync')` to all five tests, matching
+the pattern already used by `test_syncs_positions_twice`, `test_updates_prices_when_positions_exist`,
+and `test_writes_dashboard_twice` which were already properly mocked.
+
+### 86. Entry Point and Dashboard Renamed for Clarity
+
+`AutoTrader.py` → `alpaca_auto_trader.py` and `dashboard_server.py` → `alpaca_dashboard.py`
+to avoid naming confusion with the sibling `IBKRVelocitySwingTrader` project in the same
+parent directory. All internal references, test imports, `main.py`, and `CLAUDE.md` updated.
+Stale `goodAfterTime` (IB-era) and `ib_async Package` sections removed from `CLAUDE.md`.
 
 ## Survivorship Bias Warning (Backtest)
 The backtest universe is current NASDAQ/NYSE listings. Bankrupt/delisted tickers from the

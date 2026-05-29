@@ -2,7 +2,7 @@
 VelocityEngine — entry point
 ────────────────────────────
 All logic lives in src/engine.py.
-Run:  venv/bin/python AutoTrader.py
+Run:  venv/bin/python alpaca_auto_trader.py
 """
 
 import sys
@@ -38,8 +38,8 @@ def _handle_shutdown(signum, frame):
 if __name__ == "__main__":
     # Register signal handlers only when run as the entry point, not on import.
     # signal.signal() can only be called from the main thread; registering at
-    # module level would silently overwrite the caller's handlers if AutoTrader
-    # were ever imported rather than executed directly.
+    # module level would silently overwrite the caller's handlers if
+    # alpaca_auto_trader were ever imported rather than executed directly.
     signal.signal(signal.SIGTERM, _handle_shutdown)
     signal.signal(signal.SIGINT,  _handle_shutdown)
 

@@ -2272,16 +2272,16 @@ class TestAuditStopOrders:
 
 class TestDashboardUnitPrice:
     """
-    dashboard_server.get_state() must compute unit_price correctly:
+    alpaca_dashboard.get_state() must compute unit_price correctly:
       - Normal entry (Alpaca): unit_price = fill_price directly (commission-free)
       - Re-synced from Alpaca: fill_price = avg_entry_price; unit_price = fill_price
       - No fill_price: unit_price = None (shown as 'pending' in UI)
     """
 
     def _get_positions(self, state_dict):
-        """Call dashboard_server.get_state() with mocked file reads."""
+        """Call alpaca_dashboard.get_state() with mocked file reads."""
         import json
-        import dashboard_server as ds
+        import alpaca_dashboard as ds
 
         dash_data = {'equity': 10000.0, 'settled_cash': 5000.0}
         with patch.object(ds, '_read_json', side_effect=lambda path: (

@@ -17,7 +17,7 @@ import time
 # ── Engine thread ─────────────────────────────────────────────────────────────
 
 def _run_engine():
-    """Restart-looping engine worker — mirrors AutoTrader.py logic."""
+    """Restart-looping engine worker — mirrors alpaca_auto_trader.py logic."""
     from src.engine import VelocityEngine
     logger = logging.getLogger('VelocityEngine')
     while True:
@@ -55,7 +55,7 @@ if __name__ == "__main__":
     # Start the dashboard in the main process (uvicorn must own the main thread)
     port = int(os.getenv("PORT", "8080"))
     import uvicorn
-    from dashboard_server import app
+    from alpaca_dashboard import app
     print(f"\n  VelocityEngine — trading engine + dashboard")
     print(f"  Dashboard → http://0.0.0.0:{port}\n")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
