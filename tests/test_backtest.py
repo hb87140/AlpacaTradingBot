@@ -110,9 +110,9 @@ class TestEntrySignal:
             rvol_min=BACKTEST_RVOL_MIN)
 
     def test_fails_price_too_far_above_lower_band(self):
-        # proximity = (102 - 99.8) / 99.8 = 2.2% > DONCHIAN_FLOOR_TOL_PCT (0.5%)
+        # proximity = (106 - 99.8) / 99.8 = 6.2% > BACKTEST_DONCHIAN_TOL_PCT (3%)
         assert not VelocityBacktest._entry_signal(
-            self._row(close=102.0, donch_lower=99.8), prev_rsi=35.0,
+            self._row(close=106.0, donch_lower=99.8), prev_rsi=35.0,
             rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
     def test_fails_rsi_never_oversold_in_lookback(self):
@@ -131,10 +131,11 @@ class TestEntrySignal:
         assert not VelocityBacktest._entry_signal(
             self._row(), prev_rsi=35.0, rvol=0.5, rvol_min=BACKTEST_RVOL_MIN)
 
-    def test_passes_price_exactly_at_donchian_tolerance(self):
-        from src.config import DONCHIAN_FLOOR_TOL_PCT
+    def test_passes_price_near_donchian_tolerance(self):
+        from src.config import BACKTEST_DONCHIAN_TOL_PCT
         lower = 99.8
-        close = lower * (1 + DONCHIAN_FLOOR_TOL_PCT)   # exactly at boundary → passes
+        # Use 90% of the tolerance to stay clearly inside without floating-point edge
+        close = lower * (1 + BACKTEST_DONCHIAN_TOL_PCT * 0.9)
         assert VelocityBacktest._entry_signal(
             self._row(close=close, donch_lower=lower), prev_rsi=35.0,
             rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)

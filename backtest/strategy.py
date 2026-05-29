@@ -29,7 +29,7 @@ Entry rules (Donchian bounce — matches src/rules.py CYCLE_RULES):
   2. Price floor         : close ≥ SCAN_MIN_PRICE ($10)
   3. Volume              : avg 20-day share vol ≥ SCAN_MIN_VOLUME
   4. Dollar volume       : avg 20-day dollar vol ≥ SCAN_MIN_DOLLAR_VOL (2× on Fridays)
-  5. Donchian floor      : close within DONCHIAN_FLOOR_TOL_PCT (0.5%) of 20-day low
+  5. Donchian floor      : close within BACKTEST_DONCHIAN_TOL_PCT (3%) of 20-day low (wider than live 0.5% — daily close data)
   6. RVOL                : volume / 20d avg ≥ BACKTEST_RVOL_MIN; tighter in bearish regime
   7. RSI oversold        : RSI was < RSI_OVERSOLD_THRESHOLD (35) in last RSI_OVERSOLD_LOOKBACK (3) bars
   8. RSI delta           : RSI rose ≥ RSI_MIN_DELTA (3.0 pts) vs previous bar
@@ -74,7 +74,7 @@ from src.config import (
     BACKTEST_HOLD_BARS, BACKTEST_SLIPPAGE, BACKTEST_EXIT_SLIPPAGE,
     VOL_MULT_FRIDAY, FRIDAY_MIN_PROFIT_PCT,
     SCAN_MIN_SCORE, BUCKET_CASH_PCT,
-    DONCHIAN_PERIOD, DONCHIAN_FLOOR_TOL_PCT,
+    DONCHIAN_PERIOD, BACKTEST_DONCHIAN_TOL_PCT,
     RSI_OVERSOLD_THRESHOLD, RSI_OVERSOLD_LOOKBACK,
     SPY_EMA_PERIOD, SPY_REGIME_SIZE_CUT, SPY_REGIME_RVOL_MULT,
     SCORE_DONCHIAN_MAX, SCORE_RVOL_MAX, SCORE_RSI_DELTA_MAX, SCORE_LIQUIDITY_MAX,
@@ -454,7 +454,7 @@ class VelocityBacktest:
 
             # Coarse Donchian proximity filter: price within tolerance of lower band
             proximity = (row['close'] - donch_lower) / donch_lower
-            if proximity > DONCHIAN_FLOOR_TOL_PCT:
+            if proximity > BACKTEST_DONCHIAN_TOL_PCT:
                 continue
 
             # RSI oversold lookback: RSI must have dipped below threshold recently
@@ -477,7 +477,7 @@ class VelocityBacktest:
             rsi      = row.get('RSI', float('nan'))
             rsi_prev = row.get('RSI_PREV', float('nan'))
 
-            donchian_score = max(0.0, (1.0 - proximity / DONCHIAN_FLOOR_TOL_PCT) * SCORE_DONCHIAN_MAX)
+            donchian_score = max(0.0, (1.0 - proximity / BACKTEST_DONCHIAN_TOL_PCT) * SCORE_DONCHIAN_MAX)
 
             rvol_excess = max(0.0, rvol - effective_rvol_min)
             rvol_score  = min(SCORE_RVOL_MAX,
@@ -508,7 +508,7 @@ class VelocityBacktest:
         """Donchian bounce entry filter — daily-bar approximation of src/rules.py CYCLE_RULES.
 
         Rules checked (all mandatory):
-          1. DONCH_LOWER available and price within DONCHIAN_FLOOR_TOL_PCT of lower band
+          1. DONCH_LOWER available and price within BACKTEST_DONCHIAN_TOL_PCT (3%) of lower band
           2. RSI oversold in lookback window (RSI_MIN_LOOKBACK < RSI_OVERSOLD_THRESHOLD)
           3. RSI delta >= RSI_MIN_DELTA (momentum turn confirmed)
           4. RVOL >= rvol_min (already verified in _daily_scan; re-checked for safety)
@@ -518,7 +518,7 @@ class VelocityBacktest:
         if pd.isna(donch_lower) or donch_lower <= 0:
             return False
         proximity = (float(row['close']) - float(donch_lower)) / float(donch_lower)
-        if proximity > DONCHIAN_FLOOR_TOL_PCT:
+        if proximity > BACKTEST_DONCHIAN_TOL_PCT:
             return False
 
         # RSI oversold in recent lookback
