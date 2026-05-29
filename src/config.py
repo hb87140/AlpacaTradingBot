@@ -56,10 +56,10 @@ FRIDAY_CLOSE_HOUR    = 15      # ET hour after which Friday positions are evalua
 FRIDAY_MIN_PROFIT_PCT = 0.03   # Friday close: exit if profit < 3%
 
 # ── Session timing ────────────────────────────────────────────────────────────
-ENTRY_START          = (9, 40)   # first valid entry time
+ENTRY_START          = (9, 45)   # first valid entry time (ORB bar closes at 9:45)
 ENTRY_END            = (15, 30)
 VOL_MULT_FRIDAY      = 2.0       # Friday liquidity gate: 2× normal threshold
-PRE_ENTRY_SYNC_TIME  = (9, 40)   # pre-entry position re-sync + stop audit
+PRE_ENTRY_SYNC_TIME  = (9, 44)   # pre-entry position re-sync + stop audit
 
 # ── Indicators ────────────────────────────────────────────────────────────────
 RSI_PERIOD    = 14
