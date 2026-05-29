@@ -661,27 +661,27 @@ class TestBacktestEntryPriceFloor:
     """Backtest must reject entries where the entry proxy (max(open, prev_high) * slippage)
     is below SCAN_MIN_PRICE, even if the daily close passes the filter.
 
-    E.g., a gap-up day where open = $5, prev_high = $4, close = $25 should not
-    be entered: raw_entry = $5, entry_price ≈ $5.005 < $20 minimum.
+    E.g., a gap-up day where open = $2, prev_high = $1, close = $25 should not
+    be entered: raw_entry = $2, entry_price ≈ $2.002 < $5 minimum.
     """
 
     def _make_cheap_open_df(self, n: int = 300) -> pd.DataFrame:
-        """DataFrame where close is ≥ $20 throughout but open is below $20 for most bars.
+        """DataFrame where close is ≥ $5 throughout but open is below $5 for most bars.
 
         This triggers the entry-price floor: _daily_scan accepts the close ($25),
-        but the actual entry proxy max(open=$5, prev_high=$4) resolves to $5, which
+        but the actual entry proxy max(open=$2, prev_high=$1) resolves to $2, which
         is below SCAN_MIN_PRICE.
         """
         from src.indicators import apply_all as _apply
 
         np.random.seed(42)
-        # Close is above $20 so the close-based price-floor filter passes
+        # Close is above $5 so the close-based price-floor filter passes
         close     = np.full(n, 25.0)
         high      = close + 0.05
         low       = close - 0.05
-        # Open is $5 — below SCAN_MIN_PRICE — simulates a day where the stock
+        # Open is $2 — below SCAN_MIN_PRICE ($5) — simulates a day where the stock
         # opened far below its close (e.g., wild spread or data artefact)
-        open_     = np.full(n, 5.0)
+        open_     = np.full(n, 2.0)
         idx       = pd.date_range("2023-01-01", periods=n, freq='B')
         df = pd.DataFrame({'open': open_, 'high': high, 'low': low,
                            'close': close,

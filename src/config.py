@@ -78,7 +78,7 @@ DAILY_HISTORY_DAYS = 400   # enough to produce 200+ trading-day bars
 ORB_BAR_MINUTES    = 15    # opening range = first 15-min bar of the session
 
 # ── Scanner filters ───────────────────────────────────────────────────────────
-SCAN_MIN_PRICE      = 20.0
+SCAN_MIN_PRICE      = 5.0
 SCAN_MIN_VOLUME     = 2_000_000
 SCAN_MIN_GAIN_PCT   = 2.0   # minimum daily % gain (backtest coarse filter)
 SCAN_MIN_DOLLAR_VOL = 100_000_000   # 20-day avg dollar volume floor
