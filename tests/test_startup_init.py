@@ -498,7 +498,7 @@ class TestPreEntrySyncWait:
     _TZ_NY = pytz.timezone('US/Eastern')
 
     def test_sleeps_when_before_pre_entry_time(self):
-        """Engine started before 09:58 ET → time.sleep called; total duration matches gap."""
+        """Engine started before 09:40 ET → time.sleep called; total duration matches gap."""
         from src.config import PRE_ENTRY_SYNC_TIME
         engine = _make_engine()
         with patch.object(engine, '_sync_positions'), \
@@ -518,7 +518,7 @@ class TestPreEntrySyncWait:
             assert abs(total_slept - expected) < 2
 
     def test_no_sleep_when_at_or_past_pre_entry_time(self):
-        """Engine started at or after 09:58 ET → time.sleep NOT called."""
+        """Engine started at or after 09:40 ET → time.sleep NOT called."""
         engine = _make_engine()
         fake_now = self._TZ_NY.localize(datetime(2026, 5, 19, 10, 5, 0))
         with patch('src.engine.datetime') as mock_dt, \
@@ -529,7 +529,7 @@ class TestPreEntrySyncWait:
         mock_sleep.assert_not_called()
 
     def test_no_sleep_on_intraday_restart(self):
-        """Intraday restart at 14:30 ET — already past 09:58, no sleep."""
+        """Intraday restart at 14:30 ET — already past 09:40, no sleep."""
         engine = _make_engine()
         fake_now = self._TZ_NY.localize(datetime(2026, 5, 19, 14, 30, 0))
         with patch('src.engine.datetime') as mock_dt, \
@@ -540,7 +540,8 @@ class TestPreEntrySyncWait:
         mock_sleep.assert_not_called()
 
     def test_sleep_duration_covers_gap_to_pre_entry_time(self):
-        """Total sleep from 09:00 ET to 09:58 ET should be exactly 58 min."""
+        """Total sleep from 09:00 ET to 09:40 ET should be exactly 40 min."""
+        from src.config import PRE_ENTRY_SYNC_TIME
         engine = _make_engine()
         with patch.object(engine, '_sync_positions'), \
              patch.object(engine, '_update_position_prices'), \
@@ -552,7 +553,9 @@ class TestPreEntrySyncWait:
                 mock_dt.fromisoformat     = datetime.fromisoformat
                 engine._wait_for_pre_entry_sync()
             total_slept = sum(c[0][0] for c in mock_sleep.call_args_list)
-            assert abs(total_slept - 58 * 60) < 2
+            h, m = PRE_ENTRY_SYNC_TIME
+            expected = (h * 60 + m - 9 * 60) * 60  # gap from 09:00 to PRE_ENTRY_SYNC_TIME
+            assert abs(total_slept - expected) < 2
 
 
 # ── Pending flag ──────────────────────────────────────────────────────────────
