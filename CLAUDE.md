@@ -16,6 +16,16 @@ git commit -m "descriptive message"
 
 Never commit `.env` files, credentials, or generated artifacts (`backtest/optimizer_results*.csv`).
 
+## Live Deployment Links
+
+- **Dashboard**:    [alpacatradingbot-pe9m.onrender.com](https://alpacatradingbot-pe9m.onrender.com)
+- **Health check**: [/health](https://alpacatradingbot-pe9m.onrender.com/health)
+- **API state**:    [/api/state](https://alpacatradingbot-pe9m.onrender.com/api/state)
+- **Live logs**:    [/api/logs](https://alpacatradingbot-pe9m.onrender.com/api/logs)
+- **GitHub repo**:  [hb87140/AlpacaTradingBot](https://github.com/hb87140/AlpacaTradingBot)
+- **Render**:       [dashboard.render.com](https://dashboard.render.com)
+- **UptimeRobot**:  [dashboard.uptimerobot.com/monitors](https://dashboard.uptimerobot.com/monitors)
+
 ## Environment
 
 - **Python**: venv at `venv/` uses Python 3.13 (symlinked to current snap release). Run via `venv/bin/python`.
