@@ -38,11 +38,11 @@ CHANDELIER_MULT   = 2.0    # ATR multiplier — stop = peak − ATR(22) × 2
 
 # ── Risk rules ────────────────────────────────────────────────────────────────
 VIX_THRESHOLD        = 35
-HOLD_TRADING_BARS    = 2       # Mon-Fri trading sessions before velocity exit fires
+HOLD_TRADING_BARS    = 1       # Mon-Fri trading sessions before velocity exit fires
 PROFIT_MIN_THRESHOLD = 0.05    # 5% min gain to avoid velocity exit
-GAP_MAX_PCT          = 0.10    # max allowed ORB extension; >10% = chasing
+GAP_MAX_PCT          = 0.10    # kept for backtest compatibility
 MAX_DAILY_LOSS_PCT   = 0.03    # 3% intraday equity drawdown halts new entries
-RSI_MIN_DELTA        = 1.0     # minimum RSI point rise to confirm acceleration
+RSI_MIN_DELTA        = 3.0     # minimum RSI point rise to confirm momentum turn
 HARD_STOP_PCT        = 0.07    # 7% drawdown from entry → forced market exit
 RISK_PER_TRADE_PCT   = 0.02    # risk 2% of equity per trade (ATR-based sizing)
 BREAK_EVEN_PCT       = 0.04    # once profit ≥ 4%, floor stop at entry
@@ -51,12 +51,12 @@ LIMIT_BUF_MAX_PCT    = 0.015   # maximum limit-price buffer (1.5%)
 CONCENTRATION_WARN_PCT = 0.85  # deployed ≥ 85% of equity → warn, no new entries
 CONCENTRATION_HALT_PCT = 0.95  # deployed ≥ 95% of equity → halt all order activity
 REPRICE_DRIFT_MAX_PCT  = 0.02  # skip entry if price moved >2% since scan snapshot
-MIN_TREND_SEP        = 0.03    # MA50 must be ≥ 3% above MA200
+MIN_TREND_SEP        = 0.03    # kept for backtest compatibility
 FRIDAY_CLOSE_HOUR    = 15      # ET hour after which Friday positions are evaluated
 FRIDAY_MIN_PROFIT_PCT = 0.03   # Friday close: exit if profit < 3%
 
 # ── Session timing ────────────────────────────────────────────────────────────
-ENTRY_START          = (9, 45)   # first valid entry time (ORB bar closes at 9:45)
+ENTRY_START          = (10, 0)   # first valid entry (after opening volatility settles)
 ENTRY_END            = (15, 30)
 VOL_MULT_FRIDAY      = 2.0       # Friday liquidity gate: 2× normal threshold
 PRE_ENTRY_SYNC_TIME  = (9, 44)   # pre-entry position re-sync + stop audit
@@ -66,23 +66,47 @@ RSI_PERIOD    = 14
 ATR_PERIOD    = 14
 MA_FAST       = 50
 MA_SLOW       = 200
-RSI_THRESHOLD = 55
+RSI_THRESHOLD = 55              # kept for backtest compatibility
 ADX_PERIOD    = 14
-ADX_THRESHOLD = 20
-HIGH200_MIN_PCT = 0.85   # close must be ≥ 85% of 200-day high
-SMA200_SLOPE_LOOKBACK = 5
+ADX_THRESHOLD = 20              # kept for backtest compatibility
+HIGH200_MIN_PCT = 0.85          # kept for backtest compatibility
+SMA200_SLOPE_LOOKBACK = 5       # kept for backtest compatibility
+
+# Donchian Channel (mean-reversion floor/ceiling)
+DONCHIAN_PERIOD        = 20     # lookback for Donchian Channel bands
+DONCHIAN_FLOOR_TOL_PCT = 0.005  # price must be within 0.5% of lower band to qualify
+
+# RSI oversold lookback (bounce signal)
+RSI_OVERSOLD_THRESHOLD = 35     # RSI must have been below this threshold
+RSI_OVERSOLD_LOOKBACK  = 3      # … within the last N daily candles
+
+# Day-strength gate (confirms price is recovering, not fading)
+DAY_STRENGTH_OPEN_PCT  = 0.005  # price must be ≥ 0.5% above today's open
+
+# SPY regime (soft — bearish regime cuts size + tightens RVOL, does not block)
+SPY_EMA_PERIOD      = 50        # EMA period used for SPY regime check
+SPY_REGIME_SIZE_CUT = 0.50      # reduce position bucket by 50% in bearish regime
+SPY_REGIME_RVOL_MULT = 1.33    # multiply RVOL threshold by this in bearish regime
+
+# ── Scoring weights (must sum to 100) ────────────────────────────────────────
+# Donchian Floor Proximity (30) · Time-Segmented RVOL (25)
+# RSI Delta Acceleration (25) · Spread & Dollar-Vol Liquidity (20)
+SCORE_DONCHIAN_MAX  = 30.0
+SCORE_RVOL_MAX      = 25.0
+SCORE_RSI_DELTA_MAX = 25.0
+SCORE_LIQUIDITY_MAX = 20.0
 
 # ── Historical data windows ───────────────────────────────────────────────────
 # Expressed as calendar days so Alpaca's date-based API can use them directly.
 DAILY_HISTORY_DAYS = 400   # enough to produce 200+ trading-day bars
-ORB_BAR_MINUTES    = 15    # opening range = first 15-min bar of the session
+ORB_BAR_MINUTES    = 15    # kept for backtest compatibility
 
 # ── Scanner filters ───────────────────────────────────────────────────────────
-SCAN_MIN_PRICE      = 1.0
-SCAN_MIN_VOLUME     = 2_000_000
-SCAN_MIN_GAIN_PCT   = 2.0   # minimum daily % gain (backtest coarse filter)
-SCAN_MIN_DOLLAR_VOL = 100_000_000   # 20-day avg dollar volume floor
-SCAN_MIN_SCORE      = 30.0              # minimum composite score (0-100) before entry
+SCAN_MIN_PRICE      = 10.0              # Universe filter: price > $10
+SCAN_MIN_VOLUME     = 2_000_000        # Universe filter: 20-day avg daily vol > 2M shares
+SCAN_MIN_GAIN_PCT   = 2.0              # minimum daily % gain (backtest coarse filter)
+SCAN_MIN_DOLLAR_VOL = 20_000_000       # 20-day avg dollar volume floor ($20M)
+SCAN_MIN_SCORE      = 30.0             # minimum composite score (0-100) before entry
 
 # ── Ticker blocklist ─────────────────────────────────────────────────────────
 TICKER_BLOCKLIST: set = {

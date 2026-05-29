@@ -19,6 +19,12 @@ from unittest.mock import MagicMock, patch
 
 _TZ_NY = pytz.timezone('US/Eastern')
 
+# Shared SPY regime dict — used wherever _fetch_spy_trend is patched
+_SPY_BULL_REGIME = {
+    'is_bull': True, 'spy_close': 450.0, 'ema50': 440.0,
+    'size_factor': 1.0, 'rvol_mult': 1.0,
+}
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -94,7 +100,7 @@ def _run_cycle_patched(engine, fake_now, ctx=None, symbols=None,
          patch.object(engine, '_write_dashboard_data'), \
          patch.object(engine, 'save_state'), \
          patch.object(engine, 'get_institutional_scan', return_value=symbols), \
-         patch.object(engine, '_fetch_spy_trend', return_value=True), \
+         patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
          patch('src.engine.datetime') as mock_dt, \
          patch('time.sleep'):
         mock_dt.now.return_value = fake_now
@@ -113,28 +119,40 @@ def _run_cycle_patched(engine, fake_now, ctx=None, symbols=None,
 # ── Expert filter (entry conditions) ─────────────────────────────────────────
 class TestExpertFilter:
     """
-    All 12 production entry rules exercised via run_cycle(). Each test mutates
+    Donchian bounce entry rules exercised via run_cycle(). Each test mutates
     exactly one field of the baseline ctx to verify the engine blocks that
     specific failing condition.
 
-    Base ctx: price=110, orb=100, ma50=105, ma200=90, atr=2.0, adx=25,
-              high200=121, rvol=3.0, spread=0.2%, rsi=60/prev=58.5 (Δ=1.5≥1.0),
-              dol_vol=300M — all rules pass.
+    Base ctx: price=100 (0.2% above donchian_lower=99.8), rsi=38/prev=35 (Δ=3.0),
+              rsi_history has values below oversold threshold=35, price 1% above open,
+              in upper 86% of intraday range, rvol=3.0, spread=0.2%, dol_vol=300M.
     """
 
     def _base_ctx(self):
         return {
-            'orb_high':      100.0,
-            'ma50':          105.0,   'ma200':          90.0,
-            'rsi':            60.0,   'rsi_prev':        58.5,
-            'atr':             2.0,   'atr_chandelier':   2.0,
-            'close':         110.0,   'live_price':     110.0,
-            'adx':            25.0,   'high200':        121.0,
-            'rvol':            3.0,   'spread_pct':     0.002,
+            # Donchian bounce fields
+            'donchian_lower':  99.8,
+            'donchian_upper':  110.0,
+            # RSI momentum: delta=3.0 >= RSI_MIN_DELTA; history has oversold values
+            'rsi':              38.0,   'rsi_prev':        35.0,
+            'rsi_history':     [28.0, 30.0, 32.0, 35.0, 38.0],
+            # Day strength: 1% above open, in upper 86% of range
+            'intraday_open':   99.0,
+            'intraday_high':  100.5,
+            'intraday_low':    97.0,
+            # Standard fields
+            'live_price':     100.0,
+            'atr':              2.0,   'atr_chandelier':   2.0,
+            'rvol':             3.0,   'spread_pct':     0.002,
             'dollar_vol_20d': 300_000_000,
-            'sma200_slope':    0.1,
             'avg_20d_vol':  5_000_000,
-            'df_daily':       None,
+            'volume':       5_000_000,
+            'close':           99.5,
+            'orb_high':        95.0,
+            'ma50':           105.0,   'ma200':          90.0,
+            'adx':             25.0,   'high200':       110.0,
+            'sma200_slope':     0.1,
+            'price_fetched_at': _TZ_NY.localize(datetime(2024, 6, 5, 10, 30)),
         }
 
     def _engine_passes(self, ctx):
@@ -155,7 +173,7 @@ class TestExpertFilter:
         tc.submit_order.side_effect    = _submit
         filled = MagicMock()
         filled.status                  = 'filled'
-        filled.filled_avg_price        = '110.0'
+        filled.filled_avg_price        = '100.0'
         filled.filled_qty              = '1.0'
         tc.get_order_by_id.return_value = filled
 
@@ -172,7 +190,7 @@ class TestExpertFilter:
              patch.object(engine, 'save_state'), \
              patch.object(engine, 'get_institutional_scan', return_value=['AAPL']), \
              patch.object(engine, 'get_technical_context',  return_value=ctx), \
-             patch.object(engine, '_fetch_spy_trend',       return_value=True), \
+             patch.object(engine, '_fetch_spy_trend',       return_value=_SPY_BULL_REGIME), \
              patch.object(engine, '_get_sector',            return_value='Technology'), \
              patch.object(engine, '_score_candidate',       return_value=75.0), \
              patch('src.engine.datetime') as mock_dt, \
@@ -190,66 +208,66 @@ class TestExpertFilter:
     def test_all_conditions_met(self):
         assert self._engine_passes(self._base_ctx()) is True
 
-    def test_fails_when_price_below_orb(self):
-        ctx = self._base_ctx(); ctx['live_price'] = 99.0
+    def test_fails_when_donchian_lower_unavailable(self):
+        """donchian_lower=0 → floor unavailable, entry blocked."""
+        ctx = self._base_ctx(); ctx['donchian_lower'] = 0.0
         assert self._engine_passes(ctx) is False
 
-    def test_fails_when_price_below_ma50(self):
-        ctx = self._base_ctx(); ctx['ma50'] = 115.0
+    def test_fails_when_price_too_far_above_donchian_floor(self):
+        """Price 1% above lower band when tolerance is 0.5% → donchian_floor fails."""
+        from src.config import DONCHIAN_FLOOR_TOL_PCT
+        ctx = self._base_ctx()
+        ctx['live_price']     = 101.0
+        ctx['donchian_lower'] = 100.0   # 1% below price, > 0.5% tolerance
         assert self._engine_passes(ctx) is False
 
-    def test_fails_when_ma50_below_ma200(self):
-        ctx = self._base_ctx(); ctx['ma50'] = 85.0
+    def test_fails_when_rsi_not_rising(self):
+        """RSI falling (rsi < rsi_prev) fails rsi_momentum delta check."""
+        ctx = self._base_ctx(); ctx['rsi'] = 35.0; ctx['rsi_prev'] = 38.0
         assert self._engine_passes(ctx) is False
 
-    def test_fails_when_adx_below_threshold(self):
-        ctx = self._base_ctx(); ctx['adx'] = 5.0
+    def test_fails_when_rsi_delta_below_minimum(self):
+        """RSI delta 2.5 < RSI_MIN_DELTA=3.0 fails rsi_momentum."""
+        ctx = self._base_ctx(); ctx['rsi'] = 37.5; ctx['rsi_prev'] = 35.0
         assert self._engine_passes(ctx) is False
 
-    def test_fails_when_trend_separation_insufficient(self):
-        ctx = self._base_ctx(); ctx['ma50'] = 90.9; ctx['ma200'] = 90.0
+    def test_fails_when_rsi_never_oversold_in_lookback(self):
+        """RSI history never below RSI_OVERSOLD_THRESHOLD fails rsi_momentum."""
+        ctx = self._base_ctx()
+        ctx['rsi_history'] = [60.0, 62.0, 64.0, 65.0, 68.0]
+        ctx['rsi']     = 68.0
+        ctx['rsi_prev'] = 65.0
         assert self._engine_passes(ctx) is False
 
-    def test_fails_when_price_below_52w_high_threshold(self):
-        ctx = self._base_ctx(); ctx['high200'] = 500.0
+    def test_fails_when_price_in_lower_half_of_intraday_range(self):
+        """Price in lower 40% of intraday range fails day_strength."""
+        ctx = self._base_ctx()
+        ctx['intraday_open'] = 98.0
+        ctx['intraday_high'] = 103.0
+        ctx['intraday_low']  = 98.0
+        ctx['live_price']    = 100.0   # range_pos=(100-98)/(103-98)=0.4 < 0.5
         assert self._engine_passes(ctx) is False
 
     def test_fails_when_rvol_below_minimum(self):
-        ctx = self._base_ctx(); ctx['rvol'] = 1.5
+        """RVOL below RVOL_MIN fails rvol rule."""
+        ctx = self._base_ctx(); ctx['rvol'] = 0.0
         assert self._engine_passes(ctx) is False
 
     def test_fails_when_spread_too_wide(self):
+        """Spread 1% > SPREAD_MAX_PCT=0.5% fails spread rule."""
         ctx = self._base_ctx(); ctx['spread_pct'] = 0.01
         assert self._engine_passes(ctx) is False
 
     def test_fails_when_dollar_volume_below_threshold(self):
-        ctx = self._base_ctx(); ctx['dollar_vol_20d'] = 50_000_000
+        """Dollar volume 5M < SCAN_MIN_DOLLAR_VOL=20M fails dollar_vol rule."""
+        ctx = self._base_ctx(); ctx['dollar_vol_20d'] = 5_000_000
         assert self._engine_passes(ctx) is False
 
     def test_passes_when_dollar_volume_at_threshold(self):
+        """Dollar volume exactly at SCAN_MIN_DOLLAR_VOL passes dollar_vol rule."""
         from src.config import SCAN_MIN_DOLLAR_VOL
         ctx = self._base_ctx(); ctx['dollar_vol_20d'] = SCAN_MIN_DOLLAR_VOL
         assert self._engine_passes(ctx) is True
-
-    def test_fails_when_gap_above_cap(self):
-        ctx = self._base_ctx(); ctx['live_price'] = 115.0; ctx['close'] = 115.0
-        assert self._engine_passes(ctx) is False
-
-    def test_fails_when_rsi_not_rising(self):
-        ctx = self._base_ctx(); ctx['rsi'] = 60.0; ctx['rsi_prev'] = 65.0
-        assert self._engine_passes(ctx) is False
-
-    def test_fails_when_rsi_delta_below_minimum(self):
-        ctx = self._base_ctx(); ctx['rsi'] = 60.0; ctx['rsi_prev'] = 59.5
-        assert self._engine_passes(ctx) is False
-
-    def test_fails_when_rsi_below_threshold(self):
-        ctx = self._base_ctx(); ctx['rsi'] = 54.0; ctx['rsi_prev'] = 50.0
-        assert self._engine_passes(ctx) is False
-
-    def test_rsi_exactly_at_threshold_fails(self):
-        ctx = self._base_ctx(); ctx['rsi'] = 55.0; ctx['rsi_prev'] = 50.0
-        assert self._engine_passes(ctx) is False
 
 
 # ── Velocity exit logic ───────────────────────────────────────────────────────
@@ -662,11 +680,15 @@ class TestBuyOrderTif:
 
         fake_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))
         ctx = {
-            'orb_high': 100.0, 'ma50': 105.0, 'ma200': 90.0,
-            'rsi': 60.0, 'rsi_prev': 58.5, 'atr': 2.0, 'atr_chandelier': 2.0,
-            'close': 110.0, 'live_price': 110.0, 'adx': 25.0, 'high200': 121.0,
-            'rvol': 3.0, 'spread_pct': 0.002, 'dollar_vol_20d': 300_000_000,
-            'sma200_slope': 0.1, 'avg_20d_vol': 5_000_000, 'df_daily': None,
+            'live_price': 100.0, 'close': 99.5,
+            'donchian_lower': 99.8, 'donchian_upper': 110.0,
+            'rsi': 38.0, 'rsi_prev': 35.0,
+            'rsi_history': [28.0, 30.0, 32.0, 35.0, 38.0],
+            'intraday_open': 99.0, 'intraday_high': 100.5, 'intraday_low': 97.0,
+            'atr': 2.0, 'atr_chandelier': 2.0,
+            'rvol': 3.0, 'spread_pct': 0.002,
+            'dollar_vol_20d': 300_000_000, 'avg_20d_vol': 5_000_000, 'volume': 5_000_000,
+            'price_fetched_at': fake_now,
         }
 
         with patch.object(engine, '_ensure_connected', return_value=True), \
@@ -680,7 +702,7 @@ class TestBuyOrderTif:
              patch.object(engine, 'save_state'), \
              patch.object(engine, 'get_institutional_scan', return_value=['AAPL']), \
              patch.object(engine, 'get_technical_context', return_value=ctx), \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch.object(engine, '_get_sector', return_value='Technology'), \
              patch.object(engine, '_score_candidate', return_value=75.0), \
              patch('src.engine.datetime') as mock_dt, \
@@ -721,7 +743,7 @@ class TestDailyScanSkip:
              patch.object(engine, '_write_dashboard_data'), \
              patch.object(engine, 'save_state'), \
              patch.object(engine, 'get_institutional_scan', return_value=symbols), \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch('src.engine.datetime') as mock_dt, \
              patch('time.sleep'):
             mock_dt.now.return_value  = fake_now
@@ -739,30 +761,36 @@ class TestDailyScanSkip:
                 engine.run_cycle()
 
     def test_permanent_fail_cached_after_first_scan(self):
+        """Symbol with dollar_vol below threshold is cached as permanent-day fail."""
+        from src.config import SCAN_MIN_DOLLAR_VOL
         engine = _make_engine()
         engine.state = {}
 
+        # dollar_vol_20d=5M < SCAN_MIN_DOLLAR_VOL=20M → PERMANENT_DAY_RULES fail
         ctx = {
-            'live_price': 100.0, 'orb_high': 90.0,
-            'ma50': 80.0, 'ma200': 95.0,  # MA50 < MA200 → permanent fail
-            'rsi': 65.0, 'rsi_prev': 60.0,
+            'live_price': 100.0,
+            'donchian_lower': 99.8, 'donchian_upper': 110.0,
+            'rsi': 38.0, 'rsi_prev': 35.0,
+            'rsi_history': [28.0, 30.0, 32.0, 35.0, 38.0],
+            'intraday_open': 99.0, 'intraday_high': 100.5, 'intraday_low': 97.0,
             'atr': 2.0, 'atr_chandelier': 2.0,
-            'adx': 25.0, 'high200': 110.0,
-            'rvol': 3.0, 'spread_pct': 0.001,
-            'dollar_vol_20d': 500_000_000,
-            'sma200_slope': 0.1, 'avg_20d_vol': 5_000_000, 'df_daily': None,
+            'rvol': 3.0, 'spread_pct': 0.002,
+            'dollar_vol_20d': 5_000_000,   # below 20M threshold → permanent fail
+            'avg_20d_vol': 5_000_000, 'volume': 5_000_000,
+            'close': 99.5,
+            'price_fetched_at': _TZ_NY.localize(datetime(2024, 6, 5, 10, 30)),
         }
         fake_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))
 
         self._run_cycle_at(engine, fake_now, ctx=ctx, symbols=['MSFT'])
 
         assert 'MSFT' in engine._daily_scan_skip
-        assert 'MA50<MA200' in engine._daily_scan_skip['MSFT']
+        assert 'DolVol20d' in engine._daily_scan_skip['MSFT']
 
     def test_cached_symbol_skips_technical_context_fetch(self):
         engine = _make_engine()
         engine.state = {}
-        engine._daily_scan_skip = {'MSFT': 'MA50<MA200'}
+        engine._daily_scan_skip = {'MSFT': 'dollar_vol: DolVol20d $5.0M < $20.0M'}
 
         fake_now = _TZ_NY.localize(datetime(2024, 6, 5, 11, 0))
 
@@ -773,7 +801,10 @@ class TestDailyScanSkip:
 
     def test_daily_scan_skip_cleared_on_new_day(self):
         engine = _make_engine()
-        engine._daily_scan_skip  = {'MSFT': 'MA50<MA200', 'AAPL': 'RSI≤55'}
+        engine._daily_scan_skip  = {
+            'MSFT': 'dollar_vol: DolVol20d $5.0M < $20.0M',
+            'AAPL': 'dollar_vol: DolVol20d $10.0M < $20.0M',
+        }
         engine._day_start_date   = '2024-06-04'
         engine._day_start_equity = 1400.0
         engine.state = {}
@@ -784,20 +815,24 @@ class TestDailyScanSkip:
         assert engine._daily_scan_skip == {}
 
     def test_dynamic_only_fail_not_cached(self):
-        """Symbol that only fails intraday-dynamic conditions must NOT be day-cached."""
+        """Symbol that only fails intraday-dynamic (CYCLE) conditions must NOT be day-cached."""
         engine = _make_engine()
         engine.state = {}
 
+        # dollar_vol passes (permanent check) but rvol=0 fails (cycle check)
         ctx = {
-            'live_price': 89.0, 'orb_high': 90.0,  # price < ORB → dynamic fail only
-            # price(89) > ma50(85) > ma200(80) — all permanent trend checks pass
-            'ma50': 85.0, 'ma200': 80.0,
-            'rsi': 65.0, 'rsi_prev': 60.0,
+            'live_price': 100.0,
+            'donchian_lower': 99.8, 'donchian_upper': 110.0,
+            'rsi': 38.0, 'rsi_prev': 35.0,
+            'rsi_history': [28.0, 30.0, 32.0, 35.0, 38.0],
+            'intraday_open': 99.0, 'intraday_high': 100.5, 'intraday_low': 97.0,
             'atr': 2.0, 'atr_chandelier': 2.0,
-            'adx': 25.0, 'high200': 100.0,
-            'rvol': 3.0, 'spread_pct': 0.001,
-            'dollar_vol_20d': 500_000_000,
-            'sma200_slope': 0.1, 'avg_20d_vol': 5_000_000, 'df_daily': None,
+            'rvol': 0.0,   # below RVOL_MIN=2.5 → cycle fail only
+            'spread_pct': 0.002,
+            'dollar_vol_20d': 500_000_000,   # passes permanent dollar_vol check
+            'avg_20d_vol': 5_000_000, 'volume': 5_000_000,
+            'close': 99.5,
+            'price_fetched_at': _TZ_NY.localize(datetime(2024, 6, 5, 10, 30)),
         }
         fake_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))
 
@@ -1289,7 +1324,7 @@ class TestFridayEntryWindowClosed:
              patch.object(engine, '_write_dashboard_data'), \
              patch.object(engine, 'save_state'), \
              patch.object(engine, 'get_institutional_scan', return_value=['AAPL']), \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch.object(engine, 'get_technical_context') as mock_ctx, \
              patch('src.engine.datetime') as mock_dt, \
              patch('time.sleep'):
@@ -1320,7 +1355,7 @@ class TestFridayEntryWindowClosed:
              patch.object(engine, '_write_dashboard_data'), \
              patch.object(engine, 'save_state'), \
              patch.object(engine, 'get_institutional_scan', return_value=['AAPL']), \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch.object(engine, 'get_technical_context', return_value=None) as mock_ctx, \
              patch('src.engine.datetime') as mock_dt, \
              patch('time.sleep'):
@@ -1410,7 +1445,7 @@ class TestBarCacheClearedOnDayRollover:
              patch.object(engine, '_write_dashboard_data'), \
              patch.object(engine, 'save_state'), \
              patch.object(engine, 'get_institutional_scan', return_value=[]), \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch('src.engine.datetime') as mock_dt, \
              patch('time.sleep'):
             mock_dt.now.return_value  = fake_now
@@ -1544,12 +1579,15 @@ class TestExitRecheckBetweenEntries:
 
         fake_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))
         signals_ctx = {
-            'orb_high': 100.0, 'ma50': 105.0, 'ma200': 90.0,
-            'rsi': 60.0, 'rsi_prev': 58.5, 'atr': 2.0, 'atr_chandelier': 2.0,
-            'close': 110.0, 'live_price': 110.0, 'adx': 25.0, 'high200': 121.0,
-            'rvol': 3.0, 'spread_pct': 0.002, 'dollar_vol_20d': 300_000_000,
-            'sma200_slope': 0.1, 'avg_20d_vol': 5_000_000, 'df_daily': None,
-            'ask': 110.0, 'price_fetched_at': fake_now,
+            'live_price': 100.0, 'close': 99.5, 'ask': 100.1,
+            'donchian_lower': 99.8, 'donchian_upper': 110.0,
+            'rsi': 38.0, 'rsi_prev': 35.0,
+            'rsi_history': [28.0, 30.0, 32.0, 35.0, 38.0],
+            'intraday_open': 99.0, 'intraday_high': 100.5, 'intraday_low': 97.0,
+            'atr': 2.0, 'atr_chandelier': 2.0,
+            'rvol': 3.0, 'spread_pct': 0.002,
+            'dollar_vol_20d': 300_000_000, 'avg_20d_vol': 5_000_000, 'volume': 5_000_000,
+            'price_fetched_at': fake_now,
         }
 
         mock_filled = MagicMock(
@@ -1576,7 +1614,7 @@ class TestExitRecheckBetweenEntries:
              patch.object(engine, '_write_dashboard_data'), \
              patch.object(engine, 'save_state'), \
              patch.object(engine, 'get_institutional_scan', return_value=['AAPL', 'MSFT']), \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch.object(engine, 'get_technical_context', return_value=signals_ctx), \
              patch.object(engine.trading_client, 'submit_order', return_value=mock_order), \
              patch.object(engine.trading_client, 'get_order_by_id', return_value=mock_filled), \
@@ -1640,7 +1678,7 @@ class TestRepriceMinPriceCheck:
              patch.object(engine, '_write_dashboard_data'), \
              patch.object(engine, 'save_state'), \
              patch.object(engine, 'get_institutional_scan', return_value=['AAPL']), \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch.object(engine, 'get_technical_context', return_value=ctx), \
              patch.object(engine, '_fetch_snapshot', return_value=stale_snap), \
              patch('src.engine.datetime') as mock_dt, \
@@ -1697,7 +1735,7 @@ class TestStopAuditUnprotectedPositions:
              patch.object(engine, '_write_dashboard_data'), \
              patch.object(engine, 'save_state'), \
              patch.object(engine, 'get_institutional_scan', return_value=[]), \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch('src.engine.datetime') as mock_dt, \
              patch('time.sleep'):
             mock_dt.now.return_value  = fake_now
@@ -1818,7 +1856,7 @@ class TestStopAuditUnprotectedPositions:
              patch.object(engine, '_write_dashboard_data'), \
              patch.object(engine, 'save_state'), \
              patch.object(engine, 'get_institutional_scan', return_value=[]), \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch('src.engine.datetime') as mock_dt, \
              patch('time.sleep'):
             mock_dt.now.return_value  = fake_now

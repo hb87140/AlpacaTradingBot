@@ -31,17 +31,15 @@ from src.config import (
     MAX_POSITIONS_CAP, MIN_BUCKET_SIZE, BUCKET_CASH_PCT,
     VIX_THRESHOLD, HOLD_TRADING_BARS, PROFIT_MIN_THRESHOLD,
     ENTRY_START, ENTRY_END, VOL_MULT_FRIDAY, PRE_ENTRY_SYNC_TIME,
-    RSI_PERIOD, ATR_PERIOD, MA_FAST, MA_SLOW, RSI_THRESHOLD,
-    DAILY_HISTORY_DAYS, ORB_BAR_MINUTES,
+    RSI_PERIOD, ATR_PERIOD, MA_FAST, MA_SLOW,
+    DAILY_HISTORY_DAYS,
     SCAN_MIN_DOLLAR_VOL,
     SCAN_INTERVAL, ERROR_WAIT,
     LOG_BACKUP_COUNT,
     EQUITY_RETRY_INTERVAL,
     EQUITY_HIST_INTERVAL,
     TICKER_BLOCKLIST,
-    GAP_MAX_PCT,
     MAX_DAILY_LOSS_PCT,
-    RSI_MIN_DELTA,
     HARD_STOP_PCT,
     BREAK_EVEN_PCT,
     FRIDAY_CLOSE_HOUR,
@@ -50,16 +48,18 @@ from src.config import (
     CORR_MAX, CORR_LOOKBACK, MAX_SECTOR_COUNT, SMA200_SLOPE_LOOKBACK,
     CHANDELIER_PERIOD, CHANDELIER_MULT,
     LIMIT_BUF_MIN_PCT, LIMIT_BUF_MAX_PCT,
-    MIN_TREND_SEP,
     RISK_PER_TRADE_PCT,
-    ADX_THRESHOLD, HIGH200_MIN_PCT,
     SCAN_MIN_SCORE,
-    ALPACA_SCANNER_TOP,
     SCAN_MIN_PRICE,
     CONCENTRATION_WARN_PCT, CONCENTRATION_HALT_PCT,
     REPRICE_DRIFT_MAX_PCT,
+    DONCHIAN_PERIOD, RSI_OVERSOLD_LOOKBACK,
+    SPY_EMA_PERIOD, SPY_REGIME_SIZE_CUT, SPY_REGIME_RVOL_MULT,
 )
 from src.indicators import apply_all, compute_ma
+from src.rules import (
+    PERMANENT_DAY_RULES, CYCLE_RULES, check_rules, score_candidate,
+)
 from src.scanner import get_candidates
 
 os.makedirs(BASE_DIR, exist_ok=True)
@@ -657,37 +657,6 @@ class VelocityEngine:
             logger.warning(f"DATA: daily bars fetch failed for {symbol}: {e}")
             return None
 
-    def _fetch_orb_high(self, symbol: str) -> Optional[float]:
-        """Return the high of today's 9:30–9:45 AM ET bar (Opening Range High)."""
-        now_ny = datetime.now(_TZ_NY)
-        today  = now_ny.date()
-        start  = _TZ_NY.localize(
-            datetime(today.year, today.month, today.day, 9, 30)
-        )
-        # Request up to 9:46 to ensure the 9:30 bar is fully closed
-        end = _TZ_NY.localize(
-            datetime(today.year, today.month, today.day, 9, 46)
-        )
-        try:
-            req  = StockBarsRequest(
-                symbol_or_symbols=symbol,
-                timeframe=TimeFrame(ORB_BAR_MINUTES, TimeFrameUnit.Minute),
-                start=start,
-                end=end,
-                feed=ALPACA_DATA_FEED,
-            )
-            bars = self.data_client.get_stock_bars(req)
-            # bars[symbol] returns List[Bar], not a BarSet — build DataFrame from the list
-            bar_list = bars[symbol]
-            if not bar_list:
-                return None
-            df = pd.DataFrame([b.model_dump() for b in bar_list])
-            df.columns = [c.lower() for c in df.columns]
-            return float(df['high'].iloc[-1])
-        except Exception as e:
-            logger.debug(f"DATA: ORB fetch failed for {symbol}: {e}")
-            return None
-
     def _fetch_snapshot(self, symbol: str) -> Optional[dict]:
         """Fetch latest quote + daily bar snapshot for live price, spread, and RVOL."""
         try:
@@ -713,16 +682,25 @@ class VelocityEngine:
                 bid = float(snap.latest_quote.bid_price or 0)
                 ask = float(snap.latest_quote.ask_price or 0)
 
-            # Today's accumulated volume (from the rolling daily bar)
-            intraday_vol = 0.0
+            # Today's accumulated volume + intraday OHLC (from the rolling daily bar)
+            intraday_vol  = 0.0
+            intraday_open = 0.0
+            intraday_high = 0.0
+            intraday_low  = 0.0
             if snap.daily_bar:
-                intraday_vol = float(snap.daily_bar.volume or 0)
+                intraday_vol  = float(snap.daily_bar.volume or 0)
+                intraday_open = float(snap.daily_bar.open   or 0)
+                intraday_high = float(snap.daily_bar.high   or 0)
+                intraday_low  = float(snap.daily_bar.low    or 0)
 
             return {
-                'live_price':   live_price,
-                'bid':          bid,
-                'ask':          ask,
-                'intraday_vol': intraday_vol,
+                'live_price':    live_price,
+                'bid':           bid,
+                'ask':           ask,
+                'intraday_vol':  intraday_vol,
+                'intraday_open': intraday_open,
+                'intraday_high': intraday_high,
+                'intraday_low':  intraday_low,
             }
         except Exception as e:
             logger.debug(f"DATA: snapshot fetch failed for {symbol}: {e}")
@@ -764,31 +742,51 @@ class VelocityEngine:
         return None
 
     # ── SPY regime ────────────────────────────────────────────────────────────
-    def _fetch_spy_trend(self) -> bool:
-        """Return True when SPY close > SMA50 > SMA200 AND SMA200 slope is rising (bull regime).
+    def _fetch_spy_trend(self) -> dict:
+        """Return SPY regime dict based on 50-day EMA.
 
-        The slope check blocks recovery rallies where price has crossed above a still-falling
-        SMA200 — the highest-false-breakout window.  Matches the backtest SPY regime filter.
+        Returns:
+            is_bull      bool   True when SPY close > EMA50
+            spy_close    float  latest SPY closing price
+            ema50        float  SPY 50-day EMA value
+            size_factor  float  1.0 in bull; (1 - SPY_REGIME_SIZE_CUT) in bear
+            rvol_mult    float  1.0 in bull; SPY_REGIME_RVOL_MULT in bear
+
+        Bearish regime does NOT block entries — it reduces position size by
+        SPY_REGIME_SIZE_CUT and tightens the RVOL threshold by SPY_REGIME_RVOL_MULT.
+        This allows participation in mean-reversion bounces even during weak markets,
+        but with smaller, more selective positions.
         """
         today_str = datetime.now(_TZ_NY).strftime('%Y-%m-%d')
         cached = self._spy_cache
-        if cached.get('date') == today_str and 'trend' in cached:
-            return cached['trend']
+        if cached.get('date') == today_str and 'is_bull' in cached:
+            return cached
 
         df = self._fetch_daily_bars('SPY')
-        if df is None or len(df) < 200 + SMA200_SLOPE_LOOKBACK:
+        if df is None or len(df) < SPY_EMA_PERIOD:
             logger.warning("SPY: insufficient history for regime check; assuming bull")
-            return True
+            result = {
+                'date': today_str, 'is_bull': True,
+                'spy_close': 0.0, 'ema50': 0.0,
+                'size_factor': 1.0, 'rvol_mult': 1.0,
+            }
+            self._spy_cache = result
+            return result
 
-        ma50_series  = compute_ma(df['close'], 50)
-        ma200_series = compute_ma(df['close'], 200)
-        ma50         = ma50_series.iloc[-1]
-        ma200        = ma200_series.iloc[-1]
-        last         = df['close'].iloc[-1]
-        sma200_slope = float(ma200_series.iloc[-1] - ma200_series.iloc[-(SMA200_SLOPE_LOOKBACK + 1)])
-        trend = bool(last > ma50 > ma200 and sma200_slope > 0)
-        self._spy_cache = {'date': today_str, 'trend': trend}
-        return trend
+        ema50_series = df['close'].ewm(span=SPY_EMA_PERIOD, adjust=False).mean()
+        spy_close    = float(df['close'].iloc[-1])
+        ema50_val    = float(ema50_series.iloc[-1])
+        is_bull      = spy_close > ema50_val
+        result = {
+            'date':        today_str,
+            'is_bull':     is_bull,
+            'spy_close':   round(spy_close, 2),
+            'ema50':       round(ema50_val, 2),
+            'size_factor': 1.0 if is_bull else (1.0 - SPY_REGIME_SIZE_CUT),
+            'rvol_mult':   1.0 if is_bull else SPY_REGIME_RVOL_MULT,
+        }
+        self._spy_cache = result
+        return result
 
     # ── Sector lookup ─────────────────────────────────────────────────────────
     def _get_sector(self, symbol: str) -> str:
@@ -1050,23 +1048,14 @@ class VelocityEngine:
         cached = self._bar_cache.get(symbol)
         if cached and cached.get('date') == today_str:
             bars_daily = cached['bars_daily']
-            orb_high   = cached.get('orb_high')
         else:
             bars_daily = self._fetch_daily_bars(symbol)
             if bars_daily is None:
-                # No history (warrant, delisted, transient error) — already added to
-                # _insufficient_history_skip by KeyError handler; skip ORB fetch too
                 return None
-            orb_high = self._fetch_orb_high(symbol)
             self._bar_cache[symbol] = {
                 'date':       today_str,
                 'bars_daily': bars_daily,
-                'orb_high':   orb_high,
             }
-
-        if orb_high is None or orb_high <= 0:
-            logger.debug(f"SCAN {symbol}: ORB high unavailable, skipping")
-            return None
 
         if len(bars_daily) < MIN_CANDLES:
             logger.debug(f"SCAN {symbol}: insufficient daily bars ({len(bars_daily)} < {MIN_CANDLES})")
@@ -1075,7 +1064,8 @@ class VelocityEngine:
 
         df = apply_all(
             bars_daily, RSI_PERIOD, ATR_PERIOD, MA_FAST, MA_SLOW,
-            SMA200_SLOPE_LOOKBACK, CHANDELIER_PERIOD
+            SMA200_SLOPE_LOOKBACK, CHANDELIER_PERIOD,
+            donchian_period=DONCHIAN_PERIOD,
         )
         if np.isnan(float(df['MA200'].iloc[-1])):
             logger.debug(f"SCAN {symbol}: MA200 is NaN, skipping")
@@ -1084,7 +1074,11 @@ class VelocityEngine:
         avg_20d_vol    = float(df['volume'].tail(20).mean())
         dollar_vol_20d = float((df['close'] * df['volume']).tail(20).mean())
 
-        # Live snapshot — price, bid/ask, and intraday volume
+        # RSI history — last RSI_OVERSOLD_LOOKBACK+2 values for the oversold lookback rule
+        rsi_series  = df['RSI'].dropna()
+        rsi_history = list(rsi_series.iloc[-(RSI_OVERSOLD_LOOKBACK + 2):])
+
+        # Live snapshot — price, bid/ask, intraday volume, and intraday OHLC
         snap = self._fetch_snapshot(symbol)
         if snap is None:
             logger.debug(f"SCAN {symbol}: snapshot unavailable, skipping")
@@ -1113,7 +1107,14 @@ class VelocityEngine:
         rvol         = (intraday_vol / avg_20d_vol / tod_frac) if avg_20d_vol > 0 else 0.0
 
         return {
-            'orb_high':       orb_high,
+            # Donchian bands (primary entry signal)
+            'donchian_upper': float(df['DONCH_UPPER'].iloc[-1]),
+            'donchian_lower': float(df['DONCH_LOWER'].iloc[-1]),
+            # RSI with history for oversold-lookback check
+            'rsi':            float(df['RSI'].iloc[-1]),
+            'rsi_prev':       float(df['RSI'].iloc[-2]),
+            'rsi_history':    rsi_history,
+            # Retained for stop sizing and backtest alignment (not entry rules)
             'ma50':           float(df['MA50'].iloc[-1]),
             'ma200':          float(df['MA200'].iloc[-1]),
             'atr':            float(df['ATR'].iloc[-1]),
@@ -1121,8 +1122,7 @@ class VelocityEngine:
             'sma200_slope':   float(df['SMA200_SLOPE'].iloc[-1]),
             'adx':            float(df['ADX'].iloc[-1]),
             'high200':        float(df['HIGH200'].iloc[-1]),
-            'rsi':            float(df['RSI'].iloc[-1]),
-            'rsi_prev':       float(df['RSI'].iloc[-2]),
+            # Price and liquidity
             'close':          float(df['close'].iloc[-1]),
             'live_price':     live_price,
             'spread_pct':     spread_pct,
@@ -1132,42 +1132,22 @@ class VelocityEngine:
             'avg_20d_vol':    avg_20d_vol,
             'bid':            bid,
             'ask':            ask,
+            # Intraday OHLC for day-strength check
+            'intraday_open':  snap.get('intraday_open', 0.0),
+            'intraday_high':  snap.get('intraday_high', live_price),
+            'intraday_low':   snap.get('intraday_low',  live_price),
             'price_fetched_at': now_ny,
             'df_daily':       df,
         }
 
     # ── Scoring ───────────────────────────────────────────────────────────────
     def _score_candidate(self, ctx: dict) -> float:
-        """Score 0-100.  Trend (30) + RVOL (25) + Momentum (25) + Liquidity (20).
+        """Delegate to src.rules.score_candidate (Donchian bounce formula).
 
-        Trend sub-components:
-          MA separation (0-22 pts): rewards stocks well above their MA200 baseline.
-          ADX quality   (0-8 pts) : rewards strong directional momentum (ADX > 25).
+        Scores 0-100:  Donchian Proximity (30) · RVOL (25) · RSI Accel (25) · Liquidity (20).
+        All weights and thresholds are in src/config.py.
         """
-        ma50        = ctx['ma50']
-        ma200       = ctx['ma200']
-        rsi         = ctx['rsi']
-        rsi_prev    = ctx['rsi_prev']
-        rvol        = ctx.get('rvol', 0.0)
-        spread_pct  = ctx.get('spread_pct', 0.0)
-        adx         = ctx.get('adx', ADX_THRESHOLD)
-
-        trend_sep    = (ma50 - ma200) / ma200 if ma200 > 0 else 0.0
-        ma_sep_score = min(22.0, trend_sep / 0.06 * 22.0)
-        adx_quality  = min(8.0, max(0.0, (adx - 25.0) / 25.0 * 8.0))
-        trend_score  = ma_sep_score + adx_quality
-
-        rvol_excess = max(0.0, rvol - RVOL_MIN)
-        rvol_score  = min(25.0, rvol_excess / (5.0 - RVOL_MIN) * 25.0)
-
-        rsi_delta   = max(0.0, rsi - rsi_prev)
-        rsi_accel   = min(15.0, rsi_delta / 5.0 * 15.0)
-        rsi_quality = min(10.0, max(0.0, (rsi - RSI_THRESHOLD) / 20.0 * 10.0))
-        momentum_score = rsi_accel + rsi_quality
-
-        liq_score = max(0.0, 20.0 * (1.0 - spread_pct / SPREAD_MAX_PCT)) if spread_pct > 0 else 20.0
-
-        return round(trend_score + rvol_score + momentum_score + liq_score, 2)
+        return score_candidate(ctx)
 
     # ── Exit management ───────────────────────────────────────────────────────
     def check_velocity_exits(self) -> Dict[str, float]:
@@ -1510,22 +1490,28 @@ class VelocityEngine:
             self._write_dashboard_data(connected=True)
             return
 
-        # 8. SPY regime
-        spy_trend = self._fetch_spy_trend()
-        if not spy_trend:
-            logger.warning("REGIME: SPY below SMA50/SMA200 — no new entries this cycle.")
-            self._update_position_prices(prefetched)
-            self._write_dashboard_data(connected=True)
-            return
+        # 8. SPY regime (soft — bearish cuts size + tightens RVOL, does not block)
+        regime           = self._fetch_spy_trend()
+        is_bull          = regime['is_bull']
+        spy_size_factor  = regime['size_factor']
+        effective_rvol   = RVOL_MIN * regime['rvol_mult']
+        if not is_bull:
+            logger.warning(
+                f"REGIME: SPY bearish (close={regime['spy_close']:.2f} < "
+                f"EMA{SPY_EMA_PERIOD}={regime['ema50']:.2f}) — "
+                f"size cut {SPY_REGIME_SIZE_CUT*100:.0f}%, "
+                f"RVOL threshold raised to {effective_rvol:.2f}x"
+            )
+            bucket_size = round(bucket_size * spy_size_factor, 2)
 
-        is_friday      = (now_ny.weekday() == 4)
-        dol_vol_thresh = SCAN_MIN_DOLLAR_VOL * (VOL_MULT_FRIDAY if is_friday else 1.0)
+        is_friday = (now_ny.weekday() == 4)
 
         # 9. Scan and score candidates
         watchlist = self.get_institutional_scan()
         logger.info(
             f"SCAN: {len(watchlist)} candidates → {watchlist}"
-            + (f" [FRIDAY: dolVol threshold ${dol_vol_thresh/1e6:.0f}M]" if is_friday else "")
+            + (" [FRIDAY: 2× volume threshold]" if is_friday else "")
+            + ("" if is_bull else f" [BEARISH REGIME: size=${bucket_size:.0f}]")
         )
 
         book_sectors: Dict[str, int] = {}
@@ -1565,83 +1551,51 @@ class VelocityEngine:
                 n_no_ctx += 1
                 continue
 
-            price        = ctx['live_price']
-            orb_h        = ctx['orb_high']
-            ma50         = ctx['ma50']
-            ma200        = ctx['ma200']
-            rsi          = ctx['rsi']
-            rsi_p        = ctx['rsi_prev']
-            atr          = ctx['atr']
-            atr_chand    = ctx['atr_chandelier']
-            adx          = ctx['adx']
-            high200      = ctx['high200']
-            sma200_slope = ctx['sma200_slope']
-            rvol         = ctx.get('rvol', 0.0)
-            spread_pct   = ctx.get('spread_pct', 0.0)
-            dol_vol_20d  = ctx['dollar_vol_20d']
+            # Inject runtime overrides into ctx so rule functions can read them
+            ctx['_is_friday']          = is_friday
+            ctx['_effective_rvol_min'] = effective_rvol
 
-            # ── Permanent per-day filter checks (MA/ADX/52w-high/dollar-vol) ─
-            c_trend     = price > ma50 and ma50 > ma200
-            c_trend_sep = ma200 > 0 and (ma50 - ma200) / ma200 >= MIN_TREND_SEP
-            c_adx       = adx > ADX_THRESHOLD
-            c_52w_high  = high200 > 0 and price >= high200 * HIGH200_MIN_PCT
-            c_dol_vol   = dol_vol_20d >= dol_vol_thresh
-
-            if not (c_trend and c_trend_sep and c_adx and c_52w_high and c_dol_vol):
-                perm_fails = []
-                if not c_trend:      perm_fails.append('MA50<MA200')
-                if not c_trend_sep:  perm_fails.append(f'TrendSep<{MIN_TREND_SEP*100:.0f}%')
-                if not c_adx:        perm_fails.append(f'ADX≤{ADX_THRESHOLD}')
-                if not c_52w_high:   perm_fails.append(f'52wHigh<{HIGH200_MIN_PCT*100:.0f}%')
-                if not c_dol_vol:    perm_fails.append(f'DolVol<{dol_vol_thresh/1e6:.0f}M')
-                reason = ', '.join(perm_fails)
+            # ── Permanent per-day filter checks (dollar volume) ───────────────
+            perm_passed, perm_fails = check_rules(ctx, PERMANENT_DAY_RULES)
+            if not perm_passed:
+                reason = ', '.join(r for _, r in perm_fails)
                 self._daily_scan_skip[sym] = reason
                 n_day += 1
-                # Persist into state so the skip survives an intraday restart
                 if sym in self.state:
                     self.state[sym]['_daily_skip_reason'] = reason
                     self.state[sym]['_daily_skip_date']   = today_str
                 logger.debug(f"SCAN {sym}: SKIP (day) — {reason}")
                 continue
 
-            # ── Cycle-by-cycle filter checks ─────────────────────────────────
-            c_slope   = sma200_slope > 0
-            c_rvol    = rvol >= RVOL_MIN
-            c_spread  = spread_pct <= SPREAD_MAX_PCT
-            c_orb     = price > orb_h
-            c_gap     = price <= orb_h * (1 + GAP_MAX_PCT)
-            c_rsi_delta = (rsi - rsi_p) >= RSI_MIN_DELTA
-            c_rsi_lvl   = rsi > RSI_THRESHOLD
+            # ── Cycle-by-cycle filter checks (all 7 Donchian bounce rules) ───
+            cycle_passed, cycle_fails = check_rules(ctx, CYCLE_RULES)
+
+            price        = ctx['live_price']
+            donch_lower  = ctx.get('donchian_lower', 0.0)
+            rsi          = ctx['rsi']
+            rsi_p        = ctx['rsi_prev']
+            rvol         = ctx.get('rvol', 0.0)
+            spread_pct   = ctx.get('spread_pct', 0.0)
+            dol_vol_20d  = ctx['dollar_vol_20d']
 
             scan_detail = (
-                f"SCAN {sym}: price=${price:.2f} ORB=${orb_h:.2f} "
-                f"MA50=${ma50:.2f} MA200=${ma200:.2f} SMA200slope={sma200_slope:+.3f} "
-                f"ADX={adx:.1f} RVOL={rvol:.1f}(≥{RVOL_MIN}) "
-                f"spread={spread_pct*100:.2f}% RSI={rsi:.1f}(Δ{rsi-rsi_p:+.1f}) "
-                f"DolVol20d=${dol_vol_20d/1e6:.0f}M | "
-                f"Trend={c_trend} TrendSep={c_trend_sep} ADX={c_adx} "
-                f"52wHigh={c_52w_high} Slope={c_slope} RVOL={c_rvol} "
-                f"Spread={c_spread} ORB={c_orb} Gap={c_gap} "
-                f"RSIδ={c_rsi_delta} RSI>={RSI_THRESHOLD}={c_rsi_lvl}"
+                f"SCAN {sym}: price=${price:.2f} DonchFloor=${donch_lower:.2f} "
+                f"RSI={rsi:.1f}(Δ{rsi-rsi_p:+.1f}) RVOL={rvol:.2f}x(≥{effective_rvol:.2f}) "
+                f"spread={spread_pct*100:.2f}% DolVol20d=${dol_vol_20d/1e6:.0f}M"
             )
 
-            if not (c_rvol and c_spread and c_orb and c_gap and c_rsi_delta and c_rsi_lvl):
-                failed = [n for n, v in [
-                    (f'RVOL≥{RVOL_MIN}', c_rvol),
-                    (f'Spread≤{SPREAD_MAX_PCT*100:.1f}%', c_spread),
-                    ('price>ORB', c_orb),
-                    (f'gap≤{GAP_MAX_PCT*100:.0f}%', c_gap),
-                    (f'RSIδ≥{RSI_MIN_DELTA}', c_rsi_delta),
-                    (f'RSI>{RSI_THRESHOLD}', c_rsi_lvl),
-                ] if not v]
+            if not cycle_passed:
                 n_cycle += 1
-                for f in failed:
-                    _rule_fails[f] = _rule_fails.get(f, 0) + 1
+                for name, reason in cycle_fails:
+                    _rule_fails[name] = _rule_fails.get(name, 0) + 1
                 logger.debug(f"{scan_detail}")
-                logger.debug(f"SCAN {sym}: NO SIGNAL — failed: {failed}")
+                logger.debug(
+                    f"SCAN {sym}: NO SIGNAL — failed: "
+                    f"{[name for name, _ in cycle_fails]}"
+                )
                 continue
 
-            # ── Correlation + sector clustering (expensive — only for passing ─
+            # ── Correlation + sector clustering (expensive — only for passing) ─
             df_daily = ctx.get('df_daily')
             if df_daily is not None and self.state:
                 max_corr = self._compute_book_correlation(sym, df_daily)
@@ -1669,7 +1623,7 @@ class VelocityEngine:
             logger.info(scan_detail)
             logger.info(
                 f"SIGNAL {sym}: score={score:.1f}/100 | "
-                f"RVOL={rvol:.1f}x TrendSep={(ma50-ma200)/ma200*100:.1f}% "
+                f"DonchFloor=${donch_lower:.2f} RVOL={rvol:.2f}x "
                 f"RSIδ={rsi-rsi_p:.1f} spread={spread_pct*100:.2f}%"
             )
 
@@ -1680,7 +1634,7 @@ class VelocityEngine:
             logger.info(
                 f"SCAN: No signals — "
                 f"{n_blocked} ETF/blocked, {n_history} no-history, "
-                f"{n_no_ctx} no-snapshot, {n_day} day-filtered(MA/ADX/DolVol/52wH), "
+                f"{n_no_ctx} no-snapshot, {n_day} day-filtered(DolVol), "
                 f"{n_cycle} cycle-filtered"
                 + (f" [{cycle_detail}]" if cycle_detail else "")
             )
@@ -1737,6 +1691,9 @@ class VelocityEngine:
 
             if np.isnan(atr) or atr <= 0:
                 logger.warning(f"SKIP {sym}: invalid ATR ({atr:.4f})")
+                continue
+            if np.isnan(atr_chand) or atr_chand <= 0:
+                logger.warning(f"SKIP {sym}: invalid ATR_CHAND ({atr_chand:.4f}) — zero-width trail stop")
                 continue
 
             # Adaptive limit price — ATR/RVOL scaled slippage buffer above ask

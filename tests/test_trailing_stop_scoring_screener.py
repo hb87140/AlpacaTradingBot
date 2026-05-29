@@ -30,6 +30,12 @@ import pytz
 
 from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, TrailingStopOrderRequest
 
+# Shared SPY regime dict — used wherever _fetch_spy_trend is patched
+_SPY_BULL_REGIME = {
+    'is_bull': True, 'spy_close': 450.0, 'ema50': 440.0,
+    'size_factor': 1.0, 'rvol_mult': 1.0,
+}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared helpers
@@ -95,15 +101,28 @@ def _ctx(price=100.0, orb=95.0, ma50=105.0, ma200=90.0,
          sma200_slope=0.1,
          atr_chandelier=None,
          avg_20d_vol=5_000_000,
-         adx=25.0, high200=None):
+         adx=25.0, high200=None,
+         donchian_lower=None, donchian_upper=None,
+         intraday_open=None, intraday_high=None, intraday_low=None,
+         rsi_history=None):
     """Build a get_technical_context()-style dict with all production-rule fields."""
     h200 = high200 if high200 is not None else round(price * 1.1, 4)
+    # Donchian defaults: price 0.2% above lower band (well within 0.5% tolerance)
+    dl = donchian_lower if donchian_lower is not None else round(price * 0.998, 4)
+    du = donchian_upper if donchian_upper is not None else round(price * 1.10, 4)
+    # Day-strength defaults: price 0.8% above open, in upper 86% of intraday range
+    io = intraday_open if intraday_open is not None else round(price * 0.992, 4)
+    ih = intraday_high if intraday_high is not None else round(price * 1.005, 4)
+    il = intraday_low  if intraday_low  is not None else round(price * 0.970, 4)
+    # RSI history: contains oversold values (<35) within last 3 bars for lookback check
+    rh = rsi_history if rsi_history is not None else [28.0, 30.0, 32.0, rsi_prev, rsi]
     return {
         'orb_high':        orb,
         'ma50':            ma50,
         'ma200':           ma200,
         'rsi':             rsi,
         'rsi_prev':        rsi_prev,
+        'rsi_history':     rh,
         'atr':             atr,
         'atr_chandelier':  atr_chandelier if atr_chandelier is not None else atr,
         'sma200_slope':    sma200_slope,
@@ -116,6 +135,11 @@ def _ctx(price=100.0, orb=95.0, ma50=105.0, ma200=90.0,
         'volume':          5_000_000,
         'dollar_vol_20d':  dollar_vol,
         'avg_20d_vol':     avg_20d_vol,
+        'donchian_lower':  dl,
+        'donchian_upper':  du,
+        'intraday_open':   io,
+        'intraday_high':   ih,
+        'intraday_low':    il,
         # price_fetched_at must be well inside the 60-second freshness window
         # so run_cycle() doesn't attempt a re-price snapshot call
         'price_fetched_at': pytz.timezone('US/Eastern').localize(datetime(2024, 6, 5, 10, 30)),
@@ -143,7 +167,7 @@ def _run_entry_cycle(engine, ctx, sym='TSLA', fake_now=None, equity=2500.0, cash
          patch.object(engine, 'save_state'), \
          patch.object(engine, 'get_institutional_scan', return_value=[sym]), \
          patch.object(engine, 'get_technical_context', return_value=ctx), \
-         patch.object(engine, '_fetch_spy_trend', return_value=True), \
+         patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
          patch.object(engine, '_fetch_vix', return_value=20.0), \
          patch.object(engine, '_get_sector', return_value='Technology'), \
          patch('src.engine.time.sleep'), \
@@ -192,7 +216,7 @@ def _run_multi_signal_cycle(engine, ctx_map, equity=2500.0, cash=2500.0):
          patch.object(engine, 'save_state'), \
          patch.object(engine, 'get_institutional_scan', return_value=symbols), \
          patch.object(engine, 'get_technical_context', side_effect=_ctx_for), \
-         patch.object(engine, '_fetch_spy_trend', return_value=True), \
+         patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
          patch.object(engine, '_fetch_vix', return_value=20.0), \
          patch.object(engine, '_get_sector', side_effect=_sector_for), \
          patch('src.engine.time.sleep'), \
@@ -424,315 +448,238 @@ class TestGetInstitutionalScan:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. SCORING SYSTEM — _score_candidate()
+# 3. SCORING SYSTEM — _score_candidate() / score_candidate()
 #    Four components summing to 100:
-#      Trend (30 pts) · RVOL (25 pts) · Momentum (25 pts) · Liquidity (20 pts)
+#      Donchian Proximity (30) · RVOL (25) · RSI Delta (25) · Liquidity (20)
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestScoringTrendStrength:
-    """
-    Trend strength component (up to 30 pts, no floor):
-      sep        = (MA50 - MA200) / MA200
-      trend_score = min(30.0, sep / 0.06 * 30.0)
+class TestScoringDonchianProximity:
+    """Donchian proximity component (0-30 pts):
+      proximity = (price - lower) / lower
+      donchian_score = max(0, (1 - proximity / DONCHIAN_FLOOR_TOL_PCT) * 30)
 
-      sep ≥ 6% → 30 pts (saturated)
-      sep = 5% → 25 pts
-      sep = 3% → 15 pts
-      sep = 1% → 5 pts
-      sep = 0%  → 0 pts
-      sep < 0%  → negative (bearish); total clamped by other components
+      proximity=0% (price==lower) → 30 pts
+      proximity=0.25% (half tolerance) → 15 pts
+      proximity=0.5% (at ceiling)  → 0 pts
+      proximity>0.5% → clamped at 0
+      lower=0       → 0 pts (unavailable)
 
-    Isolation: subtract 25 (= rvol_score=0 + momentum=5 + liq=20 baseline).
-    Baseline: rvol=RVOL_MIN → 0; rsi=65 delta=0 → quality=5 accel=0 = 5; spread=0 → 20.
+    Isolation: rvol=RVOL_MIN → 0; rsi_delta=0 → 0; spread=SPREAD_MAX, vol=0 → 0.
+    Total = donchian_score + 0 + 0 + 0.
     """
 
-    def _trend_score(self, ma50, ma200):
+    def _donchian_score(self, price, lower):
+        from src.config import SPREAD_MAX_PCT, RVOL_MIN
         engine = _make_engine()
-        ctx = _ctx(price=100.5, orb=100.0,
+        ctx = _ctx(price=price, rvol=RVOL_MIN,
                    rsi=65.0, rsi_prev=65.0,
-                   ma50=ma50, ma200=ma200,
-                   rvol=2.5, spread_pct=0.0)
-        return engine._score_candidate(ctx) - 25
+                   spread_pct=SPREAD_MAX_PCT, dollar_vol=0,
+                   donchian_lower=lower)
+        return engine._score_candidate(ctx)
 
-    def test_6pct_separation_gives_22_pts_at_default_adx(self):
-        """MA sep at 6%: min(22, 0.06/0.06*22)=22. ADX=25 → bonus=0. Total=22."""
-        assert self._trend_score(106.0, 100.0) == pytest.approx(22.0, abs=0.1)
+    def test_at_donchian_floor_gives_30_pts(self):
+        """price==lower → proximity=0 → 30 pts."""
+        assert self._donchian_score(100.0, 100.0) == pytest.approx(30.0, abs=0.1)
 
-    def test_above_6pct_capped_at_22_without_adx(self):
-        """MA sep saturates at 22 when ADX=25 (no ADX bonus)."""
-        assert self._trend_score(120.0, 100.0) == pytest.approx(22.0, abs=0.1)
+    def test_half_tolerance_gives_15_pts(self):
+        """proximity=0.25% (half of 0.5%) → 15 pts."""
+        assert self._donchian_score(100.25, 100.0) == pytest.approx(15.0, abs=0.1)
 
-    def test_5pct_separation_gives_18_3_pts(self):
-        """MA sep at 5%: 5/6*22≈18.33. ADX=25 → bonus=0."""
-        assert self._trend_score(105.0, 100.0) == pytest.approx(18.33, abs=0.1)
+    def test_at_tolerance_ceiling_gives_0_pts(self):
+        """proximity=0.5% (DONCHIAN_FLOOR_TOL_PCT) → 0 pts."""
+        assert self._donchian_score(100.5, 100.0) == pytest.approx(0.0, abs=0.1)
 
-    def test_3pct_separation_gives_11_pts(self):
-        """MA sep at 3%: 3/6*22=11.0. ADX=25 → bonus=0."""
-        assert self._trend_score(103.0, 100.0) == pytest.approx(11.0, abs=0.1)
+    def test_above_tolerance_clamped_at_zero(self):
+        """proximity>0.5% → 0 pts (clamped)."""
+        assert self._donchian_score(101.0, 100.0) == pytest.approx(0.0, abs=0.1)
 
-    def test_1pct_separation_gives_3_67_pts(self):
-        """MA sep at 1%: 1/6*22≈3.67. ADX=25 → bonus=0."""
-        assert self._trend_score(101.0, 100.0) == pytest.approx(3.67, abs=0.1)
-
-    def test_bearish_trend_is_negative(self):
-        """sep < 0 → ma_sep_score negative (no floor on MA sep). ADX=25 → bonus=0."""
-        assert self._trend_score(95.0, 100.0) < 0.0
-
-    def test_equal_mas_gives_zero_trend(self):
-        assert self._trend_score(100.0, 100.0) == pytest.approx(0.0, abs=0.1)
-
-    def test_adx_at_25_gives_no_bonus(self):
-        """ADX quality threshold is 25; at exactly 25 bonus = 0."""
+    def test_lower_unavailable_gives_zero(self):
+        """donchian_lower=0 → component contributes 0."""
+        from src.config import SPREAD_MAX_PCT, RVOL_MIN
         engine = _make_engine()
-        ctx = _ctx(price=100.5, orb=100.0, rsi=65.0, rsi_prev=65.0,
-                   ma50=100.0, ma200=100.0, rvol=2.5, spread_pct=0.0, adx=25.0)
-        trend_component = engine._score_candidate(ctx) - 25
-        assert trend_component == pytest.approx(0.0, abs=0.1)
-
-    def test_adx_below_25_gives_no_bonus(self):
-        """ADX=20 (gate threshold) is below the scoring threshold of 25; bonus=0."""
-        engine = _make_engine()
-        ctx = _ctx(price=100.5, orb=100.0, rsi=65.0, rsi_prev=65.0,
-                   ma50=100.0, ma200=100.0, rvol=2.5, spread_pct=0.0, adx=20.0)
-        trend_component = engine._score_candidate(ctx) - 25
-        assert trend_component == pytest.approx(0.0, abs=0.1)
-
-    def test_adx_at_37_5_gives_4_pts(self):
-        """ADX=37.5: (37.5-25)/25*8=4 pts. ma50=ma200 → MA sep=0."""
-        engine = _make_engine()
-        ctx = _ctx(price=100.5, orb=100.0, rsi=65.0, rsi_prev=65.0,
-                   ma50=100.0, ma200=100.0, rvol=2.5, spread_pct=0.0, adx=37.5)
-        trend_component = engine._score_candidate(ctx) - 25
-        assert trend_component == pytest.approx(4.0, abs=0.1)
-
-    def test_adx_at_50_gives_8_pts(self):
-        """ADX=50: (50-25)/25*8=8 pts (maximum ADX bonus). ma50=ma200 → MA sep=0."""
-        engine = _make_engine()
-        ctx = _ctx(price=100.5, orb=100.0, rsi=65.0, rsi_prev=65.0,
-                   ma50=100.0, ma200=100.0, rvol=2.5, spread_pct=0.0, adx=50.0)
-        trend_component = engine._score_candidate(ctx) - 25
-        assert trend_component == pytest.approx(8.0, abs=0.1)
-
-    def test_adx_above_50_capped_at_8_pts(self):
-        """ADX=80 is beyond cap; bonus clamped at 8 pts."""
-        engine = _make_engine()
-        ctx = _ctx(price=100.5, orb=100.0, rsi=65.0, rsi_prev=65.0,
-                   ma50=100.0, ma200=100.0, rvol=2.5, spread_pct=0.0, adx=80.0)
-        trend_component = engine._score_candidate(ctx) - 25
-        assert trend_component == pytest.approx(8.0, abs=0.1)
-
-    def test_full_trend_at_6pct_sep_and_adx50(self):
-        """6% sep (22 pts) + ADX=50 (8 pts) = 30 pts total trend."""
-        engine = _make_engine()
-        ctx = _ctx(price=100.5, orb=100.0, rsi=65.0, rsi_prev=65.0,
-                   ma50=106.0, ma200=100.0, rvol=2.5, spread_pct=0.0, adx=50.0)
-        trend_component = engine._score_candidate(ctx) - 25
-        assert trend_component == pytest.approx(30.0, abs=0.1)
+        ctx = _ctx(price=100.0, rvol=RVOL_MIN, rsi=65.0, rsi_prev=65.0,
+                   spread_pct=SPREAD_MAX_PCT, dollar_vol=0, donchian_lower=0.0)
+        assert engine._score_candidate(ctx) == pytest.approx(0.0, abs=0.1)
 
 
 class TestScoringRVOL:
-    """
-    RVOL component (0-25 pts):
-      rvol_score = min(max(rvol - RVOL_MIN, 0) / (5.0 - RVOL_MIN) × 25, 25)
+    """RVOL component (0-25 pts):
+      rvol_score = min(25, max(0, rvol - RVOL_MIN) / (5.0 - RVOL_MIN) × 25)
 
-      rvol = RVOL_MIN (2.5×) → 0 pts (at floor)
-      rvol = 3.75×           → 12.5 pts
-      rvol = 5.0× (2×floor)  → 25 pts (saturated)
-      rvol > 5.0×            → capped at 25
-      rvol < floor           → 0 pts (clamped)
+      RVOL_MIN = 2.5
+      rvol=2.5 (floor) → 0 pts
+      rvol=3.75 (midpoint) → 12.5 pts
+      rvol=5.0 → 25 pts
+      rvol>5.0 → capped at 25
+      rvol<2.5 → 0 pts
 
-    Isolation: subtract 25 (= trend=0 + momentum=5 + liq=20 baseline).
-    Baseline: ma50=ma200 → trend=0; rsi=65 delta=0 → momentum=5; spread=0 → liq=20.
+    Isolation: donchian_lower=0 → 0; rsi_delta=0 → 0; spread=max, vol=0 → 0.
+    Total = 0 + rvol_score + 0 + 0 = rvol_score.
     """
 
     def _rvol_score(self, rvol):
+        from src.config import SPREAD_MAX_PCT
         engine = _make_engine()
-        ctx = _ctx(price=100.5, orb=100.0,
-                   rsi=65.0, rsi_prev=65.0,
-                   ma50=100.0, ma200=100.0,
-                   rvol=rvol, spread_pct=0.0)
-        return engine._score_candidate(ctx) - 25
+        ctx = _ctx(rsi=65.0, rsi_prev=65.0,
+                   spread_pct=SPREAD_MAX_PCT, dollar_vol=0,
+                   rvol=rvol, donchian_lower=0.0)
+        return engine._score_candidate(ctx)
 
     def test_rvol_at_floor_gives_zero(self):
         from src.config import RVOL_MIN
         assert self._rvol_score(RVOL_MIN) == pytest.approx(0.0, abs=0.1)
 
     def test_rvol_at_midpoint_gives_12_5(self):
+        """midpoint = (2.5 + 5.0) / 2 = 3.75 → 12.5 pts."""
         assert self._rvol_score(3.75) == pytest.approx(12.5, abs=0.1)
 
-    def test_rvol_at_2x_floor_gives_25(self):
+    def test_rvol_at_5x_gives_25(self):
         assert self._rvol_score(5.0) == pytest.approx(25.0, abs=0.1)
 
-    def test_rvol_above_2x_floor_capped_at_25(self):
+    def test_rvol_above_5x_capped_at_25(self):
         assert self._rvol_score(7.0) == pytest.approx(25.0, abs=0.1)
 
     def test_rvol_below_floor_gives_zero(self):
         assert self._rvol_score(1.0) == pytest.approx(0.0, abs=0.1)
 
 
-class TestScoringMomentum:
-    """
-    Momentum component (0-25 pts):
-      accel   = min(15, max(0, delta) / 5.0 * 15)  — saturates at delta=5
-      quality = min(10, max(0, (RSI - RSI_THRESHOLD) / 20 * 10))  — saturates at RSI=75
-      momentum = accel + quality
+class TestScoringRSIDelta:
+    """RSI delta acceleration component (0-25 pts):
+      rsi_score = min(25, max(0, rsi - rsi_prev) / 10.0 × 25)
 
-    Isolation baseline:  ma50=ma200 → trend=0;  rvol=RVOL_MIN → rvol_score=0;
-                          spread=0   → liq=20.
-    Total = 0 + 0 + momentum + 20   →  momentum = total − 20.
+      delta=0  → 0 pts
+      delta=5  → 12.5 pts
+      delta=10 → 25 pts (saturated)
+      delta>10 → capped at 25
+      delta<0  → 0 pts (clamped)
 
-    Expected values (RSI_THRESHOLD=55):
-      RSI=65, delta=0: quality=(65-55)/20*10=5,  accel=0  → 5 pts
-      RSI=72, delta=0: quality=(72-55)/20*10=8.5,accel=0  → 8.5 pts
-      RSI=78, delta=0: quality=min(10,11.5)=10,  accel=0  → 10 pts
-      RSI=80, delta=0: quality=min(10,12.5)=10,  accel=0  → 10 pts
-      RSI=65, delta=5: quality=5, accel=min(15,15)=15     → 20 pts
-      RSI=65, delta=10 or more: quality=5, accel=15       → 20 pts
-      RSI=75, delta=10: quality=10, accel=15              → 25 pts (maximum)
+    Isolation: donchian_lower=0 → 0; rvol=RVOL_MIN → 0; spread=max, vol=0 → 0.
+    Total = 0 + 0 + rsi_score + 0 = rsi_score.
     """
 
-    def _momentum_score(self, rsi, rsi_prev):
+    def _rsi_score(self, rsi, rsi_prev):
+        from src.config import RVOL_MIN, SPREAD_MAX_PCT
         engine = _make_engine()
-        ctx = _ctx(price=100.5, orb=100.0,
-                   rsi=rsi, rsi_prev=rsi_prev,
-                   ma50=100.0, ma200=100.0,
-                   rvol=2.5, spread_pct=0.0)
-        return engine._score_candidate(ctx) - 20
+        ctx = _ctx(rsi=rsi, rsi_prev=rsi_prev,
+                   rvol=RVOL_MIN, spread_pct=SPREAD_MAX_PCT, dollar_vol=0,
+                   donchian_lower=0.0)
+        return engine._score_candidate(ctx)
 
-    def test_rsi_65_delta_0_gives_5_pts(self):
-        """quality=(65-55)/20*10=5, accel=0 → 5 pts."""
-        assert self._momentum_score(65.0, 65.0) == pytest.approx(5.0, abs=0.1)
+    def test_delta_zero_gives_zero(self):
+        assert self._rsi_score(65.0, 65.0) == pytest.approx(0.0, abs=0.1)
 
-    def test_rsi_72_delta_0_gives_8_5_pts(self):
-        """quality=(72-55)/20*10=8.5, accel=0 → 8.5 pts."""
-        assert self._momentum_score(72.0, 72.0) == pytest.approx(8.5, abs=0.1)
+    def test_delta_5_gives_12_5_pts(self):
+        assert self._rsi_score(65.0, 60.0) == pytest.approx(12.5, abs=0.1)
 
-    def test_rsi_78_delta_0_gives_10_pts(self):
-        """quality=min(10, 11.5)=10, accel=0 → 10 pts."""
-        assert self._momentum_score(78.0, 78.0) == pytest.approx(10.0, abs=0.1)
+    def test_delta_10_gives_25_pts(self):
+        assert self._rsi_score(70.0, 60.0) == pytest.approx(25.0, abs=0.1)
 
-    def test_rsi_80_delta_0_gives_10_pts(self):
-        """quality=min(10, 12.5)=10, accel=0 → 10 pts."""
-        assert self._momentum_score(80.0, 80.0) == pytest.approx(10.0, abs=0.1)
+    def test_delta_above_10_capped_at_25(self):
+        assert self._rsi_score(80.0, 60.0) == pytest.approx(25.0, abs=0.1)
 
-    def test_rsi_82_delta_0_gives_10_pts(self):
-        """quality=min(10, 13.5)=10, accel=0 → 10 pts."""
-        assert self._momentum_score(82.0, 82.0) == pytest.approx(10.0, abs=0.1)
-
-    def test_delta_5_gives_full_acceleration(self):
-        """delta=5: accel=min(15, 5/5*15)=15; quality=(65-55)/20*10=5 → 20 pts."""
-        assert self._momentum_score(65.0, 60.0) == pytest.approx(20.0, abs=0.1)
-
-    def test_delta_10_gives_same_as_delta_5(self):
-        """delta=10: accel=min(15,30)=15; quality=5 → 20 pts (same as delta=5 because accel saturates at delta=5)."""
-        assert self._momentum_score(65.0, 55.0) == pytest.approx(20.0, abs=0.1)
-
-    def test_delta_above_10_capped(self):
-        """delta=20: accel still capped at 15; quality=5 → 20 pts."""
-        assert self._momentum_score(65.0, 45.0) == pytest.approx(20.0, abs=0.1)
-
-    def test_negative_delta_gives_zero_acceleration(self):
-        """Falling RSI: delta<0 → accel=0; only quality component remains."""
-        assert self._momentum_score(60.0, 65.0) == pytest.approx(2.5, abs=0.1)
-
-    def test_max_momentum_score_is_25(self):
-        """Max momentum requires both full quality (RSI=75) and full acceleration (delta≥5)."""
-        assert self._momentum_score(75.0, 65.0) == pytest.approx(25.0, abs=0.1)
+    def test_negative_delta_gives_zero(self):
+        """Falling RSI: delta<0 → clamped at 0 pts."""
+        assert self._rsi_score(60.0, 65.0) == pytest.approx(0.0, abs=0.1)
 
 
 class TestScoringLiquidity:
-    """
-    Liquidity component (0-20 pts):
-      liquidity = max(0, (SPREAD_MAX_PCT - spread_pct) / SPREAD_MAX_PCT × 20)
+    """Liquidity component (0-20 pts): spread_pts (0-10) + vol_pts (0-10).
 
-      spread = 0%    → 20 pts
-      spread = 0.25% → 10 pts
-      spread = 0.5%  → 0 pts
-      spread > 0.5%  → clamped to 0
+      spread_pts = max(0, (1 - spread/SPREAD_MAX) × 10)
+      vol_pts    = min(10, (dollar_vol / SCAN_MIN_DOLLAR_VOL) × 10)
 
-    Isolation baseline:  ma50=ma200 → trend=0;  rvol=RVOL_MIN → rvol_score=0;
-      rsi=65, rsi_prev=65, delta=0 → quality=5, accel=0 → momentum=5.
-    Total = 0 + 0 + 5 + liq  →  liq = total − 5.
+    Isolation: donchian_lower=0 → 0; rvol=RVOL_MIN → 0; rsi_delta=0 → 0.
+    Total = 0 + 0 + 0 + liq_score = liq_score.
     """
 
-    def _liquidity_score(self, spread_pct):
+    def _liq_score(self, spread_pct, dollar_vol):
+        from src.config import RVOL_MIN
         engine = _make_engine()
-        ctx = _ctx(price=100.5, orb=100.0,
-                   rsi=65.0, rsi_prev=65.0,
-                   ma50=100.0, ma200=100.0,
-                   rvol=2.5, spread_pct=spread_pct)
-        return engine._score_candidate(ctx) - 5
+        ctx = _ctx(rsi=65.0, rsi_prev=65.0,
+                   rvol=RVOL_MIN, donchian_lower=0.0,
+                   spread_pct=spread_pct, dollar_vol=dollar_vol)
+        return engine._score_candidate(ctx)
 
-    def test_zero_spread_gives_20_pts(self):
-        assert self._liquidity_score(0.0) == pytest.approx(20.0, abs=0.1)
+    def test_zero_spread_full_vol_gives_20_pts(self):
+        """spread=0, vol=SCAN_MIN → spread_pts=10, vol_pts=10 → 20."""
+        from src.config import SCAN_MIN_DOLLAR_VOL
+        assert self._liq_score(0.0, SCAN_MIN_DOLLAR_VOL) == pytest.approx(20.0, abs=0.1)
 
-    def test_half_spread_gives_10_pts(self):
-        assert self._liquidity_score(0.0025) == pytest.approx(10.0, abs=0.1)
+    def test_max_spread_full_vol_gives_10_pts(self):
+        """spread=SPREAD_MAX → spread_pts=0; vol=min → vol_pts=10 → 10 total."""
+        from src.config import SPREAD_MAX_PCT, SCAN_MIN_DOLLAR_VOL
+        assert self._liq_score(SPREAD_MAX_PCT, SCAN_MIN_DOLLAR_VOL) == pytest.approx(10.0, abs=0.1)
 
-    def test_max_spread_gives_zero(self):
+    def test_zero_spread_zero_vol_gives_10_pts(self):
+        """spread=0 → spread_pts=10; vol=0 → vol_pts=0 → 10 total."""
+        assert self._liq_score(0.0, 0.0) == pytest.approx(10.0, abs=0.1)
+
+    def test_max_spread_zero_vol_gives_0_pts(self):
+        """spread=max → 0; vol=0 → 0 → 0 total."""
         from src.config import SPREAD_MAX_PCT
-        assert self._liquidity_score(SPREAD_MAX_PCT) == pytest.approx(0.0, abs=0.1)
+        assert self._liq_score(SPREAD_MAX_PCT, 0.0) == pytest.approx(0.0, abs=0.1)
 
-    def test_above_max_spread_clamped_at_zero(self):
-        assert self._liquidity_score(0.01) == pytest.approx(0.0, abs=0.1)
+    def test_half_spread_zero_vol_gives_5_pts(self):
+        """spread=half_max → spread_pts=5; vol=0 → vol_pts=0 → 5 total."""
+        assert self._liq_score(0.0025, 0.0) == pytest.approx(5.0, abs=0.1)
+
+    def test_above_max_vol_caps_at_10(self):
+        """vol=2×SCAN_MIN → vol_pts capped at 10; spread=0 → 10+10=20 total."""
+        from src.config import SCAN_MIN_DOLLAR_VOL
+        assert self._liq_score(0.0, SCAN_MIN_DOLLAR_VOL * 2) == pytest.approx(20.0, abs=0.1)
 
 
 class TestScoringMaxAndTotal:
-    """Integration: verify total score = trend + rvol_score + momentum + liquidity.
+    """Integration: verify total score = Donchian + RVOL + RSI_delta + Liquidity.
 
     Maximum breakdown:
-      trend    = 30  (ma50=106, ma200=100 → sep=6%)
-      rvol     = 25  (rvol=5.0 = 2× RVOL_MIN)
-      momentum = 25  (rsi=75, prev=65 → quality=10, accel=15)
-      liquidity= 20  (spread=0)
-      total    = 100
+      Donchian proximity = 30  (price == lower band)
+      RVOL               = 25  (rvol=5.0)
+      RSI delta          = 25  (delta=10)
+      Liquidity          = 20  (spread=0, vol≥SCAN_MIN_DOLLAR_VOL)
+      total              = 100
     """
 
     def test_maximum_achievable_score_is_100(self):
-        """Max score breakdown: Trend=30 (MA sep 22 + ADX 8), RVOL=25, Momentum=25, Liq=20."""
+        from src.config import SCAN_MIN_DOLLAR_VOL
         engine = _make_engine()
-        ctx = _ctx(price=101.0, orb=100.0,
-                   rsi=75.0, rsi_prev=65.0,
-                   ma50=106.0, ma200=100.0,
-                   rvol=5.0, spread_pct=0.0,
-                   adx=50.0)
+        ctx = _ctx(price=100.0, rvol=5.0, rsi=70.0, rsi_prev=60.0,
+                   spread_pct=0.0, dollar_vol=SCAN_MIN_DOLLAR_VOL,
+                   donchian_lower=100.0)  # price==lower → proximity=0 → 30 pts
         assert engine._score_candidate(ctx) == pytest.approx(100.0, abs=0.1)
 
-    def test_score_with_neutral_trend_is_non_negative(self):
-        """A stock with ma50==ma200 (flat trend) scores only on other components."""
+    def test_no_donchian_caps_max_at_70(self):
+        """donchian_lower=0 → donchian=0; max from RVOL+RSI+liq = 25+25+20 = 70."""
+        from src.config import SCAN_MIN_DOLLAR_VOL
         engine = _make_engine()
-        ctx = _ctx(price=100.5, orb=100.0,
-                   rsi=55.0, rsi_prev=56.0,
-                   ma50=100.0, ma200=100.0,
-                   rvol=1.0, spread_pct=0.01)
-        assert engine._score_candidate(ctx) >= 0.0
-
-    def test_bearish_trend_can_produce_negative_score(self):
-        """ma50 < ma200 → negative trend_score; total can be negative (correctly filtered out by entry rules)."""
-        engine = _make_engine()
-        ctx = _ctx(price=90.0, orb=100.0,
-                   rsi=82.0, rsi_prev=85.0,
-                   ma50=90.0, ma200=100.0,
-                   rvol=1.0, spread_pct=0.01)
-        assert engine._score_candidate(ctx) < 0.0, \
-            "Bearish trend should produce negative score"
+        ctx = _ctx(price=100.0, rvol=5.0, rsi=70.0, rsi_prev=60.0,
+                   spread_pct=0.0, dollar_vol=SCAN_MIN_DOLLAR_VOL,
+                   donchian_lower=0.0)
+        assert engine._score_candidate(ctx) == pytest.approx(70.0, abs=0.1)
 
     def test_score_never_exceeds_100(self):
+        from src.config import SCAN_MIN_DOLLAR_VOL
         engine = _make_engine()
-        ctx = _ctx(price=101.0, orb=100.0,
-                   rsi=60.0, rsi_prev=20.0,
-                   ma50=200.0, ma200=100.0,
-                   rvol=10.0, spread_pct=0.0)
+        ctx = _ctx(price=100.0, rvol=10.0, rsi=100.0, rsi_prev=50.0,
+                   spread_pct=0.0, dollar_vol=SCAN_MIN_DOLLAR_VOL * 10,
+                   donchian_lower=100.0)
         assert engine._score_candidate(ctx) <= 100.0
 
     def test_score_is_rounded_to_2_decimals(self):
+        from src.config import SCAN_MIN_DOLLAR_VOL
         engine = _make_engine()
-        ctx = _ctx(price=101.0, orb=100.0,
-                   rsi=75.0, rsi_prev=65.0,
-                   ma50=106.0, ma200=100.0,
-                   rvol=5.0, spread_pct=0.0)
+        ctx = _ctx(price=100.25, rvol=5.0, rsi=70.0, rsi_prev=60.0,
+                   spread_pct=0.0, dollar_vol=SCAN_MIN_DOLLAR_VOL,
+                   donchian_lower=100.0)
         score = engine._score_candidate(ctx)
         assert score == round(score, 2)
+
+    def test_score_is_non_negative(self):
+        """All-zero inputs must produce score ≥ 0 (no negative components in new formula)."""
+        engine = _make_engine()
+        ctx = _ctx(price=100.0, rvol=0.0, rsi=50.0, rsi_prev=55.0,
+                   spread_pct=0.01, dollar_vol=0, donchian_lower=0.0)
+        assert engine._score_candidate(ctx) >= 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -903,7 +850,7 @@ class TestCandidateRanking:
              patch.object(engine, 'save_state'), \
              patch.object(engine, 'get_institutional_scan', return_value=['AAPL']), \
              patch.object(engine, 'get_technical_context') as mock_ctx, \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch.object(engine, '_fetch_vix', return_value=20.0), \
              patch.object(engine, '_get_sector', return_value='Technology'), \
              patch('src.engine.time.sleep'), \
@@ -931,7 +878,7 @@ class TestCandidateRanking:
              patch.object(engine, 'save_state'), \
              patch.object(engine, 'get_institutional_scan', return_value=['GHOST']), \
              patch.object(engine, 'get_technical_context', return_value=None), \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch.object(engine, '_fetch_vix', return_value=20.0), \
              patch.object(engine, '_get_sector', return_value='Technology'), \
              patch('src.engine.time.sleep'), \
@@ -960,7 +907,7 @@ class TestCandidateRanking:
              patch.object(engine, 'save_state'), \
              patch.object(engine, 'get_institutional_scan', return_value=['SYM']), \
              patch.object(engine, 'get_technical_context', return_value=ctx), \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch.object(engine, '_fetch_vix', return_value=20.0), \
              patch.object(engine, '_get_sector', return_value='Technology'), \
              patch('src.engine.time.sleep'), \
@@ -1396,7 +1343,7 @@ class TestEdgeCases:
              patch.object(engine, 'save_state'), \
              patch.object(engine, 'get_institutional_scan', return_value=['SYM']), \
              patch.object(engine, 'get_technical_context', return_value=ctx), \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch.object(engine, '_fetch_vix', return_value=vix_val), \
              patch.object(engine, '_get_sector', return_value='Technology'), \
              patch('src.engine.time.sleep'), \
@@ -1421,52 +1368,58 @@ class TestEdgeCases:
 
     # ── Strict comparison boundaries ─────────────────────────────────────────
 
-    def test_price_exactly_at_orb_high_does_not_enter(self):
-        """price == orb_h fails c_orb (requires strict >). No entry."""
+    def test_price_above_donchian_tolerance_does_not_enter(self):
+        """Price > DONCHIAN_FLOOR_TOL_PCT above lower band fails donchian_floor. No entry."""
+        from src.config import DONCHIAN_FLOOR_TOL_PCT
         tc = _mock_trading_client()
         engine = _make_engine(trading_client=tc)
-        ctx = _ctx(price=100.0, orb=100.0, rsi=65.0, rsi_prev=55.0,
-                   ma50=95.0, ma200=85.0)
+        # Price 1% above lower band when tolerance is 0.5% — fails
+        lower = 100.0
+        price = lower * (1 + DONCHIAN_FLOOR_TOL_PCT + 0.005)
+        ctx = _ctx(price=price, donchian_lower=lower, rsi=65.0, rsi_prev=55.0)
         _run_entry_cycle(engine, ctx)
-        assert tc.submit_order.call_count == 0, "price==orb_h must not trigger entry"
+        assert tc.submit_order.call_count == 0, \
+            f"Price >{DONCHIAN_FLOOR_TOL_PCT*100:.1f}% above Donchian floor must not trigger entry"
 
     def test_rsi_equal_to_prev_does_not_enter(self):
-        """rsi == rsi_prev fails c_rsi_rise (requires strict delta). No entry."""
+        """rsi == rsi_prev fails rsi_momentum (requires RSI_MIN_DELTA rise). No entry."""
         tc = _mock_trading_client()
         engine = _make_engine(trading_client=tc)
-        ctx = _ctx(price=101.0, orb=100.0, rsi=65.0, rsi_prev=65.0,
-                   ma50=95.0, ma200=85.0)
+        ctx = _ctx(price=100.0, rsi=65.0, rsi_prev=65.0)
         _run_entry_cycle(engine, ctx)
         assert tc.submit_order.call_count == 0, "flat RSI must not trigger entry"
 
-    def test_ma50_too_close_to_ma200_does_not_enter(self):
-        """MA50 separation < MIN_TREND_SEP (3%) fails c_trend_sep. No entry."""
-        from src.config import MIN_TREND_SEP
+    def test_rsi_never_oversold_in_lookback_does_not_enter(self):
+        """RSI never below RSI_OVERSOLD_THRESHOLD in lookback window fails rsi_momentum."""
+        from src.config import RSI_OVERSOLD_THRESHOLD
         tc = _mock_trading_client()
         engine = _make_engine(trading_client=tc)
-        ctx = _ctx(price=105.0, orb=100.0, rsi=65.0, rsi_prev=55.0,
-                   ma50=101.0, ma200=100.0)
+        # All historical RSI values above the oversold threshold — never was oversold
+        no_oversold_history = [60.0, 62.0, 64.0, 65.0, 67.0]
+        ctx = _ctx(price=100.0, rsi=67.0, rsi_prev=60.0,
+                   rsi_history=no_oversold_history)
         _run_entry_cycle(engine, ctx)
         assert tc.submit_order.call_count == 0, \
-            f"MA50/MA200 separation below {MIN_TREND_SEP:.0%} must not trigger entry"
+            f"RSI never below {RSI_OVERSOLD_THRESHOLD} must not trigger entry"
 
-    def test_ma50_exactly_at_trend_sep_threshold_enters(self):
-        """MA50 separation == MIN_TREND_SEP (3%) passes c_trend_sep. Entry fires."""
-        from src.config import MIN_TREND_SEP
+    def test_price_exactly_at_donchian_tolerance_enters(self):
+        """Price exactly at DONCHIAN_FLOOR_TOL_PCT above lower band is within tolerance. Entry fires."""
+        from src.config import DONCHIAN_FLOOR_TOL_PCT
         tc = _mock_trading_client()
         buy_order  = MagicMock(id='buy-id',  status='new')
         stop_order = MagicMock(id='stop-id', status='accepted')
         tc.submit_order.side_effect = [buy_order, stop_order]
+        lower = 100.0
+        price = round(lower * (1 + DONCHIAN_FLOOR_TOL_PCT), 4)  # exactly at tolerance ceiling
         filled = MagicMock(id='buy-id', status='filled',
-                           filled_avg_price='105.0', filled_qty='10.0')
+                           filled_avg_price=str(price), filled_qty='10.0')
         tc.get_order_by_id.return_value = filled
 
         engine = _make_engine(trading_client=tc)
-        ctx = _ctx(price=105.0, orb=100.0, rsi=65.0, rsi_prev=55.0,
-                   ma50=103.0, ma200=100.0)
+        ctx = _ctx(price=price, donchian_lower=lower, rsi=65.0, rsi_prev=55.0)
         _run_entry_cycle(engine, ctx)
         assert tc.submit_order.call_count >= 1, \
-            f"MA50/MA200 separation at exactly {MIN_TREND_SEP:.0%} must trigger entry"
+            f"Price at exactly {DONCHIAN_FLOOR_TOL_PCT*100:.1f}% above floor must trigger entry"
 
     # ── Friday dollar-volume multiplier ───────────────────────────────────────
 
@@ -1493,7 +1446,7 @@ class TestEdgeCases:
              patch.object(engine, 'save_state'), \
              patch.object(engine, 'get_institutional_scan', return_value=['SYM']), \
              patch.object(engine, 'get_technical_context', return_value=ctx), \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch.object(engine, '_fetch_vix', return_value=20.0), \
              patch.object(engine, '_get_sector', return_value='Technology'), \
              patch('src.engine.time.sleep'), \
@@ -1603,91 +1556,42 @@ class TestEdgeCases:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# New feature tests
+# New feature tests — Day-strength boundaries
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestGapFilter:
-    """Gap filter: price > orb_high * (1 + GAP_MAX_PCT) must block the signal."""
+class TestDayStrengthFilter:
+    """Day-strength rule: price must be ≥ DAY_STRENGTH_OPEN_PCT above open AND
+    in the upper half of the intraday range."""
 
-    def test_gap_filter_blocks_excessive_extension(self):
-        """Price >10% above ORB high must not generate a signal."""
-        from src.config import GAP_MAX_PCT
+    def test_price_in_lower_half_of_range_blocks_entry(self):
+        """Price in lower half of intraday range fails day_strength. No entry."""
         tc = _mock_trading_client()
         engine = _make_engine(trading_client=tc)
+        # price=100, low=98, high=103 → range_pos = (100-98)/(103-98) = 0.4 < 0.5
+        ctx = _ctx(price=100.0, intraday_open=98.0,
+                   intraday_high=103.0, intraday_low=98.0)
+        _run_entry_cycle(engine, ctx)
+        assert tc.submit_order.call_count == 0, \
+            "Price in lower 40% of range must block entry"
+        assert 'TSLA' not in engine.state
 
-        orb_h = 100.0
-        price = orb_h * (1 + GAP_MAX_PCT + 0.01)
-        ctx = _ctx(price=price, orb=orb_h,
-                   ma50=price - 5, ma200=price - 20,
-                   rsi=62.0, rsi_prev=57.0, dollar_vol=500_000_000)
-
-        tz_ny = pytz.timezone('US/Eastern')
-        fake_now = tz_ny.localize(datetime(2024, 6, 5, 10, 30))
-
-        with patch.object(engine, '_ensure_connected', return_value=True), \
-             patch.object(engine, '_sync_positions'), \
-             patch.object(engine, '_get_account_values', return_value=(2500.0, 2500.0)), \
-             patch.object(engine, 'check_velocity_exits', return_value={}), \
-             patch.object(engine, '_audit_stop_orders'), \
-             patch.object(engine, '_update_position_prices'), \
-             patch.object(engine, '_write_dashboard_data'), \
-             patch.object(engine, 'save_state'), \
-             patch.object(engine, 'get_institutional_scan', return_value=['GAPPER']), \
-             patch.object(engine, 'get_technical_context', return_value=ctx), \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
-             patch.object(engine, '_fetch_vix', return_value=20.0), \
-             patch.object(engine, '_get_sector', return_value='Technology'), \
-             patch('src.engine.time.sleep'), \
-             patch('src.engine.datetime') as mock_dt:
-            mock_dt.now.return_value  = fake_now
-            mock_dt.fromisoformat     = datetime.fromisoformat
-            engine.run_cycle()
-
-        assert tc.submit_order.call_count == 0, "Excessive gap must block order placement"
-        assert 'GAPPER' not in engine.state
-
-    def test_gap_filter_passes_at_boundary(self):
-        """Price exactly at ORB * (1 + GAP_MAX_PCT) must pass the gap filter."""
-        from src.config import GAP_MAX_PCT
+    def test_price_above_open_and_upper_range_enters(self):
+        """Price above open and in upper half of range passes day_strength. Entry fires."""
         tc = _mock_trading_client()
         buy_order  = MagicMock(id='buy-id',  status='new')
         stop_order = MagicMock(id='stop-id', status='accepted')
         tc.submit_order.side_effect = [buy_order, stop_order]
-        orb_h = 100.0
-        price = orb_h * (1 + GAP_MAX_PCT)
         filled = MagicMock(id='buy-id', status='filled',
-                           filled_avg_price=str(price), filled_qty='10.0')
+                           filled_avg_price='101.0', filled_qty='10.0')
         tc.get_order_by_id.return_value = filled
 
         engine = _make_engine(trading_client=tc)
-        ctx = _ctx(price=price, orb=orb_h,
-                   ma50=price - 5, ma200=price - 20,
-                   rsi=62.0, rsi_prev=57.0, dollar_vol=500_000_000)
-
-        tz_ny = pytz.timezone('US/Eastern')
-        fake_now = tz_ny.localize(datetime(2024, 6, 5, 10, 30))
-
-        with patch.object(engine, '_ensure_connected', return_value=True), \
-             patch.object(engine, '_sync_positions'), \
-             patch.object(engine, '_get_account_values', return_value=(2500.0, 2500.0)), \
-             patch.object(engine, 'check_velocity_exits', return_value={}), \
-             patch.object(engine, '_audit_stop_orders'), \
-             patch.object(engine, '_update_position_prices'), \
-             patch.object(engine, '_write_dashboard_data'), \
-             patch.object(engine, 'save_state'), \
-             patch.object(engine, 'get_institutional_scan', return_value=['ATEDGE']), \
-             patch.object(engine, 'get_technical_context', return_value=ctx), \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
-             patch.object(engine, '_fetch_vix', return_value=20.0), \
-             patch.object(engine, '_get_sector', return_value='Technology'), \
-             patch('src.engine.time.sleep'), \
-             patch('src.engine.datetime') as mock_dt:
-            mock_dt.now.return_value  = fake_now
-            mock_dt.fromisoformat     = datetime.fromisoformat
-            engine.run_cycle()
-
+        # price=101, open=99.5 (+1.5%), low=98, high=102 → range_pos=(101-98)/4=0.75>0.5 ✓
+        ctx = _ctx(price=101.0, intraday_open=99.5,
+                   intraday_high=102.0, intraday_low=98.0)
+        _run_entry_cycle(engine, ctx, sym='TSLA')
         assert tc.submit_order.call_count == 2, \
-            "Price at gap boundary must generate 2 submit_order calls (BUY + TRAIL)"
+            "Price above open and in upper range must generate 2 submit_order calls"
 
 
 class TestDailyLossCircuitBreakerSlotFull:
@@ -1716,7 +1620,7 @@ class TestDailyLossCircuitBreakerSlotFull:
              patch.object(engine, 'save_state'), \
              patch.object(engine, 'get_institutional_scan', return_value=['TSLA']), \
              patch.object(engine, 'get_technical_context', return_value=_ctx()), \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch.object(engine, '_fetch_vix', return_value=20.0), \
              patch.object(engine, '_get_sector', return_value='Technology'), \
              patch('src.engine.time.sleep'), \
@@ -1757,7 +1661,7 @@ class TestDailyLossCircuitBreakerSlotFull:
              patch.object(engine, 'save_state'), \
              patch.object(engine, 'get_institutional_scan', return_value=['TSLA']), \
              patch.object(engine, 'get_technical_context', return_value=passing_ctx), \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch.object(engine, '_fetch_vix', return_value=20.0), \
              patch.object(engine, '_get_sector', return_value='Technology'), \
              patch('src.engine.time.sleep'), \
@@ -1945,7 +1849,7 @@ class TestScannerSkipWhenFull:
              patch.object(engine, '_write_dashboard_data'), \
              patch.object(engine, 'save_state'), \
              patch.object(engine, 'get_institutional_scan') as mock_scan, \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch.object(engine, '_fetch_vix', return_value=20.0), \
              patch.object(engine, '_check_portfolio_concentration', return_value=(0.5, False, False)), \
              patch('src.engine.time.sleep'), \

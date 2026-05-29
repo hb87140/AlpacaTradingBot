@@ -23,6 +23,12 @@ import pytest
 from datetime import datetime
 from unittest.mock import MagicMock, patch, call
 
+# Shared SPY regime dict — used wherever _fetch_spy_trend is patched
+_SPY_BULL_REGIME = {
+    'is_bull': True, 'spy_close': 450.0, 'ema50': 440.0,
+    'size_factor': 1.0, 'rvol_mult': 1.0,
+}
+
 
 # ── shared helpers ─────────────────────────────────────────────────────────────
 
@@ -677,12 +683,13 @@ class TestFetchSpyTrend:
                              'close': close, 'volume': 1_000_000}, index=idx)
 
     def test_returns_true_in_uptrend(self):
-        """SPY price > MA50 > MA200 in a rising series → True."""
+        """SPY price > EMA50 in a rising series → is_bull=True dict."""
         engine = _make_engine()
         df = self._make_spy_df(rising=True)
         with patch.object(engine, '_fetch_daily_bars', return_value=df):
             result = engine._fetch_spy_trend()
-        assert result is True
+        assert isinstance(result, dict)
+        assert result['is_bull'] is True
 
     def test_result_cached_for_same_day(self):
         """Second call on same date must return cached value without calling _fetch_daily_bars."""
@@ -695,21 +702,23 @@ class TestFetchSpyTrend:
         assert mock_bars.call_count == call_count_after_first
 
     def test_fails_open_when_data_unavailable(self):
-        """_fetch_daily_bars returns None → fail open (True) so entries are not blocked."""
+        """_fetch_daily_bars returns None → fail open (is_bull=True) so entries are not blocked."""
         engine = _make_engine()
         with patch.object(engine, '_fetch_daily_bars', return_value=None):
             result = engine._fetch_spy_trend()
-        assert result is True
+        assert isinstance(result, dict)
+        assert result['is_bull'] is True
 
     def test_fails_open_on_exception(self):
-        """data_client raises → _fetch_daily_bars returns None → fail open (True)."""
+        """data_client raises → _fetch_daily_bars returns None → fail open (is_bull=True)."""
         engine = _make_engine()
         # Simulate data_client raising by patching it to raise; _fetch_daily_bars
         # catches exceptions internally and returns None, which _fetch_spy_trend
         # treats as fail-open. We mock the data_client directly.
         engine.data_client.get_stock_bars.side_effect = RuntimeError("timeout")
         result = engine._fetch_spy_trend()
-        assert result is True
+        assert isinstance(result, dict)
+        assert result['is_bull'] is True
 
 
 # ── shutdown — graceful BUY order cancellation (no disconnect) ────────────────
@@ -1012,7 +1021,7 @@ class TestDailyLossCircuitBreaker:
              patch.object(engine, '_sync_positions'),                 \
              patch.object(engine, 'check_velocity_exits', return_value={}), \
              patch.object(engine, '_update_position_prices'),         \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch.object(engine, '_fetch_vix', return_value=20.0),   \
              patch.object(engine, 'get_institutional_scan', return_value=[]) as mock_scan, \
              patch.object(engine, '_write_dashboard_data'):
@@ -1039,7 +1048,7 @@ class TestDeduplication:
         with patch.object(engine, '_sync_positions'),          \
              patch.object(engine, 'check_velocity_exits', return_value={}), \
              patch.object(engine, '_update_position_prices'),  \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch.object(engine, '_fetch_vix', return_value=20.0), \
              patch.object(engine, 'get_institutional_scan', return_value=['AAPL']), \
              patch.object(engine, 'get_technical_context') as mock_ctx, \
@@ -1112,34 +1121,34 @@ class TestPendingPositionSkippedOnExit:
 # ── TEST-10: 12-rule production filter blocks specific failed conditions ───────
 
 class TestTwelveRuleFilter:
-    """run_cycle() 12-rule filter must block entries when individual rules fail."""
+    """run_cycle() Donchian bounce filter must block entries when individual rules fail."""
 
     def _make_passing_ctx(self):
-        """Minimal technical context dict that passes all 12 rules."""
-        from src.config import (
-            RVOL_MIN, SPREAD_MAX_PCT, SCAN_MIN_DOLLAR_VOL, RSI_THRESHOLD,
-            RSI_MIN_DELTA, GAP_MAX_PCT, MIN_TREND_SEP,
-        )
+        """Minimal technical context dict that passes all Donchian bounce rules."""
+        from src.config import RVOL_MIN, SPREAD_MAX_PCT, SCAN_MIN_DOLLAR_VOL
+        fixed_ny = datetime(2026, 5, 19, 11, 0, tzinfo=pytz.timezone('US/Eastern'))
         return {
-            'live_price':     110.0,
-            'orb_high':       108.0,
-            'ma50':           108.0,
-            'ma200':          100.0,
-            'rsi':            65.0,
-            'rsi_prev':       63.0,
-            'atr':            2.0,
-            'atr_chandelier': 2.0,
-            'adx':            25.0,
-            'high200':        121.0,
-            'sma200_slope':   0.01,
-            'rvol':           RVOL_MIN + 0.5,
-            'spread_pct':     SPREAD_MAX_PCT - 0.001,
-            'dollar_vol_20d': SCAN_MIN_DOLLAR_VOL * 2,
-            'avg_20d_vol':    1_000_000,
-            'volume':         2_000_000,
-            'df_daily':       None,
-            'price_fetched_at': datetime(2026, 5, 19, 11, 0,
-                                         tzinfo=pytz.timezone('US/Eastern')),
+            'live_price':      100.0,
+            # Donchian: price 0.2% above lower band (within 0.5% tolerance)
+            'donchian_lower':   99.8,
+            'donchian_upper':  110.0,
+            # RSI momentum: delta=3.0 >= RSI_MIN_DELTA, history has oversold values
+            'rsi':              38.0,
+            'rsi_prev':         35.0,
+            'rsi_history':     [28.0, 30.0, 32.0, 35.0, 38.0],
+            # Day strength: 1% above open, in upper 86% of intraday range
+            'intraday_open':    99.0,
+            'intraday_high':   100.5,
+            'intraday_low':     97.0,
+            'atr':               2.0,
+            'atr_chandelier':    2.0,
+            'rvol':             RVOL_MIN + 0.5,       # 3.0
+            'spread_pct':       SPREAD_MAX_PCT - 0.001,
+            'dollar_vol_20d':   SCAN_MIN_DOLLAR_VOL * 2,
+            'avg_20d_vol':    5_000_000,
+            'volume':         5_000_000,
+            'close':            99.5,
+            'price_fetched_at': fixed_ny,
         }
 
     def _run_cycle_with_conditions(self, ctx):
@@ -1153,7 +1162,7 @@ class TestTwelveRuleFilter:
              patch.object(engine, '_sync_positions'), \
              patch.object(engine, 'check_velocity_exits', return_value={}), \
              patch.object(engine, '_update_position_prices'), \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch.object(engine, '_fetch_vix', return_value=20.0), \
              patch.object(engine, 'get_institutional_scan', return_value=['XYZ']), \
              patch.object(engine, 'get_technical_context', return_value=ctx), \
@@ -1174,29 +1183,18 @@ class TestTwelveRuleFilter:
         assert tc.submit_order.call_count > 0, \
             "Passing candidate should result in a submitted order"
 
-    def test_fails_trend_check(self):
+    def test_fails_donchian_floor_unavailable(self):
+        """donchian_lower=0 → Donchian floor unavailable → blocked."""
         ctx = self._make_passing_ctx()
-        ctx['ma50']  = 99.0
-        ctx['ma200'] = 100.0
+        ctx['donchian_lower'] = 0.0
         tc, _ = self._run_cycle_with_conditions(ctx)
         assert tc.submit_order.call_count == 0
 
-    def test_fails_adx(self):
+    def test_fails_donchian_floor_too_far(self):
+        """Price too far above lower band (>0.5%) → donchian_floor fails."""
         ctx = self._make_passing_ctx()
-        ctx['adx'] = 5.0
-        tc, _ = self._run_cycle_with_conditions(ctx)
-        assert tc.submit_order.call_count == 0
-
-    def test_fails_trend_sep(self):
-        ctx = self._make_passing_ctx()
-        ctx['ma50']  = 101.0
-        ctx['ma200'] = 100.0
-        tc, _ = self._run_cycle_with_conditions(ctx)
-        assert tc.submit_order.call_count == 0
-
-    def test_fails_52w_high(self):
-        ctx = self._make_passing_ctx()
-        ctx['high200'] = 500.0
+        ctx['live_price']     = 101.0
+        ctx['donchian_lower'] = 100.0   # 1% gap exceeds 0.5% tolerance
         tc, _ = self._run_cycle_with_conditions(ctx)
         assert tc.submit_order.call_count == 0
 
@@ -1204,20 +1202,24 @@ class TestTwelveRuleFilter:
         """When dollar volume is below the threshold, the symbol is skipped."""
         from src.config import SCAN_MIN_DOLLAR_VOL
         ctx = self._make_passing_ctx()
-        ctx['dollar_vol_20d'] = SCAN_MIN_DOLLAR_VOL * 0.1  # well below threshold
+        ctx['dollar_vol_20d'] = SCAN_MIN_DOLLAR_VOL * 0.1
         tc, _ = self._run_cycle_with_conditions(ctx)
         assert tc.submit_order.call_count == 0
 
     def test_fails_rsi_rising(self):
+        """RSI falling (prev > current) fails rsi_momentum."""
         ctx = self._make_passing_ctx()
-        ctx['rsi']      = 60.0
-        ctx['rsi_prev'] = 62.0
+        ctx['rsi']      = 35.0
+        ctx['rsi_prev'] = 38.0
         tc, _ = self._run_cycle_with_conditions(ctx)
         assert tc.submit_order.call_count == 0
 
-    def test_fails_orb(self):
+    def test_fails_rsi_never_oversold(self):
+        """RSI history never below RSI_OVERSOLD_THRESHOLD fails rsi_momentum."""
         ctx = self._make_passing_ctx()
-        ctx['live_price'] = 107.0
+        ctx['rsi_history'] = [60.0, 62.0, 64.0, 65.0, 68.0]
+        ctx['rsi']      = 68.0
+        ctx['rsi_prev'] = 65.0
         tc, _ = self._run_cycle_with_conditions(ctx)
         assert tc.submit_order.call_count == 0
 
@@ -1257,7 +1259,7 @@ class TestSectorClusteringFilter:
         with patch.object(engine, '_sync_positions'), \
              patch.object(engine, 'check_velocity_exits', return_value={}), \
              patch.object(engine, '_update_position_prices'), \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch.object(engine, '_fetch_vix', return_value=20.0), \
              patch.object(engine, 'get_technical_context', return_value=passing_ctx), \
              patch.object(engine, 'get_institutional_scan', return_value=['NVDA']), \
@@ -1315,7 +1317,7 @@ class TestCorrelationFilter:
         with patch.object(engine, '_sync_positions'), \
              patch.object(engine, 'check_velocity_exits', return_value={}), \
              patch.object(engine, '_update_position_prices'), \
-             patch.object(engine, '_fetch_spy_trend', return_value=True), \
+             patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
              patch.object(engine, '_fetch_vix', return_value=20.0), \
              patch.object(engine, 'get_technical_context', return_value=ctx), \
              patch.object(engine, 'get_institutional_scan', return_value=['MSFT']), \

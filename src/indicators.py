@@ -10,6 +10,18 @@ def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     return 100 - (100 / (1 + gain / loss))
 
 
+def compute_donchian(df: pd.DataFrame, period: int = 20) -> pd.DataFrame:
+    """Return upper/lower Donchian Channel bands.
+
+    Upper = rolling max of highs (resistance target).
+    Lower = rolling min of lows (the bounce floor).
+    """
+    return pd.DataFrame({
+        'DONCH_UPPER': df['high'].rolling(period).max(),
+        'DONCH_LOWER': df['low'].rolling(period).min(),
+    })
+
+
 def compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     tr = pd.concat([
         df['high'] - df['low'],
@@ -50,7 +62,8 @@ def apply_all(df: pd.DataFrame,
               ma_slow:            int = 200,
               slope_lookback:     int = 5,
               chandelier_period:  int = 22,
-              adx_period:         int = ADX_PERIOD) -> pd.DataFrame:
+              adx_period:         int = ADX_PERIOD,
+              donchian_period:    int = 20) -> pd.DataFrame:
     """Attach indicator columns to an OHLCV dataframe."""
     df = df.copy()
     df['MA50']         = compute_ma(df['close'], ma_fast)
@@ -61,4 +74,7 @@ def apply_all(df: pd.DataFrame,
     df['SMA200_SLOPE'] = df['MA200'] - df['MA200'].shift(slope_lookback)
     df['ADX']          = compute_adx(df, adx_period)
     df['HIGH200']      = df['high'].rolling(200, min_periods=1).max()
+    donch              = compute_donchian(df, donchian_period)
+    df['DONCH_UPPER']  = donch['DONCH_UPPER']
+    df['DONCH_LOWER']  = donch['DONCH_LOWER']
     return df
