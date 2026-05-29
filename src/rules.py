@@ -44,6 +44,7 @@ from src.config import (
     RSI_MIN_DELTA,
     RSI_OVERSOLD_THRESHOLD,
     RSI_OVERSOLD_LOOKBACK,
+    RSI_BOUNCE_MAX,
     RVOL_MIN,
     DAY_STRENGTH_OPEN_PCT,
     VOL_MULT_FRIDAY,
@@ -122,6 +123,20 @@ def check_rsi_momentum(ctx: dict) -> Tuple[bool, str]:
 
     if delta < RSI_MIN_DELTA:
         return False, f'RSI delta {delta:.1f} < {RSI_MIN_DELTA:.1f} required'
+
+    # Bounce must be confirmed: RSI has crossed back above the oversold threshold
+    if rsi < RSI_OVERSOLD_THRESHOLD:
+        return False, (
+            f'RSI {rsi:.1f} < {RSI_OVERSOLD_THRESHOLD:.0f} '
+            '(still oversold — bounce not yet confirmed)'
+        )
+
+    # Avoid support-failure pattern: RSI must not be fully recovered already
+    if rsi > RSI_BOUNCE_MAX:
+        return False, (
+            f'RSI {rsi:.1f} > {RSI_BOUNCE_MAX:.0f} '
+            '(already recovered — support failure risk)'
+        )
 
     rsi_hist = ctx.get('rsi_history', [])
     # rsi_history contains recent values oldest-first; exclude current bar (last element)

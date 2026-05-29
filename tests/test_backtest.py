@@ -146,6 +146,38 @@ class TestEntrySignal:
             self._row(rsi_min_lookback=RSI_OVERSOLD_THRESHOLD - 0.1), prev_rsi=35.0,
             rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
+    def test_fails_rsi_still_oversold_at_entry(self):
+        # RSI=32 < RSI_OVERSOLD_THRESHOLD(35) — rising but bounce not yet confirmed
+        from src.config import RSI_OVERSOLD_THRESHOLD
+        assert not VelocityBacktest._entry_signal(
+            self._row(rsi=RSI_OVERSOLD_THRESHOLD - 3.0),
+            prev_rsi=RSI_OVERSOLD_THRESHOLD - 6.0,
+            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
+
+    def test_passes_rsi_exactly_at_threshold(self):
+        # RSI exactly at RSI_OVERSOLD_THRESHOLD(35) should pass (>= check)
+        from src.config import RSI_OVERSOLD_THRESHOLD
+        assert VelocityBacktest._entry_signal(
+            self._row(rsi=RSI_OVERSOLD_THRESHOLD),
+            prev_rsi=RSI_OVERSOLD_THRESHOLD - RSI_OVERSOLD_THRESHOLD * 0.1,
+            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
+
+    def test_fails_rsi_above_bounce_max(self):
+        # RSI=52 > RSI_BOUNCE_MAX(50) — RSI already recovered, support-failure risk
+        from src.config import RSI_BOUNCE_MAX
+        assert not VelocityBacktest._entry_signal(
+            self._row(rsi=RSI_BOUNCE_MAX + 2.0),
+            prev_rsi=RSI_BOUNCE_MAX - 1.0,
+            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
+
+    def test_passes_rsi_exactly_at_bounce_max(self):
+        # RSI exactly at RSI_BOUNCE_MAX(50) should pass (<= semantics in check)
+        from src.config import RSI_BOUNCE_MAX, RSI_MIN_DELTA
+        assert VelocityBacktest._entry_signal(
+            self._row(rsi=RSI_BOUNCE_MAX),
+            prev_rsi=RSI_BOUNCE_MAX - RSI_MIN_DELTA,
+            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
+
     def test_flags_none_behaves_as_production_defaults(self):
         # flags kwarg is accepted but ignored — Donchian rules are all mandatory
         assert VelocityBacktest._entry_signal(

@@ -95,7 +95,7 @@ def _make_snapshot(price=None, bid=0.0, ask=0.0, intraday_vol=5_000_000):
 
 
 def _ctx(price=100.0, orb=95.0, ma50=105.0, ma200=90.0,
-         rsi=62.0, rsi_prev=57.0, atr=3.0,
+         rsi=42.0, rsi_prev=37.0, atr=3.0,
          dollar_vol=500_000_000,
          rvol=3.5, spread_pct=0.002,
          sma200_slope=0.1,
@@ -271,7 +271,7 @@ class TestEntryOrderConstruction:
             orb=self.ENTRY - 5,
             ma50=self.ENTRY - 3,
             ma200=self.ENTRY - 15,
-            rsi=62.0, rsi_prev=57.0,
+            rsi=42.0, rsi_prev=37.0,
         )
         return tc, engine, ctx
 
@@ -380,7 +380,7 @@ class TestEntryOrderConstruction:
         engine = _make_engine(trading_client=tc)
         ctx = _ctx(price=self.ENTRY, atr=self.ATR_CHAND, atr_chandelier=self.ATR_CHAND,
                    orb=self.ENTRY - 5, ma50=self.ENTRY - 3, ma200=self.ENTRY - 15,
-                   rsi=62.0, rsi_prev=57.0)
+                   rsi=42.0, rsi_prev=37.0)
 
         _run_entry_cycle(engine, ctx, sym='TSLA')
         assert 'TSLA' not in engine.state, "Cancelled order must not create state entry"
@@ -391,7 +391,7 @@ class TestEntryOrderConstruction:
         engine = _make_engine(equity=2500.0, cash=2500.0, trading_client=tc)
         ctx = _ctx(price=2000.0, atr=10.0, atr_chandelier=10.0,
                    orb=1990.0, ma50=1990.0, ma200=1900.0,
-                   rsi=62.0, rsi_prev=57.0)
+                   rsi=42.0, rsi_prev=37.0)
         _run_entry_cycle(engine, ctx, equity=2500.0, cash=2500.0)
         assert tc.submit_order.call_count == 0, "Stock above bucket price must be skipped"
         assert 'TSLA' not in engine.state
@@ -643,7 +643,7 @@ class TestScoringMaxAndTotal:
     def test_maximum_achievable_score_is_100(self):
         from src.config import SCAN_MIN_DOLLAR_VOL
         engine = _make_engine()
-        ctx = _ctx(price=100.0, rvol=5.0, rsi=70.0, rsi_prev=60.0,
+        ctx = _ctx(price=100.0, rvol=5.0, rsi=45.0, rsi_prev=35.0,
                    spread_pct=0.0, dollar_vol=SCAN_MIN_DOLLAR_VOL,
                    donchian_lower=100.0)  # price==lower → proximity=0 → 30 pts
         assert engine._score_candidate(ctx) == pytest.approx(100.0, abs=0.1)
@@ -652,7 +652,7 @@ class TestScoringMaxAndTotal:
         """donchian_lower=0 → donchian=0; max from RVOL+RSI+liq = 25+25+20 = 70."""
         from src.config import SCAN_MIN_DOLLAR_VOL
         engine = _make_engine()
-        ctx = _ctx(price=100.0, rvol=5.0, rsi=70.0, rsi_prev=60.0,
+        ctx = _ctx(price=100.0, rvol=5.0, rsi=45.0, rsi_prev=35.0,
                    spread_pct=0.0, dollar_vol=SCAN_MIN_DOLLAR_VOL,
                    donchian_lower=0.0)
         assert engine._score_candidate(ctx) == pytest.approx(70.0, abs=0.1)
@@ -660,7 +660,7 @@ class TestScoringMaxAndTotal:
     def test_score_never_exceeds_100(self):
         from src.config import SCAN_MIN_DOLLAR_VOL
         engine = _make_engine()
-        ctx = _ctx(price=100.0, rvol=10.0, rsi=100.0, rsi_prev=50.0,
+        ctx = _ctx(price=100.0, rvol=10.0, rsi=45.0, rsi_prev=35.0,
                    spread_pct=0.0, dollar_vol=SCAN_MIN_DOLLAR_VOL * 10,
                    donchian_lower=100.0)
         assert engine._score_candidate(ctx) <= 100.0
@@ -668,7 +668,7 @@ class TestScoringMaxAndTotal:
     def test_score_is_rounded_to_2_decimals(self):
         from src.config import SCAN_MIN_DOLLAR_VOL
         engine = _make_engine()
-        ctx = _ctx(price=100.25, rvol=5.0, rsi=70.0, rsi_prev=60.0,
+        ctx = _ctx(price=100.25, rvol=5.0, rsi=45.0, rsi_prev=35.0,
                    spread_pct=0.0, dollar_vol=SCAN_MIN_DOLLAR_VOL,
                    donchian_lower=100.0)
         score = engine._score_candidate(ctx)
@@ -691,7 +691,7 @@ class TestScoringMinScore:
 
     # ctx where price > ma50 > ma200 (all 12 rules pass with default equity/cash)
     _ENTRY_CTX_KWARGS = dict(price=100.0, orb=95.0, ma50=97.0, ma200=85.0,
-                             rsi=62.0, rsi_prev=57.0, atr=3.0,
+                             rsi=42.0, rsi_prev=37.0, atr=3.0,
                              rvol=3.5, spread_pct=0.002, adx=25.0)
 
     def test_signal_below_min_score_not_entered(self):
@@ -769,9 +769,9 @@ class TestCandidateRanking:
         n_held = min(int(2500 / MIN_BUCKET_SIZE), MAX_POSITIONS_CAP) - 1
         held = [f'SYM{i}' for i in range(n_held)]
 
-        ctx_high = _ctx(price=101.0, orb=100.0, rsi=65.0, rsi_prev=55.0,
+        ctx_high = _ctx(price=101.0, orb=100.0, rsi=45.0, rsi_prev=35.0,
                         ma50=95.0, ma200=85.0, rvol=5.0)
-        ctx_low  = _ctx(price=102.0, orb=100.0, rsi=65.0, rsi_prev=55.0,
+        ctx_low  = _ctx(price=102.0, orb=100.0, rsi=45.0, rsi_prev=35.0,
                         ma50=95.0, ma200=85.0, rvol=2.5)
 
         engine = self._engine_with_held(held)
@@ -785,9 +785,9 @@ class TestCandidateRanking:
         n_held = min(int(2500 / MIN_BUCKET_SIZE), MAX_POSITIONS_CAP) - 1
         held = [f'SYM{i}' for i in range(n_held)]
 
-        ctx_high = _ctx(price=101.0, orb=100.0, rsi=65.0, rsi_prev=55.0,
+        ctx_high = _ctx(price=101.0, orb=100.0, rsi=45.0, rsi_prev=35.0,
                         ma50=95.0, ma200=85.0, rvol=5.0)
-        ctx_low  = _ctx(price=102.0, orb=100.0, rsi=65.0, rsi_prev=55.0,
+        ctx_low  = _ctx(price=102.0, orb=100.0, rsi=45.0, rsi_prev=35.0,
                         ma50=95.0, ma200=85.0, rvol=2.5)
 
         engine = self._engine_with_held(held)
@@ -796,8 +796,8 @@ class TestCandidateRanking:
 
     def test_all_candidates_entered_when_enough_slots(self):
         """No held positions, 2 signals → both entered."""
-        ctx_a = _ctx(price=101.0, orb=100.0, rsi=65.0, rsi_prev=55.0, ma50=95.0, ma200=85.0)
-        ctx_b = _ctx(price=104.0, orb=100.0, rsi=65.0, rsi_prev=55.0, ma50=95.0, ma200=85.0)
+        ctx_a = _ctx(price=101.0, orb=100.0, rsi=45.0, rsi_prev=35.0, ma50=95.0, ma200=85.0)
+        ctx_b = _ctx(price=104.0, orb=100.0, rsi=45.0, rsi_prev=35.0, ma50=95.0, ma200=85.0)
 
         engine = self._engine_with_held([])
         entered = _run_multi_signal_cycle(engine, {'ALPHA': ctx_a, 'BETA': ctx_b})
@@ -819,11 +819,11 @@ class TestCandidateRanking:
         n_held = max(0, min(int(2500 / MIN_BUCKET_SIZE), MAX_POSITIONS_CAP) - 3)
         held = [f'HELD{i}' for i in range(n_held)]
 
-        ctx_hi  = _ctx(price=101.0, orb=100.0, rsi=65.0, rsi_prev=55.0,
+        ctx_hi  = _ctx(price=101.0, orb=100.0, rsi=45.0, rsi_prev=35.0,
                        ma50=95.0, ma200=85.0, rvol=5.0)
-        ctx_med = _ctx(price=104.0, orb=100.0, rsi=65.0, rsi_prev=55.0,
+        ctx_med = _ctx(price=104.0, orb=100.0, rsi=45.0, rsi_prev=35.0,
                        ma50=95.0, ma200=85.0, rvol=3.75)
-        ctx_lo  = _ctx(price=108.0, orb=100.0, rsi=65.0, rsi_prev=55.0,
+        ctx_lo  = _ctx(price=108.0, orb=100.0, rsi=45.0, rsi_prev=35.0,
                        ma50=95.0, ma200=85.0, rvol=2.5)
 
         engine = self._engine_with_held(held)
@@ -933,9 +933,9 @@ class TestCandidateRanking:
         """When rank-1 BUY is cancelled, fall through to rank-2."""
         from src.config import MAX_POSITIONS_CAP, MIN_BUCKET_SIZE
 
-        ctx_hi = _ctx(price=101.0, orb=100.0, rsi=65.0, rsi_prev=55.0,
+        ctx_hi = _ctx(price=101.0, orb=100.0, rsi=45.0, rsi_prev=35.0,
                       ma50=95.0, ma200=85.0, rvol=5.0)
-        ctx_lo = _ctx(price=104.0, orb=100.0, rsi=65.0, rsi_prev=55.0,
+        ctx_lo = _ctx(price=104.0, orb=100.0, rsi=45.0, rsi_prev=35.0,
                       ma50=95.0, ma200=85.0, rvol=2.5)
 
         tc = _mock_trading_client(equity=2500.0, cash=2500.0)
@@ -1297,7 +1297,7 @@ class TestEdgeCases:
         """ma200=0 must not raise ZeroDivisionError; trend component floors to 0."""
         from src.engine import VelocityEngine
         engine = VelocityEngine.__new__(VelocityEngine)
-        ctx = _ctx(price=110.0, orb=100.0, rsi=65.0, rsi_prev=60.0,
+        ctx = _ctx(price=110.0, orb=100.0, rsi=45.0, rsi_prev=35.0,
                    ma50=105.0, ma200=0.0)
         score = engine._score_candidate(ctx)
         assert isinstance(score, float)
@@ -1307,9 +1307,9 @@ class TestEdgeCases:
         """Trend component must return 0 (not NaN or inf) when MA200=0."""
         from src.engine import VelocityEngine
         engine = VelocityEngine.__new__(VelocityEngine)
-        ctx_zero_ma = _ctx(price=110.0, orb=100.0, rsi=65.0, rsi_prev=60.0,
+        ctx_zero_ma = _ctx(price=110.0, orb=100.0, rsi=45.0, rsi_prev=35.0,
                            ma50=105.0, ma200=0.0)
-        ctx_normal  = _ctx(price=110.0, orb=100.0, rsi=65.0, rsi_prev=60.0,
+        ctx_normal  = _ctx(price=110.0, orb=100.0, rsi=45.0, rsi_prev=35.0,
                            ma50=105.0, ma200=105.0)
         assert engine._score_candidate(ctx_zero_ma) == engine._score_candidate(ctx_normal), \
             "MA200=0 must give same trend=0 as equal MAs"
@@ -1327,7 +1327,7 @@ class TestEdgeCases:
         tc.get_order_by_id.return_value = filled
 
         engine = _make_engine(trading_client=tc)
-        ctx = _ctx(price=101.0, orb=100.0, rsi=65.0, rsi_prev=55.0,
+        ctx = _ctx(price=101.0, orb=100.0, rsi=45.0, rsi_prev=35.0,
                    ma50=95.0, ma200=85.0)
 
         tz_ny = pytz.timezone('US/Eastern')
@@ -1376,7 +1376,7 @@ class TestEdgeCases:
         # Price 1% above lower band when tolerance is 0.5% — fails
         lower = 100.0
         price = lower * (1 + DONCHIAN_FLOOR_TOL_PCT + 0.005)
-        ctx = _ctx(price=price, donchian_lower=lower, rsi=65.0, rsi_prev=55.0)
+        ctx = _ctx(price=price, donchian_lower=lower, rsi=45.0, rsi_prev=35.0)
         _run_entry_cycle(engine, ctx)
         assert tc.submit_order.call_count == 0, \
             f"Price >{DONCHIAN_FLOOR_TOL_PCT*100:.1f}% above Donchian floor must not trigger entry"
@@ -1395,8 +1395,9 @@ class TestEdgeCases:
         tc = _mock_trading_client()
         engine = _make_engine(trading_client=tc)
         # All historical RSI values above the oversold threshold — never was oversold
-        no_oversold_history = [60.0, 62.0, 64.0, 65.0, 67.0]
-        ctx = _ctx(price=100.0, rsi=67.0, rsi_prev=60.0,
+        # Use values in bounce zone (≤50) so the oversold-history check fires, not the ceiling
+        no_oversold_history = [38.0, 40.0, 42.0, 43.0, 45.0]
+        ctx = _ctx(price=100.0, rsi=45.0, rsi_prev=38.0,
                    rsi_history=no_oversold_history)
         _run_entry_cycle(engine, ctx)
         assert tc.submit_order.call_count == 0, \
@@ -1416,7 +1417,7 @@ class TestEdgeCases:
         tc.get_order_by_id.return_value = filled
 
         engine = _make_engine(trading_client=tc)
-        ctx = _ctx(price=price, donchian_lower=lower, rsi=65.0, rsi_prev=55.0)
+        ctx = _ctx(price=price, donchian_lower=lower, rsi=45.0, rsi_prev=35.0)
         _run_entry_cycle(engine, ctx)
         assert tc.submit_order.call_count >= 1, \
             f"Price at exactly {DONCHIAN_FLOOR_TOL_PCT*100:.1f}% above floor must trigger entry"
@@ -1430,7 +1431,7 @@ class TestEdgeCases:
         engine = _make_engine(trading_client=tc)
 
         marginal_vol = SCAN_MIN_DOLLAR_VOL  # exactly 1× → fails 2× gate on Friday
-        ctx = _ctx(price=101.0, orb=100.0, rsi=65.0, rsi_prev=55.0,
+        ctx = _ctx(price=101.0, orb=100.0, rsi=45.0, rsi_prev=35.0,
                    ma50=95.0, ma200=85.0, dollar_vol=marginal_vol)
 
         tz_ny = pytz.timezone('US/Eastern')
@@ -1470,7 +1471,7 @@ class TestEdgeCases:
         tc.get_order_by_id.return_value = filled
 
         engine = _make_engine(trading_client=tc)
-        ctx = _ctx(price=101.0, orb=100.0, rsi=65.0, rsi_prev=55.0,
+        ctx = _ctx(price=101.0, orb=100.0, rsi=45.0, rsi_prev=35.0,
                    ma50=95.0, ma200=85.0, dollar_vol=SCAN_MIN_DOLLAR_VOL)
         _run_entry_cycle(engine, ctx, sym='TSLA')
         assert 'TSLA' in engine.state, "1× dollar-vol must pass on non-Friday"
@@ -1646,7 +1647,7 @@ class TestDailyLossCircuitBreakerSlotFull:
         engine._day_start_equity = 2500.0
 
         passing_ctx = _ctx(price=101.0, orb=100.0, ma50=95.0, ma200=85.0,
-                           rsi=65.0, rsi_prev=55.0, dollar_vol=500_000_000)
+                           rsi=45.0, rsi_prev=35.0, dollar_vol=500_000_000)
 
         tz_ny = pytz.timezone('US/Eastern')
         fake_now = tz_ny.localize(datetime(2024, 6, 5, 10, 30))
@@ -1803,7 +1804,7 @@ class TestRsiDeltaGate:
         tc.get_order_by_id.return_value = filled
 
         engine = _make_engine(trading_client=tc)
-        rsi_prev = 60.0
+        rsi_prev = 35.0   # in bounce zone (35-50); rsi will be 35 + RSI_MIN_DELTA
         rsi      = rsi_prev + RSI_MIN_DELTA
         ctx = _ctx(price=101.0, orb=100.0, rsi=rsi, rsi_prev=rsi_prev,
                    ma50=95.0, ma200=85.0)

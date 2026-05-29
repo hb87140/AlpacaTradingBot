@@ -75,7 +75,7 @@ from src.config import (
     VOL_MULT_FRIDAY, FRIDAY_MIN_PROFIT_PCT,
     SCAN_MIN_SCORE, BUCKET_CASH_PCT,
     DONCHIAN_PERIOD, BACKTEST_DONCHIAN_TOL_PCT,
-    RSI_OVERSOLD_THRESHOLD, RSI_OVERSOLD_LOOKBACK,
+    RSI_OVERSOLD_THRESHOLD, RSI_OVERSOLD_LOOKBACK, RSI_BOUNCE_MAX,
     SPY_EMA_PERIOD, SPY_REGIME_SIZE_CUT, SPY_REGIME_RVOL_MULT,
     SCORE_DONCHIAN_MAX, SCORE_RVOL_MAX, SCORE_RSI_DELTA_MAX, SCORE_LIQUIDITY_MAX,
 )
@@ -531,6 +531,14 @@ class VelocityBacktest:
         if pd.isna(rsi) or pd.isna(prev_rsi):
             return False
         if (float(rsi) - float(prev_rsi)) < RSI_MIN_DELTA:
+            return False
+
+        # RSI must have crossed above the oversold threshold (bounce confirmed, not still falling)
+        if float(rsi) < RSI_OVERSOLD_THRESHOLD:
+            return False
+
+        # RSI must not be fully recovered — avoid support-failure re-tests
+        if float(rsi) > RSI_BOUNCE_MAX:
             return False
 
         # RVOL confirmation
