@@ -21,6 +21,7 @@ from src.config import BACKTEST_RVOL_MIN
 # ── Synthetic data factory ────────────────────────────────────────────────────
 def _make_df(n: int = 300, seed: int = 0, trend: float = 0.2) -> pd.DataFrame:
     """Smooth upward-trending OHLCV with fully warmed-up indicators."""
+    from src.config import RSI_OVERSOLD_LOOKBACK
     np.random.seed(seed)
     close  = 100 + trend * np.arange(n) + np.cumsum(np.random.randn(n) * 0.3)
     high   = close + np.abs(np.random.randn(n) * 0.2)
@@ -31,8 +32,10 @@ def _make_df(n: int = 300, seed: int = 0, trend: float = 0.2) -> pd.DataFrame:
     df = pd.DataFrame({'open': close, 'high': high, 'low': low,
                        'close': close, 'volume': SCAN_MIN_VOLUME + 1_000_000}, index=idx)
     df = apply_all(df)
-    df['prev_high']        = df['high'].shift(1)
-    df['avg_vol_20']       = df['volume'].rolling(20).mean()
+    df['RSI_PREV']          = df['RSI'].shift(1)
+    df['RSI_MIN_LOOKBACK']  = df['RSI'].shift(1).rolling(RSI_OVERSOLD_LOOKBACK).min()
+    df['prev_high']         = df['high'].shift(1)
+    df['avg_vol_20']        = df['volume'].rolling(20).mean()
     df['avg_dollar_vol_20'] = (df['close'] * df['volume']).rolling(20).mean()
     return df
 
@@ -78,133 +81,82 @@ class TestTradeDataclass:
 # ── Entry signal ──────────────────────────────────────────────────────────────
 class TestEntrySignal:
     """
-    _entry_signal requires:
-      row columns: close, MA50, MA200, SMA200_SLOPE, prev_high, RSI, ADX, HIGH200
-      positional:  prev_rsi, rvol, rvol_min
+    _entry_signal — Donchian bounce rules (mirrors src/rules.py CYCLE_RULES).
+
+    Required row columns: DONCH_LOWER, RSI, RSI_MIN_LOOKBACK
+    Positional args:      prev_rsi, rvol, rvol_min
     """
 
-    def _row(self, close=110, prev_high=100, ma50=105, ma200=90, rsi=60, atr=2.0,
-             sma200_slope=0.5, adx=25.0, high200=120.0):
+    def _row(self, close=100.0, donch_lower=99.8, rsi=38.0, rsi_min_lookback=28.0):
+        """Default passing row: price within 0.2% of lower band, RSI was oversold."""
         return pd.Series({
             'close':           close,
-            'prev_high':       prev_high,
-            'MA50':            ma50,
-            'MA200':           ma200,
+            'DONCH_LOWER':     donch_lower,
             'RSI':             rsi,
-            'ATR':             atr,
-            'SMA200_SLOPE':    sma200_slope,
-            'ADX':             adx,
-            'HIGH200':         high200,
+            'RSI_MIN_LOOKBACK': rsi_min_lookback,
         })
 
     def test_all_conditions_pass(self):
+        # close=100 within 0.2% of lower=99.8; RSI_MIN_LOOKBACK=28<35; delta=3.0>=3; rvol ok
         assert VelocityBacktest._entry_signal(
-            self._row(), prev_rsi=55, rvol=2.0, rvol_min=BACKTEST_RVOL_MIN)
+            self._row(), prev_rsi=35.0, rvol=BACKTEST_RVOL_MIN + 0.5,
+            rvol_min=BACKTEST_RVOL_MIN)
 
-    def test_fails_price_below_prev_high(self):
+    def test_fails_donchian_lower_missing(self):
+        row = self._row()
+        row['DONCH_LOWER'] = float('nan')
         assert not VelocityBacktest._entry_signal(
-            self._row(close=99, prev_high=100), prev_rsi=55,
-            rvol=2.0, rvol_min=BACKTEST_RVOL_MIN)
+            row, prev_rsi=35.0, rvol=BACKTEST_RVOL_MIN + 0.5,
+            rvol_min=BACKTEST_RVOL_MIN)
 
-    def test_fails_price_below_ma50(self):
+    def test_fails_price_too_far_above_lower_band(self):
+        # proximity = (102 - 99.8) / 99.8 = 2.2% > DONCHIAN_FLOOR_TOL_PCT (0.5%)
         assert not VelocityBacktest._entry_signal(
-            self._row(close=104, ma50=105), prev_rsi=55,
-            rvol=2.0, rvol_min=BACKTEST_RVOL_MIN)
+            self._row(close=102.0, donch_lower=99.8), prev_rsi=35.0,
+            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
-    def test_fails_ma50_below_ma200(self):
+    def test_fails_rsi_never_oversold_in_lookback(self):
+        # RSI_MIN_LOOKBACK=40 >= RSI_OVERSOLD_THRESHOLD(35) → oversold lookback fails
         assert not VelocityBacktest._entry_signal(
-            self._row(ma50=85, ma200=90), prev_rsi=55,
-            rvol=2.0, rvol_min=BACKTEST_RVOL_MIN)
+            self._row(rsi_min_lookback=40.0), prev_rsi=35.0,
+            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
-    def test_fails_rsi_not_rising(self):
+    def test_fails_rsi_delta_below_minimum(self):
+        # delta = 38.0 - 36.5 = 1.5 < RSI_MIN_DELTA (3.0)
         assert not VelocityBacktest._entry_signal(
-            self._row(rsi=60), prev_rsi=65, rvol=2.0, rvol_min=BACKTEST_RVOL_MIN)
-
-    def test_fails_rsi_below_55(self):
-        assert not VelocityBacktest._entry_signal(
-            self._row(rsi=54, ma50=105), prev_rsi=50,
-            rvol=2.0, rvol_min=BACKTEST_RVOL_MIN)
+            self._row(rsi=38.0), prev_rsi=36.5,
+            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
     def test_fails_rvol_below_min(self):
         assert not VelocityBacktest._entry_signal(
-            self._row(), prev_rsi=55, rvol=0.5, rvol_min=BACKTEST_RVOL_MIN)
+            self._row(), prev_rsi=35.0, rvol=0.5, rvol_min=BACKTEST_RVOL_MIN)
 
-    def test_fails_adx_below_threshold(self):
-        # ADX = 10 (< threshold 20) → c_adx = False → entry blocked
-        assert not VelocityBacktest._entry_signal(
-            self._row(adx=10.0), prev_rsi=55,
-            rvol=2.0, rvol_min=BACKTEST_RVOL_MIN)
-
-    def test_fails_52w_high_below_threshold(self):
-        # price=110, high200=200: 110/200=55% < 85% threshold → c_52w_high = False
-        assert not VelocityBacktest._entry_signal(
-            self._row(high200=200.0), prev_rsi=55,
-            rvol=2.0, rvol_min=BACKTEST_RVOL_MIN)
-
-    def test_fails_trend_separation_too_small(self):
-        # MA50=91, MA200=90 → sep = (91-90)/90 = 1.1% < MIN_TREND_SEP (3%) → fails
-        assert not VelocityBacktest._entry_signal(
-            self._row(close=110, ma50=91, ma200=90), prev_rsi=55,
-            rvol=2.0, rvol_min=BACKTEST_RVOL_MIN)
-
-    def test_passes_trend_separation_at_boundary(self):
-        # MA50 exactly 3% above MA200: MA200=100, MA50=103 → sep = 3.0% = MIN_TREND_SEP → passes
+    def test_passes_price_exactly_at_donchian_tolerance(self):
+        from src.config import DONCHIAN_FLOOR_TOL_PCT
+        lower = 99.8
+        close = lower * (1 + DONCHIAN_FLOOR_TOL_PCT)   # exactly at boundary → passes
         assert VelocityBacktest._entry_signal(
-            self._row(close=110, ma50=103, ma200=100), prev_rsi=55,
-            rvol=2.0, rvol_min=BACKTEST_RVOL_MIN)
+            self._row(close=close, donch_lower=lower), prev_rsi=35.0,
+            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
-    # ── flags=None is backward-compatible ────────────────────────────────────
+    def test_passes_rsi_min_lookback_just_below_threshold(self):
+        from src.config import RSI_OVERSOLD_THRESHOLD
+        assert VelocityBacktest._entry_signal(
+            self._row(rsi_min_lookback=RSI_OVERSOLD_THRESHOLD - 0.1), prev_rsi=35.0,
+            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
+
     def test_flags_none_behaves_as_production_defaults(self):
-        # flags=None should pass all existing rules when row values are valid
+        # flags kwarg is accepted but ignored — Donchian rules are all mandatory
         assert VelocityBacktest._entry_signal(
-            self._row(), prev_rsi=55, rvol=2.0, rvol_min=BACKTEST_RVOL_MIN,
-            flags=None)
+            self._row(), prev_rsi=35.0, rvol=BACKTEST_RVOL_MIN + 0.5,
+            rvol_min=BACKTEST_RVOL_MIN, flags=None)
 
-    def test_enabling_slope_blocks_entry_with_negative_slope(self):
-        row = self._row(sma200_slope=-0.5)
-        # use_slope=True explicitly + negative slope → entry blocked
-        assert not VelocityBacktest._entry_signal(
-            row, prev_rsi=55, rvol=2.0, rvol_min=BACKTEST_RVOL_MIN,
-            flags={'use_slope': True, 'use_trend_sep': True, 'use_orb': True,
-                   'use_rsi_delta': True, 'use_rsi_lvl': True,
-                   'use_adx': True, 'use_52w_high': True})
-        # use_slope=False (production default): slope bypassed → entry passes
+    def test_production_flags_dict_accepted_without_error(self):
+        # flags dict is forwarded but ignored — all Donchian rules are always active
         assert VelocityBacktest._entry_signal(
-            row, prev_rsi=55, rvol=2.0, rvol_min=BACKTEST_RVOL_MIN,
-            flags={**{s: True for s in ['use_slope','use_trend_sep','use_orb',
-                                         'use_rsi_rise','use_rsi_delta','use_rsi_lvl',
-                                         'use_adx', 'use_52w_high']},
-                   'use_slope': False})
-
-    def test_enabling_adx_blocks_entry_when_adx_absent(self):
-        row = self._row(adx=float('nan'))   # simulate missing ADX column
-        # ADX not in row (NaN fallback) → c_adx = False → entry blocked
-        assert not VelocityBacktest._entry_signal(
-            row, prev_rsi=55, rvol=2.0, rvol_min=BACKTEST_RVOL_MIN,
-            flags={s: True for s in ['use_slope','use_trend_sep','use_orb',
-                                      'use_rsi_rise','use_rsi_delta','use_rsi_lvl',
-                                      'use_adx']})
-
-    def test_production_flags_match_defaults(self):
-        # Explicitly pass current production-default flags — result must equal no-flags case.
-        # Production defaults: use_adx=True, use_52w_high=True, use_trend_sep=True,
-        # use_orb=True, use_rsi_delta=True, use_rsi_lvl=True;
-        # use_slope=False, use_rsi_rise=False, use_ma20=False (optimizer-discovered).
-        prod_flags = {
-            'use_slope':     False,
-            'use_trend_sep': True,
-            'use_orb':       True,
-            'use_rsi_rise':  False,
-            'use_rsi_delta': True,
-            'use_rsi_lvl':   True,
-            'use_adx':       True,
-            'use_52w_high':  True,
-            'use_ma20':      False,
-        }
-        row = self._row()
-        assert VelocityBacktest._entry_signal(
-            row, prev_rsi=55, rvol=2.0, rvol_min=BACKTEST_RVOL_MIN,
-            flags=prod_flags)
+            self._row(), prev_rsi=35.0, rvol=BACKTEST_RVOL_MIN + 0.5,
+            rvol_min=BACKTEST_RVOL_MIN,
+            flags={'use_rsi_delta': True, 'use_rvol': True})
 
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
@@ -304,70 +256,75 @@ class TestFullRunSynthetic:
             bt.run()
 
 
-# ── Gain filter (SCAN_MIN_GAIN_PCT) ──────────────────────────────────────────
+# ── Donchian proximity coarse filter ─────────────────────────────────────────
 class TestDailyScanGainFilter:
-    """_daily_scan must discard symbols whose daily gain is below SCAN_MIN_GAIN_PCT."""
+    """_daily_scan coarse filter: Donchian floor proximity + RSI oversold lookback."""
 
-    def _make_low_gain_df(self, daily_gain_pct: float, n: int = 300,
-                          rvol_spike: float = 2.0) -> pd.DataFrame:
-        """Return a bullish DataFrame where every bar's daily gain == daily_gain_pct.
-
-        Volume on the last 20 bars is rvol_spike× the preceding bars so that
-        the RVOL filter is cleared when rvol_spike > BACKTEST_RVOL_MIN.
-        """
+    def _make_uptrend_df(self, n: int = 300) -> pd.DataFrame:
+        """Steadily uptrending stock — price always far above 20-day low."""
         from src.indicators import apply_all as _apply
-        from src.config import SCAN_MIN_VOLUME
+        from src.config import RSI_OVERSOLD_LOOKBACK, SCAN_MIN_VOLUME
 
-        start = 100.0
-        closes = np.array([start * ((1 + daily_gain_pct) ** i) for i in range(n)])
-        high   = closes * 1.005
-        low    = closes * 0.995
         idx    = pd.date_range("2023-01-01", periods=n, freq='B')
-
-        base_vol = SCAN_MIN_VOLUME * 10
-        volume   = np.full(n, base_vol, dtype=float)
-        # Spike the last 20 bars so RVOL = rvol_spike
-        volume[-20:] = base_vol * rvol_spike
-
-        df = pd.DataFrame({'open': closes, 'high': high, 'low': low,
-                           'close': closes, 'volume': volume}, index=idx)
+        close  = 100.0 + 0.5 * np.arange(n)   # $0.50 gain each bar
+        high   = close + 0.1
+        low    = close - 0.1
+        volume = np.full(n, float(SCAN_MIN_VOLUME * 10))
+        df = pd.DataFrame({'open': close, 'high': high, 'low': low,
+                           'close': close, 'volume': volume}, index=idx)
         df = _apply(df)
-        df['prev_high']          = df['high'].shift(1)
-        df['avg_vol_20']         = df['volume'].rolling(20).mean()
-        df['avg_dollar_vol_20']  = (df['close'] * df['volume']).rolling(20).mean()
+        df['RSI_PREV']          = df['RSI'].shift(1)
+        df['RSI_MIN_LOOKBACK']  = df['RSI'].shift(1).rolling(RSI_OVERSOLD_LOOKBACK).min()
+        df['avg_vol_20']        = df['volume'].rolling(20).mean()
+        df['avg_dollar_vol_20'] = (df['close'] * df['volume']).rolling(20).mean()
         return df
 
-    def test_stock_below_gain_threshold_never_scanned(self, monkeypatch):
-        """A symbol with < SCAN_MIN_GAIN_PCT daily gain must not appear in scan output."""
-        from src.config import SCAN_MIN_GAIN_PCT
+    def _make_donchian_bounce_df(self, n: int = 300) -> pd.DataFrame:
+        """Downtrend then flat at the bottom — triggers Donchian floor proximity filter."""
+        from src.indicators import apply_all as _apply
+        from src.config import RSI_OVERSOLD_LOOKBACK, SCAN_MIN_VOLUME
 
-        # Use a gain just below the threshold
-        low_gain = (SCAN_MIN_GAIN_PCT - 0.5) / 100.0
-        df = self._make_low_gain_df(low_gain)
+        idx          = pd.date_range("2023-01-01", periods=n, freq='B')
+        down_n       = n - 20
+        prices_down  = np.linspace(25.0, 15.0, down_n)
+        prices_flat  = np.full(20, 15.001)           # flat at the bottom
+        close        = np.concatenate([prices_down, prices_flat])
+        high         = close + 0.005                  # very tight spread
+        low          = close - 0.005
 
+        base_vol = SCAN_MIN_VOLUME * 10
+        volume   = np.full(n, float(base_vol))
+        volume[-5:] = float(base_vol) * 2.0          # RVOL spike on last 5 bars
+
+        df = pd.DataFrame({'open': close, 'high': high, 'low': low,
+                           'close': close, 'volume': volume}, index=idx)
+        df = _apply(df)
+        df['RSI_PREV']          = df['RSI'].shift(1)
+        df['RSI_MIN_LOOKBACK']  = df['RSI'].shift(1).rolling(RSI_OVERSOLD_LOOKBACK).min()
+        df['avg_vol_20']        = df['volume'].rolling(20).mean()
+        df['avg_dollar_vol_20'] = (df['close'] * df['volume']).rolling(20).mean()
+        return df
+
+    def test_uptrending_stock_not_near_donchian_floor(self, monkeypatch):
+        """An uptrending stock is always far above its 20-day low — coarse filter rejects it."""
+        df = self._make_uptrend_df()
         bt = VelocityBacktest(start="2023-01-01", end="2024-01-01", use_cache=False)
-        monkeypatch.setattr(bt, '_download', lambda: bt._data.update({"SLOW": df}))
+        monkeypatch.setattr(bt, '_download', lambda: bt._data.update({"UP": df}))
         bt.run()
 
-        # coarse_candidates counts entries that pass the gain filter
         assert bt._filter_stats['coarse_candidates'] == 0, (
-            "Symbol with sub-threshold daily gain must be filtered before coarse stage"
+            "Uptrending stock far above 20-day low must not reach coarse stage"
         )
 
-    def test_stock_above_gain_threshold_reaches_coarse(self, monkeypatch):
-        """A symbol with ≥ SCAN_MIN_GAIN_PCT daily gain must pass the gain gate."""
-        from src.config import SCAN_MIN_GAIN_PCT
-
-        # Use a gain comfortably above the threshold
-        high_gain = (SCAN_MIN_GAIN_PCT + 1.0) / 100.0
-        df = self._make_low_gain_df(high_gain)
-
+    def test_stock_near_donchian_floor_reaches_coarse(self, monkeypatch):
+        """A stock at its 20-day low with RSI oversold in lookback must pass the coarse filter."""
+        df = self._make_donchian_bounce_df()
         bt = VelocityBacktest(start="2023-01-01", end="2024-01-01", use_cache=False)
-        monkeypatch.setattr(bt, '_download', lambda: bt._data.update({"FAST": df}))
+        monkeypatch.setattr(bt, '_download', lambda: bt._data.update({"BOUNCE": df}))
         bt.run()
 
         assert bt._filter_stats['coarse_candidates'] > 0, (
-            "Symbol with above-threshold daily gain must reach the coarse stage"
+            "Stock near Donchian lower band with RSI oversold lookback must reach coarse stage"
         )
 
 
@@ -476,10 +433,12 @@ class TestBacktestDynamicSlots:
         monkeypatch.setattr(bt, '_download', lambda: bt._data.update({
             "AAA": df.copy(), "BBB": df.copy(), "CCC": df.copy(),
         }))
-        # Force scanner to always return all 3 symbols so the slot limit is
-        # what constrains entries, not signal quality.
+        # Force scanner to always return all 3 symbols and entry signal to always
+        # pass, so that the SLOT LIMIT is what constrains entries (not signal quality).
         monkeypatch.setattr(bt, '_daily_scan',
-                            lambda today: [("AAA", 2.0), ("BBB", 2.0), ("CCC", 2.0)])
+                            lambda today, rvol_min=None: [("AAA", 2.0), ("BBB", 2.0), ("CCC", 2.0)])
+        monkeypatch.setattr(VelocityBacktest, '_entry_signal',
+                            staticmethod(lambda *args, **kwargs: True))
         result = bt.run()
 
         # With dynamic_max_pos = 2, entries for a 3rd symbol while 2 are open
@@ -530,8 +489,8 @@ class TestDailyScanMinScore:
         # Spy on _daily_scan output across all days
         scan_results = []
         original_scan = bt._daily_scan
-        def capturing_scan(today):
-            result = original_scan(today)
+        def capturing_scan(today, rvol_min=None):
+            result = original_scan(today, rvol_min=rvol_min)
             scan_results.append(result)
             return result
         monkeypatch.setattr(bt, '_daily_scan', capturing_scan)

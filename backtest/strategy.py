@@ -1,66 +1,48 @@
 """
-Velocity Strategy Backtester — Production-Grade Edition
-────────────────────────────────────────────────────────
+Donchian Bounce Strategy Backtester — Production-Grade Edition
+──────────────────────────────────────────────────────────────
+Mirrors the live VelocityEngine Donchian mean-reversion bounce strategy.
+Always keep in sync with src/rules.py and src/engine.py.
+
 Key design decisions:
   1. RVOL uses BACKTEST_RVOL_MIN (1.2×) not RVOL_MIN (2.5×).
      End-of-day volume does not spike the same way intraday RVOL does;
-     2.5× was eliminating ~95% of valid daily setups.
+     2.5× eliminates ~95% of valid daily setups when applied to close-of-day data.
   2. bars_held counts actual trading bars open (not calendar days).
-     Previously, Friday entry → Saturday + Sunday counted as 2 bars,
-     firing velocity_exit after only 1 real trading session.
-  3. Break-even floor: once profit ≥ BREAK_EVEN_PCT (4%), the effective
-     stop cannot fall below entry price — locks in break-even.
-  4. ATR-based position sizing: risk RISK_PER_TRADE_PCT (2%) of equity
-     per trade, using the tighter of chandelier or 7% hard-stop as the
-     risk distance.  Capped by the per-bucket dollar limit.
+  3. Break-even floor: once profit ≥ BREAK_EVEN_PCT (4%), stop ≥ entry.
+  4. ATR-based position sizing: 2% equity risk per trade, tighter of
+     chandelier or 7% hard-stop, capped by per-bucket dollar limit.
   5. 0.1% entry slippage added to entry_price for realism.
-  6. Commission configurable via BACKTEST_COMMISSION_PER_ORDER (default $0.00;
-     Alpaca is commission-free). Set VELOCITY_BACKTEST_COMMISSION_PER_ORDER env
-     var to simulate a non-zero commission broker.
-  7. Composite scanner score = Trend(30pts) + RVOL(25pts) + Momentum(25pts);
-     Liquidity(20pts) omitted (no bid/ask spread in daily OHLCV data).
-     Mirrors live _score_candidate() — ranks high-conviction setups ahead of thin movers.
-  8. Data caching: downloaded + indicator-enriched DataFrames are
-     pickled to backtest/.cache/ so re-runs skip the 5-min download.
-  9. Filter funnel stats printed at end: shows exactly where signals
-     are lost across each filter stage.
+  6. Commission configurable via BACKTEST_COMMISSION_PER_ORDER ($0.00 default).
+  7. Composite score = DonchianProximity(30) + RVOL(25) + RSIDelta(25) +
+     Liquidity(10); Liquidity uses dollar-vol half only (no spread in OHLCV).
+     Mirrors live score_candidate() in src/rules.py.
+  8. Data caching: indicator-enriched DataFrames pickled to backtest/.cache/.
+  9. Filter funnel stats printed after each run.
 
-Universe discovery (mirrors the live Alpaca top-gainers + most-actives screener):
-  - Candidate pool  : NASDAQ Global Select/Market + NYSE equities
-  - Daily scan      : each bar, rank by composite score and keep top
-                      all scanner-passed stocks unless --scan-count is set
+Universe (mirrors live Alpaca combined screener):
+  - Candidate pool: NASDAQ Global Select/Market + NYSE equities
+  - Daily scan: rank by composite score; all scanner-passed unless --scan-count
 
-ORB approximation: previous day's high acts as the opening-range breakout
-level.  A close above it on the signal day mirrors the live "price > orb_high"
-check.
-
-Entry rules (production signal combination — optimizer rank #1):
+Entry rules (Donchian bounce — matches src/rules.py CYCLE_RULES):
   1. Data sufficiency    : ≥ MIN_CANDLES (210) bars of history
-  2. Trend               : close > MA50 > MA200
-  3. Trend separation    : (MA50 - MA200) / MA200 ≥ MIN_TREND_SEP (3%) — confirmed uptrend, not fresh crossover
-  4. ADX                 : ADX(14) ≥ ADX_THRESHOLD (20) — trend has real momentum
-  5. 52-week high        : close ≥ HIGH200_MIN_PCT (85%) of 200-day rolling high — momentum leadership
-  6. RVOL                : volume / 20d avg ≥ BACKTEST_RVOL_MIN (1.2×)
-  7. Spread              : not available in daily data — skipped
-  8. SPY regime          : SPY close > SMA50 > SMA200 (optional)
-  9. Correlation         : not practical in daily batch — skipped
-  10. Sector clustering  : not practical in daily batch — skipped
-  11. RSI delta          : RSI rose vs previous bar by ≥ RSI_MIN_DELTA (1.0 pt) — momentum accelerating
-  12. RSI level          : RSI > RSI_THRESHOLD (55) — confirms bullish momentum
-      ORB proxy          : close > prev_high
-      Gap cap            : open ≤ prev_high × (1 + GAP_MAX_PCT)
+  2. Price floor         : close ≥ SCAN_MIN_PRICE ($10)
+  3. Volume              : avg 20-day share vol ≥ SCAN_MIN_VOLUME
+  4. Dollar volume       : avg 20-day dollar vol ≥ SCAN_MIN_DOLLAR_VOL (2× on Fridays)
+  5. Donchian floor      : close within DONCHIAN_FLOOR_TOL_PCT (0.5%) of 20-day low
+  6. RVOL                : volume / 20d avg ≥ BACKTEST_RVOL_MIN; tighter in bearish regime
+  7. RSI oversold        : RSI was < RSI_OVERSOLD_THRESHOLD (35) in last RSI_OVERSOLD_LOOKBACK (3) bars
+  8. RSI delta           : RSI rose ≥ RSI_MIN_DELTA (3.0 pts) vs previous bar
+  9. Spread              : not available in daily data — skipped
+  10. Day strength        : not available in daily OHLCV — skipped
+  SPY regime             : SPY close > EMA50 → bull (soft: smaller bucket + tighter RVOL in bear)
 
-  Removed from prior 12-rule set (optimizer rank #1 result):
-    - SMA200 slope (use_slope=False by default)
-    - RSI rising flag (use_rsi_rise=False; replaced by rsi_delta check)
-
-Exit rules (production):
-  • Chandelier trailing stop : peak_high - ATR_CHAND × CHANDELIER_MULT
-  • Hard stop                : entry × (1 - HARD_STOP_PCT) = 7% from entry
-  • Break-even floor         : if profit > BREAK_EVEN_PCT, stop ≥ entry
-  • Velocity time exit       : held ≥ hold_bars (2 trading days default) and profit < PROFIT_MIN_THRESHOLD (5%)
-  • Friday close              : on Fridays, close positions with profit < FRIDAY_MIN_PROFIT_PCT (3%) to avoid weekend gap risk
-  • (No take-profit bracket — removed from production)
+Exit rules (unchanged from momentum strategy):
+  • Chandelier trailing stop : peak_high - ATR_CHAND × CHANDELIER_MULT (dollar-distance, matches Alpaca trail_price)
+  • Hard stop                : entry × (1 - HARD_STOP_PCT) = 7%
+  • Break-even floor         : once peak ≥ BREAK_EVEN_PCT above entry, stop ≥ entry
+  • Velocity time exit       : held ≥ hold_bars and profit < PROFIT_MIN_THRESHOLD (5%)
+  • Friday close             : profit < FRIDAY_MIN_PROFIT_PCT (3%) on Fridays
 """
 
 from __future__ import annotations
@@ -80,21 +62,22 @@ import yfinance as yf
 
 from src.config import (
     PROFIT_MIN_THRESHOLD,
-    RSI_PERIOD, ATR_PERIOD, MA_FAST, MA_SLOW, RSI_THRESHOLD,
+    RSI_PERIOD, ATR_PERIOD, MA_FAST, MA_SLOW,
     BACKTEST_INITIAL_CAPITAL, MAX_POSITIONS_CAP, MIN_BUCKET_SIZE, BACKTEST_SCAN_COUNT,
-    SCAN_MIN_PRICE, SCAN_MIN_VOLUME, SCAN_MIN_DOLLAR_VOL, SCAN_MIN_GAIN_PCT,
+    SCAN_MIN_PRICE, SCAN_MIN_VOLUME, SCAN_MIN_DOLLAR_VOL,
     VIX_THRESHOLD,
-    MIN_CANDLES, BACKTEST_RVOL_MIN, GAP_MAX_PCT,
+    MIN_CANDLES, BACKTEST_RVOL_MIN,
     CHANDELIER_PERIOD, CHANDELIER_MULT,
     RSI_MIN_DELTA, HARD_STOP_PCT,
-    SMA200_SLOPE_LOOKBACK,
     RISK_PER_TRADE_PCT, BREAK_EVEN_PCT,
     BACKTEST_COMMISSION_PER_ORDER,
-    MIN_TREND_SEP,
     BACKTEST_HOLD_BARS, BACKTEST_SLIPPAGE, BACKTEST_EXIT_SLIPPAGE,
     VOL_MULT_FRIDAY, FRIDAY_MIN_PROFIT_PCT,
-    ADX_THRESHOLD, HIGH200_MIN_PCT,
     SCAN_MIN_SCORE, BUCKET_CASH_PCT,
+    DONCHIAN_PERIOD, DONCHIAN_FLOOR_TOL_PCT,
+    RSI_OVERSOLD_THRESHOLD, RSI_OVERSOLD_LOOKBACK,
+    SPY_EMA_PERIOD, SPY_REGIME_SIZE_CUT, SPY_REGIME_RVOL_MULT,
+    SCORE_DONCHIAN_MAX, SCORE_RVOL_MAX, SCORE_RSI_DELTA_MAX, SCORE_LIQUIDITY_MAX,
 )
 from src.indicators import apply_all
 
@@ -107,13 +90,12 @@ _DEFAULT_ROUND_TRIP_COST = BACKTEST_COMMISSION_PER_ORDER * 2
 
 # Columns required to be non-NaN before calling _entry_signal
 _REQUIRED_ENTRY_COLS = [
-    'MA50', 'MA200', 'RSI', 'ATR', 'ATR_CHAND',
-    'SMA200_SLOPE', 'prev_high',
+    'DONCH_LOWER', 'RSI', 'ATR_CHAND', 'RSI_MIN_LOOKBACK',
 ]
 # Columns snapshotted into the pre-computed candidate dicts
 _PRECOMPUTE_COLS = (
-    'close', 'open', 'MA50', 'MA200', 'RSI', 'ATR', 'ATR_CHAND',
-    'SMA200_SLOPE', 'prev_high', 'ADX', 'HIGH200', 'EMA20',
+    'close', 'open', 'DONCH_LOWER', 'RSI', 'RSI_PREV', 'RSI_MIN_LOOKBACK',
+    'ATR', 'ATR_CHAND', 'avg_vol_20', 'avg_dollar_vol_20',
 )
 
 
@@ -227,7 +209,7 @@ class VelocityBacktest:
 
         self._data:        Dict[str, pd.DataFrame] = {}
         self._vix_series:  Optional[pd.Series]     = None
-        self._spy_bull:    Optional[pd.Series]      = None
+        self._spy_is_bull: Optional[pd.Series]     = None
 
         # Download starts early enough to warm up MA200 + chandelier ATR
         _trade_start     = date.fromisoformat(start)
@@ -377,10 +359,11 @@ class VelocityBacktest:
                     continue
                 df = apply_all(
                     df, RSI_PERIOD, ATR_PERIOD, MA_FAST, MA_SLOW,
-                    SMA200_SLOPE_LOOKBACK, CHANDELIER_PERIOD
+                    donchian_period=DONCHIAN_PERIOD
                 )
-                df['prev_high']         = df['high'].shift(1)
-                df['avg_vol_20']        = df['volume'].rolling(20).mean()
+                df['RSI_PREV']         = df['RSI'].shift(1)
+                df['RSI_MIN_LOOKBACK'] = df['RSI'].shift(1).rolling(RSI_OVERSOLD_LOOKBACK).min()
+                df['avg_vol_20']       = df['volume'].rolling(20).mean()
                 df['avg_dollar_vol_20'] = (
                     (df['close'] * df['volume']).rolling(20).mean()
                 )
@@ -395,9 +378,10 @@ class VelocityBacktest:
     def _download_regime_data(self) -> None:
         """
         Download SPY and VIX regime data fresh on every run (not cached).
-        SPY regime requires close > SMA50 AND SMA50 > SMA200 (golden cross).
-        This blocks both bear markets and early recoveries where the golden cross
-        has not yet re-established, reducing false-breakout entries.
+        SPY regime: close >= EMA50 → bull (soft — smaller bucket + tighter RVOL in bear).
+        Mirrors live engine _fetch_spy_trend() which uses SPY_EMA_PERIOD=50.
+        Bear regime does NOT block entries; it applies SPY_REGIME_SIZE_CUT and
+        SPY_REGIME_RVOL_MULT via the run-loop, matching the live engine behaviour.
         """
         try:
             vix_raw = yf.download('^VIX', start=self.start, end=self.end,
@@ -422,29 +406,24 @@ class VelocityBacktest:
                         c[0].lower() if isinstance(c, tuple) else c.lower()
                         for c in spy_raw.columns
                     ]
-                    sc    = spy_raw['close']
-                    ma50  = sc.rolling(50).mean()
-                    ma200 = sc.rolling(200).mean()
-                    # Require all three conditions matching live engine _fetch_spy_trend():
-                    # price > MA50 AND MA50 > MA200 AND SMA200 slope > 0.
-                    # The slope check blocks recovery rallies where price has crossed
-                    # above a still-falling SMA200 — the highest-false-breakout window.
-                    sma200_slope = ma200.diff(SMA200_SLOPE_LOOKBACK)
-                    self._spy_bull = (sc > ma50) & (ma50 > ma200) & (sma200_slope > 0)
+                    sc = spy_raw['close']
+                    spy_ema50 = sc.ewm(span=SPY_EMA_PERIOD, adjust=False).mean()
+                    self._spy_is_bull = sc >= spy_ema50
                 else:
-                    print("  WARNING: SPY data download returned empty DataFrame — SPY regime filter disabled")
+                    print("  WARNING: SPY data download returned empty DataFrame — SPY regime disabled")
             except Exception as e:
-                print(f"  WARNING: SPY data download failed ({e}) — SPY regime filter disabled")
+                print(f"  WARNING: SPY data download failed ({e}) — SPY regime disabled")
 
     # ── Daily scanner simulation ──────────────────────────────────────────────
-    def _daily_scan(self, today) -> List[Tuple[str, float]]:
+    def _daily_scan(self, today, rvol_min: float = None) -> List[Tuple[str, float]]:
         """
-        Simulate the Alpaca top-gainers + most-actives screener with production pre-filters.
-        Returns list of (symbol, rvol) tuples, sorted by composite score
-        (% daily gain × RVOL) descending.  scan_count <= 0 means all scanner-passed
-        symbols are returned.
+        Simulate the Alpaca combined screener for Donchian bounce candidates.
+        Returns list of (symbol, rvol) tuples, sorted by composite score descending.
         Fine signal rules are applied in _entry_signal.
+
+        rvol_min overrides self._rvol_min when the soft-regime multiplier is active.
         """
+        effective_rvol_min = rvol_min if rvol_min is not None else self._rvol_min
         scored: List[tuple] = []
 
         for sym, df in self._data.items():
@@ -454,8 +433,7 @@ class VelocityBacktest:
             if idx < 1:
                 continue
 
-            row      = df.loc[today]
-            prev_row = df.iloc[idx - 1]
+            row = df.loc[today]
 
             # Price and volume floor (mirrors Alpaca screener parameters)
             if row['close'] < self._min_price:
@@ -464,18 +442,24 @@ class VelocityBacktest:
                 continue
 
             # Dollar-volume gate (20-day average).
-            # Apply Friday multiplier matching live engine: Friday liquidity thins
-            # after 12 PM ET and weekend gaps increase risk, so we require 2×
-            # the normal threshold before taking a Friday position.
             avg_dvol = row.get('avg_dollar_vol_20', row['close'] * row['volume'])
             friday_mult = VOL_MULT_FRIDAY if pd.Timestamp(today).dayofweek == 4 else 1.0
             if pd.isna(avg_dvol) or avg_dvol < self._min_dollar_vol * friday_mult:
                 continue
 
-            # Trend filter (coarse pass)
-            if pd.isna(row['MA50']) or pd.isna(row['MA200']):
+            # Donchian lower band required and non-NaN
+            donch_lower = row.get('DONCH_LOWER', float('nan'))
+            if pd.isna(donch_lower) or donch_lower <= 0:
                 continue
-            if not (row['close'] > row['MA50'] > row['MA200']):
+
+            # Coarse Donchian proximity filter: price within tolerance of lower band
+            proximity = (row['close'] - donch_lower) / donch_lower
+            if proximity > DONCHIAN_FLOOR_TOL_PCT:
+                continue
+
+            # RSI oversold lookback: RSI must have dipped below threshold recently
+            rsi_min_lb = row.get('RSI_MIN_LOOKBACK', float('nan'))
+            if pd.isna(rsi_min_lb) or rsi_min_lb >= RSI_OVERSOLD_THRESHOLD:
                 continue
 
             # RVOL filter (backtest threshold — daily close RVOL proxy)
@@ -483,40 +467,31 @@ class VelocityBacktest:
             if pd.isna(avg_vol) or avg_vol <= 0:
                 continue
             rvol = row['volume'] / avg_vol
-            if rvol < self._rvol_min:
-                continue
-
-            # Minimum daily gain filter — mirrors Alpaca screener's percent_change threshold
-            pct = (row['close'] - prev_row['close']) / prev_row['close']
-            if pct < SCAN_MIN_GAIN_PCT / 100.0:
+            if rvol < effective_rvol_min:
                 continue
 
             self._filter_stats['coarse_candidates'] += 1
 
-            # Composite score mirroring live engine's _score_candidate() formula:
-            # Trend(30) + RVOL(25) + Momentum(25); Liquidity(20) omitted (no spread in OHLCV).
-            ma50  = row.get('MA50',  0)
-            ma200 = row.get('MA200', 1) or 1
-            rsi   = row.get('RSI',   50)
-            prev_rsi = prev_row.get('RSI', rsi)
+            # Composite score mirroring live score_candidate() in src/rules.py:
+            # DonchianProximity(30) + RVOL(25) + RSIDelta(25) + Liquidity(10)
+            rsi      = row.get('RSI', float('nan'))
+            rsi_prev = row.get('RSI_PREV', float('nan'))
 
-            sep           = (ma50 - ma200) / ma200 * 100
-            ma_sep_pts    = max(0.0, min(sep / 6.0 * 22.0, 22.0))
-            adx_val_scan  = row.get('ADX', float('nan'))
-            adx_qual_pts  = (
-                min(8.0, max(0.0, (float(adx_val_scan) - 25.0) / 25.0 * 8.0))
-                if not pd.isna(adx_val_scan) and float(adx_val_scan) >= 25.0
-                else 0.0
-            )
-            trend_pts   = ma_sep_pts + adx_qual_pts
-            rvol_excess = max(0.0, rvol - self._rvol_min)
-            rvol_pts    = min(25.0, rvol_excess / (5.0 - self._rvol_min) * 25.0)
-            rsi_delta   = (rsi - prev_rsi) if not (pd.isna(rsi) or pd.isna(prev_rsi)) else 0.0
-            accel       = min(max(rsi_delta / 5.0 * 15.0, 0.0), 15.0)
-            rsi_lvl_pts = min(10.0, max(0.0, (rsi - RSI_THRESHOLD) / 20.0 * 10.0))
-            momentum_pts = accel + rsi_lvl_pts
+            donchian_score = max(0.0, (1.0 - proximity / DONCHIAN_FLOOR_TOL_PCT) * SCORE_DONCHIAN_MAX)
 
-            score = trend_pts + rvol_pts + momentum_pts
+            rvol_excess = max(0.0, rvol - effective_rvol_min)
+            rvol_score  = min(SCORE_RVOL_MAX,
+                              rvol_excess / max(5.0 - effective_rvol_min, 0.01) * SCORE_RVOL_MAX)
+
+            rsi_delta  = max(0.0, rsi - rsi_prev) if not (pd.isna(rsi) or pd.isna(rsi_prev)) else 0.0
+            rsi_score  = min(SCORE_RSI_DELTA_MAX, rsi_delta / 10.0 * SCORE_RSI_DELTA_MAX)
+
+            # Liquidity: dollar-vol half only (no spread available in daily OHLCV)
+            half     = SCORE_LIQUIDITY_MAX / 2.0
+            vol_pts  = min(half, (avg_dvol / self._min_dollar_vol) * half) if self._min_dollar_vol > 0 else 0.0
+            liq_score = vol_pts   # spread half unavailable in daily data
+
+            score = donchian_score + rvol_score + rsi_score + liq_score
             if score < SCAN_MIN_SCORE:
                 continue
             scored.append((sym, score, rvol))
@@ -529,61 +504,40 @@ class VelocityBacktest:
     @staticmethod
     def _entry_signal(row: pd.Series, prev_rsi: float, rvol: float,
                       rvol_min: float,
-                      min_trend_sep: float = MIN_TREND_SEP,
                       flags: dict = None) -> bool:
-        """Full 12-rule production filter (daily-bar approximation).
+        """Donchian bounce entry filter — daily-bar approximation of src/rules.py CYCLE_RULES.
 
-        flags controls which optional rules are active.  None → all production
-        defaults.
+        Rules checked (all mandatory):
+          1. DONCH_LOWER available and price within DONCHIAN_FLOOR_TOL_PCT of lower band
+          2. RSI oversold in lookback window (RSI_MIN_LOOKBACK < RSI_OVERSOLD_THRESHOLD)
+          3. RSI delta >= RSI_MIN_DELTA (momentum turn confirmed)
+          4. RVOL >= rvol_min (already verified in _daily_scan; re-checked for safety)
         """
-        g = flags if flags is not None else {}
+        # Donchian floor proximity
+        donch_lower = row.get('DONCH_LOWER', float('nan'))
+        if pd.isna(donch_lower) or donch_lower <= 0:
+            return False
+        proximity = (float(row['close']) - float(donch_lower)) / float(donch_lower)
+        if proximity > DONCHIAN_FLOOR_TOL_PCT:
+            return False
 
-        # ── Mandatory (never toggled off) ──────────────────────────────────
-        c_trend = row['close'] > row['MA50'] > row['MA200']
-        c_rvol  = rvol >= rvol_min
+        # RSI oversold in recent lookback
+        rsi_min_lb = row.get('RSI_MIN_LOOKBACK', float('nan'))
+        if pd.isna(rsi_min_lb) or float(rsi_min_lb) >= RSI_OVERSOLD_THRESHOLD:
+            return False
 
-        # ── Togglable rules (optimizer-discoverable) ───────────────────────
-        c_slope = (
-            not pd.isna(row['SMA200_SLOPE']) and row['SMA200_SLOPE'] > 0
-        ) if g.get('use_slope', False) else True
+        # RSI delta confirms momentum turn
+        rsi = row.get('RSI', float('nan'))
+        if pd.isna(rsi) or pd.isna(prev_rsi):
+            return False
+        if (float(rsi) - float(prev_rsi)) < RSI_MIN_DELTA:
+            return False
 
-        c_trend_sep = (
-            row['MA200'] > 0
-            and (row['MA50'] - row['MA200']) / row['MA200'] >= min_trend_sep
-        ) if g.get('use_trend_sep', True) else True
+        # RVOL confirmation
+        if rvol < rvol_min:
+            return False
 
-        c_orb = (
-            not pd.isna(row['prev_high']) and row['close'] > row['prev_high']
-        ) if g.get('use_orb', True) else True
-
-        rsi_delta   = row['RSI'] - prev_rsi
-        c_rsi_rise  = (row['RSI'] > prev_rsi)           if g.get('use_rsi_rise',  False) else True
-        c_rsi_delta = (rsi_delta >= RSI_MIN_DELTA)       if g.get('use_rsi_delta', True) else True
-        c_rsi_lvl   = (row['RSI'] > RSI_THRESHOLD)       if g.get('use_rsi_lvl',   True) else True
-
-        adx_val   = row.get('ADX',    float('nan'))
-        h200_val  = row.get('HIGH200', float('nan'))
-        ema20_val = row.get('EMA20',  float('nan'))
-
-        c_adx = (
-            not pd.isna(adx_val) and adx_val > ADX_THRESHOLD
-        ) if g.get('use_adx', True) else True
-
-        c_52w_high = (
-            not pd.isna(h200_val) and h200_val > 0
-            and row['close'] >= h200_val * HIGH200_MIN_PCT
-        ) if g.get('use_52w_high', True) else True
-
-        c_ma20 = (
-            not pd.isna(ema20_val) and row['close'] > ema20_val
-        ) if g.get('use_ma20', False) else True
-
-        return (
-            c_trend and c_rvol
-            and c_slope and c_trend_sep and c_orb
-            and c_rsi_rise and c_rsi_delta and c_rsi_lvl
-            and c_adx and c_52w_high and c_ma20
-        )
+        return True
 
     # ── Run ───────────────────────────────────────────────────────────────────
     def run(self) -> BacktestResult:
@@ -614,8 +568,8 @@ class VelocityBacktest:
         """Pre-compute _daily_scan + row data for the signal optimizer.
 
         Returns dict[date → list[(sym, rvol, row_dict, prev_rsi)]] where every
-        entry has already passed the NaN and gap-cap pre-checks.  Call once
-        after run() and _prepare_optimizer_signals(); pass the result to
+        entry has already passed the NaN pre-checks.  Call once after run() and
+        _prepare_optimizer_signals(); pass the result to
         run_with_flags(precomputed_scans=…) to skip the O(n_symbols × n_days)
         scan overhead on every combination (50-100× speedup).
         """
@@ -635,8 +589,6 @@ class VelocityBacktest:
                     continue
                 row = df.loc[today]
                 if pd.isna(row[_REQUIRED_ENTRY_COLS]).any():
-                    continue
-                if float(row['open']) > float(row['prev_high']) * (1 + GAP_MAX_PCT):
                     continue
                 prev_rsi = float(df.iloc[idx - 1]['RSI'])
                 row_data = {c: row.get(c, float('nan')) for c in _PRECOMPUTE_COLS}
@@ -786,12 +738,15 @@ class VelocityBacktest:
                 except Exception:
                     pass
 
-            if (not skip_entries and self._use_spy_filter
-                    and self._spy_bull is not None and past_start):
+            # Soft SPY regime: bearish → smaller bucket + tighter RVOL (no hard block)
+            spy_size_factor = 1.0
+            spy_rvol_mult   = 1.0
+            if (self._use_spy_filter and self._spy_is_bull is not None and past_start):
                 try:
-                    bull = self._spy_bull.get(today)
+                    bull = self._spy_is_bull.get(today)
                     if bull is not None and not bool(bull):
-                        skip_entries = True
+                        spy_size_factor = SPY_REGIME_SIZE_CUT
+                        spy_rvol_mult   = SPY_REGIME_RVOL_MULT
                         self._filter_stats['spy_blocked_days'] += 1
                 except Exception:
                     pass
@@ -827,11 +782,12 @@ class VelocityBacktest:
                 # Build today's candidate list.
                 # Fast path: use pre-computed scan+enrichment (optimizer).
                 # Slow path: compute on-the-fly (normal backtest).
+                effective_rvol_min = self._rvol_min * spy_rvol_mult
                 if precomputed_scans is not None:
                     _today_cands = precomputed_scans.get(today, [])
                 else:
                     _today_cands = []
-                    for sym, rvol in self._daily_scan(today):
+                    for sym, rvol in self._daily_scan(today, rvol_min=effective_rvol_min):
                         df = self._data.get(sym)
                         if df is None or today not in df.index:
                             continue
@@ -841,9 +797,6 @@ class VelocityBacktest:
                         row      = df.loc[today]
                         prev_rsi = float(df.iloc[idx - 1]['RSI'])
                         if pd.isna(row[_REQUIRED_ENTRY_COLS]).any():
-                            continue
-                        # Gap cap: skip if already gapped beyond GAP_MAX_PCT
-                        if float(row['open']) > float(row['prev_high']) * (1 + GAP_MAX_PCT):
                             continue
                         _today_cands.append((sym, rvol, row, prev_rsi))
 
@@ -856,13 +809,13 @@ class VelocityBacktest:
                             self._filter_stats['entries_skipped_full'] += 1
                         continue
 
-                    if self._entry_signal(row, prev_rsi, rvol, self._rvol_min,
+                    if self._entry_signal(row, prev_rsi, rvol, effective_rvol_min,
                                           flags=flags):
                         self._filter_stats['fine_signals'] += 1
 
-                        # Entry at open or prev_high, plus BACKTEST_SLIPPAGE to simulate impact
-                        raw_entry   = max(float(row['open']), float(row['prev_high']))
-                        entry_price = round(raw_entry * (1 + BACKTEST_SLIPPAGE), 4)
+                        # Entry at open (Donchian bounce — not an ORB breakout strategy),
+                        # plus BACKTEST_SLIPPAGE to simulate market impact.
+                        entry_price = round(float(row['open']) * (1 + BACKTEST_SLIPPAGE), 4)
 
                         # Reject if the actual entry proxy is sub-floor (close may be ≥ $20
                         # while open / prev_high is not — e.g., a gap-up day starting near $2)
@@ -877,10 +830,9 @@ class VelocityBacktest:
                         risk_stop_dist  = min(chand_dist, hard_stop_dist)
                         risk_stop_dist  = max(risk_stop_dist, 0.01)  # floor at 1¢
 
-                        # Bucket = settled_cash / cash-qualified entry slots.  Max
-                        # position count compounds with equity, but spending remains
-                        # constrained by settled cash.
-                        bucket        = settled_cash * BUCKET_CASH_PCT / entry_slots
+                        # Bucket = settled_cash / cash-qualified entry slots, reduced
+                        # by BUCKET_CASH_PCT reserve and soft-regime size factor.
+                        bucket        = settled_cash * BUCKET_CASH_PCT * spy_size_factor / entry_slots
 
                         risk_dollars  = equity_mtm * RISK_PER_TRADE_PCT
                         qty_risk      = risk_dollars / risk_stop_dist
@@ -1009,8 +961,8 @@ class VelocityBacktest:
         final_equity = capital + m['total_pnl']
 
         print("\n" + "=" * 65)
-        print("  VELOCITY STRATEGY — FORWARD BACKTEST REPORT")
-        print("  12-filter entry | Chandelier stop | Break-even floor")
+        print("  VELOCITY STRATEGY — DONCHIAN BOUNCE BACKTEST REPORT")
+        print("  Donchian floor entry | Chandelier stop | Break-even floor")
         print("=" * 65)
         print("  *** SURVIVORSHIP BIAS WARNING ***")
         print("  Universe = current NASDAQ/NYSE listing.  Bankrupt and")
@@ -1163,13 +1115,13 @@ class VelocityBacktest:
         spy_d = fs.get('spy_blocked_days', 0)
         vix_d = fs.get('vix_blocked_days', 0)
         if spy_d:
-            print(f"  SPY-blocked days    : {spy_d:,}")
+            print(f"  SPY bearish days    : {spy_d:,}  (soft: smaller bucket + tighter RVOL)")
         if vix_d:
             print(f"  VIX-blocked days    : {vix_d:,}")
         print(f"  Coarse candidates   : {fs.get('coarse_candidates', 0):,}  "
-              f"(price/vol/trend/rvol pass)")
+              f"(price/vol/donchian/rsi-oversold/rvol pass)")
         print(f"  Fine signals        : {fs.get('fine_signals', 0):,}  "
-              f"(full 12-rule pass)")
+              f"(full Donchian bounce rule pass)")
         print(f"  Entries taken       : {fs.get('entries_taken', 0):,}")
         skipped = fs.get('entries_skipped_full', 0)
         if skipped:
