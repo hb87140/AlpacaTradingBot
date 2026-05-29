@@ -1533,23 +1533,36 @@ class VelocityEngine:
             s = self._get_sector(book_sym)
             book_sectors[s] = book_sectors.get(s, 0) + 1
 
-        signals = []
+        signals      = []
+        n_portfolio  = 0
+        n_blocked    = 0
+        n_history    = 0
+        n_no_ctx     = 0
+        n_day        = 0
+        n_cycle      = 0
+        _rule_fails: dict = {}
+
         for sym in watchlist:
             if sym in self.state:
+                n_portfolio += 1
                 logger.info(f"SCAN {sym}: SKIP — already in portfolio")
                 continue
             if sym in TICKER_BLOCKLIST:
+                n_blocked += 1
                 continue
             if sym in self._daily_scan_skip:
+                n_day += 1
                 logger.debug(
                     f"SCAN {sym}: SKIP — day-filtered ({self._daily_scan_skip[sym]})"
                 )
                 continue
             if sym in self._insufficient_history_skip:
+                n_history += 1
                 continue
 
             ctx = self.get_technical_context(sym)
             if not ctx:
+                n_no_ctx += 1
                 continue
 
             price        = ctx['live_price']
@@ -1583,6 +1596,7 @@ class VelocityEngine:
                 if not c_dol_vol:    perm_fails.append(f'DolVol<{dol_vol_thresh/1e6:.0f}M')
                 reason = ', '.join(perm_fails)
                 self._daily_scan_skip[sym] = reason
+                n_day += 1
                 # Persist into state so the skip survives an intraday restart
                 if sym in self.state:
                     self.state[sym]['_daily_skip_reason'] = reason
@@ -1620,6 +1634,9 @@ class VelocityEngine:
                     (f'RSIδ≥{RSI_MIN_DELTA}', c_rsi_delta),
                     (f'RSI>{RSI_THRESHOLD}', c_rsi_lvl),
                 ] if not v]
+                n_cycle += 1
+                for f in failed:
+                    _rule_fails[f] = _rule_fails.get(f, 0) + 1
                 logger.debug(f"{scan_detail}")
                 logger.debug(f"SCAN {sym}: NO SIGNAL — failed: {failed}")
                 continue
@@ -1657,7 +1674,16 @@ class VelocityEngine:
             )
 
         if not signals:
-            logger.info("SCAN: No signals this cycle")
+            cycle_detail = ' '.join(
+                f'{k}:{v}' for k, v in sorted(_rule_fails.items(), key=lambda x: -x[1])
+            )
+            logger.info(
+                f"SCAN: No signals — "
+                f"{n_blocked} ETF/blocked, {n_history} no-history, "
+                f"{n_no_ctx} no-snapshot, {n_day} day-filtered(MA/ADX/DolVol/52wH), "
+                f"{n_cycle} cycle-filtered"
+                + (f" [{cycle_detail}]" if cycle_detail else "")
+            )
             self._update_position_prices(prefetched)
             self._write_dashboard_data(connected=True)
             return
