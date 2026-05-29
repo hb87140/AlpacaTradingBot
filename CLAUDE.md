@@ -30,7 +30,7 @@ Never commit `.env` files, credentials, or generated artifacts (`backtest/optimi
 
 - **Python**: venv at `venv/` uses Python 3.13 (symlinked to current snap release). Run via `venv/bin/python`.
 - **Broker**: Alpaca (`alpaca-trade-api` / `alpaca-py`). Do NOT use IB/ib_async imports.
-- **Run tests**: `venv/bin/python -m pytest tests/ -q`  *(381+ tests — all must pass)*
+- **Run tests**: `venv/bin/python -m pytest tests/ -q`  *(384+ tests — all must pass)*
 - **Start engine**: `venv/bin/python alpaca_auto_trader.py`
 - **Run backtest**: `venv/bin/python run_backtest.py`
 
@@ -44,7 +44,7 @@ src/scanner.py         ← Alpaca screener (top-gainers + most-actives candidate
 backtest/strategy.py   ← offline backtester (yfinance data)
 alpaca_dashboard.py    ← web dashboard for monitoring
 run_backtest.py        ← CLI entry point for backtesting
-tests/                 ← pytest test suite (381+ tests)
+tests/                 ← pytest test suite (384+ tests)
 ```
 
 ## Critical Design Decisions (Do NOT "Fix" These)
@@ -810,6 +810,21 @@ and `test_writes_dashboard_twice` which were already properly mocked.
 to avoid naming confusion with the sibling `IBKRVelocitySwingTrader` project in the same
 parent directory. All internal references, test imports, `main.py`, and `CLAUDE.md` updated.
 Stale `goodAfterTime` (IB-era) and `ib_async Package` sections removed from `CLAUDE.md`.
+
+## Fixed Bugs (Session 28 — May 2026)
+
+### 87. No Endpoint to Download Logs from Render
+
+Logs on Render are only visible via the `/api/logs` endpoint (last 200 lines) or the
+Render dashboard UI (not searchable or downloadable). There was no way to pull the full
+rotating log file for offline analysis.
+Fix: added `GET /api/logs/download` to `alpaca_dashboard.py` — returns the full
+`trading_engine.log` as a `text/plain` attachment with a dated filename
+(`trading_engine_YYYYMMDD.log`). Returns 404 JSON when the log file doesn't exist.
+Added `httpx` to `requirements.txt` (required by FastAPI's `TestClient`).
+Tests: `TestDashboardLogsDownload.test_download_returns_file_response_when_log_exists`,
+`test_download_returns_404_when_log_missing`,
+`test_download_endpoint_in_source`
 
 ## Survivorship Bias Warning (Backtest)
 The backtest universe is current NASDAQ/NYSE listings. Bankrupt/delisted tickers from the

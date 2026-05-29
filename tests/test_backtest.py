@@ -717,3 +717,58 @@ class TestBacktestEntryPriceFloor:
             "backtest/strategy.py must reject entry_price < SCAN_MIN_PRICE "
             "(close may pass the floor filter while open/prev_high do not)"
         )
+
+
+# ── Bug fix: /api/logs/download endpoint ─────────────────────────────────────
+class TestDashboardLogsDownload:
+    """/api/logs/download must return the log file when it exists and 404 JSON when it doesn't."""
+
+    def test_download_returns_file_response_when_log_exists(self, tmp_path):
+        """When LOG_FILE exists, /api/logs/download returns FileResponse with text/plain."""
+        import alpaca_dashboard as ds
+        from fastapi.testclient import TestClient
+        from fastapi.responses import FileResponse
+
+        log_file = tmp_path / "trading_engine.log"
+        log_file.write_text("2026-05-29 INFO test log line\n")
+
+        original = ds.LOG_FILE
+        try:
+            ds.LOG_FILE = str(log_file)
+            client = TestClient(ds.app)
+            resp = client.get("/api/logs/download")
+            assert resp.status_code == 200
+            assert "text/plain" in resp.headers.get("content-type", "")
+            assert "trading_engine_" in resp.headers.get("content-disposition", "")
+            assert resp.text == "2026-05-29 INFO test log line\n"
+        finally:
+            ds.LOG_FILE = original
+
+    def test_download_returns_404_when_log_missing(self, tmp_path):
+        """When LOG_FILE does not exist, /api/logs/download returns 404 JSON."""
+        import alpaca_dashboard as ds
+        from fastapi.testclient import TestClient
+
+        original = ds.LOG_FILE
+        try:
+            ds.LOG_FILE = str(tmp_path / "nonexistent.log")
+            client = TestClient(ds.app)
+            resp = client.get("/api/logs/download")
+            assert resp.status_code == 404
+            body = resp.json()
+            assert body.get("error") == "Log file not found"
+        finally:
+            ds.LOG_FILE = original
+
+    def test_download_endpoint_in_source(self):
+        """alpaca_dashboard.py must define the /api/logs/download GET endpoint."""
+        import os
+        path = os.path.join(os.path.dirname(__file__), '..', 'alpaca_dashboard.py')
+        with open(path) as f:
+            source = f.read()
+        assert '@app.get("/api/logs/download")' in source, (
+            "alpaca_dashboard.py must define the /api/logs/download endpoint"
+        )
+        assert 'FileResponse' in source, (
+            "alpaca_dashboard.py must return FileResponse for the log download"
+        )

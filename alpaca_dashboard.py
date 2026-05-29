@@ -25,7 +25,7 @@ import pytz
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from src.config import (
     STATE_FILE, DASHBOARD_FILE, EQUITY_HIST_FILE, LOG_FILE,
@@ -247,6 +247,15 @@ def get_logs(n: int = 100):
         return JSONResponse({"lines": [], "error": "Log file not found"})
     except OSError as e:
         return JSONResponse({"lines": [], "error": str(e)})
+
+
+@app.get("/api/logs/download")
+def download_logs():
+    """Download the full trading engine log file as plain text."""
+    if os.path.exists(LOG_FILE):
+        filename = f"trading_engine_{datetime.now(pytz.timezone('US/Eastern')).strftime('%Y%m%d')}.log"
+        return FileResponse(LOG_FILE, filename=filename, media_type="text/plain")
+    return JSONResponse({"error": "Log file not found"}, status_code=404)
 
 
 # ── Dashboard HTML ────────────────────────────────────────────────────────────
