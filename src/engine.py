@@ -644,7 +644,8 @@ class VelocityEngine:
                 feed=ALPACA_DATA_FEED,
             )
             bars = self.data_client.get_stock_bars(req)
-            df   = bars[symbol].df.reset_index(drop=True)
+            # bars[symbol] returns List[Bar], not a BarSet — build DataFrame from the list
+            df   = pd.DataFrame([b.model_dump() for b in bars[symbol]]).reset_index(drop=True)
             # Normalise column names to lowercase so apply_all() works
             df.columns = [c.lower() for c in df.columns]
             return df[['open', 'high', 'low', 'close', 'volume']]
@@ -672,9 +673,12 @@ class VelocityEngine:
                 feed=ALPACA_DATA_FEED,
             )
             bars = self.data_client.get_stock_bars(req)
-            df   = bars[symbol].df
-            if df.empty:
+            # bars[symbol] returns List[Bar], not a BarSet — build DataFrame from the list
+            bar_list = bars[symbol]
+            if not bar_list:
                 return None
+            df = pd.DataFrame([b.model_dump() for b in bar_list])
+            df.columns = [c.lower() for c in df.columns]
             return float(df['high'].iloc[-1])
         except Exception as e:
             logger.debug(f"DATA: ORB fetch failed for {symbol}: {e}")

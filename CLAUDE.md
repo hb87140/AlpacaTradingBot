@@ -826,6 +826,29 @@ Tests: `TestDashboardLogsDownload.test_download_returns_file_response_when_log_e
 `test_download_returns_404_when_log_missing`,
 `test_download_endpoint_in_source`
 
+## Fixed Bugs (Session 29 — May 2026)
+
+### 88. `bars[symbol].df` Crashed — `BarSet.__getitem__` Returns `List[Bar]`, Not a `BarSet`
+
+`_fetch_daily_bars` and `_fetch_orb_high` called `bars[symbol].df` where `bars` is a
+`BarSet` returned by `get_stock_bars`. `BarSet.__getitem__` returns `self.data[symbol]`
+which is `List[Bar]` — a plain Python list. The `.df` property lives on the `BarSet` itself
+(via `TimeSeriesMixin`), not on the list, causing `AttributeError: 'list' object has no
+attribute 'df'` for every single symbol on every scan cycle. Zero signals were produced.
+Fix: replaced `bars[symbol].df` with `pd.DataFrame([b.model_dump() for b in bars[symbol]])`
+in both `_fetch_daily_bars` and `_fetch_orb_high`.
+
+### 89. `get_stock_most_actives` Removed from `StockHistoricalDataClient`
+
+`get_most_actives` in `src/scanner.py` called `data_client.get_stock_most_actives(request)`
+on a `StockHistoricalDataClient` instance. The method no longer exists on that client —
+it was moved to `ScreenerClient` as `get_most_actives`. Caused
+`AttributeError: 'StockHistoricalDataClient' object has no attribute 'get_stock_most_actives'`
+on every scan cycle, silently dropping the entire most-actives half of the candidate pool.
+Fix: changed `get_most_actives` function signature from `data_client: StockHistoricalDataClient`
+to `screener_client: ScreenerClient`, and the call from `data_client.get_stock_most_actives`
+to `screener_client.get_most_actives`. Updated `get_candidates` to pass `screener_client`.
+
 ## Survivorship Bias Warning (Backtest)
 The backtest universe is current NASDAQ/NYSE listings. Bankrupt/delisted tickers from the
 backtest window are absent. Momentum/breakout strategies are particularly sensitive to this

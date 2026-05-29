@@ -54,11 +54,11 @@ def get_top_gainers(screener_client: ScreenerClient, top: int = ALPACA_SCANNER_T
         return []
 
 
-def get_most_actives(data_client: StockHistoricalDataClient, top: int = ALPACA_SCANNER_TOP) -> List[str]:
+def get_most_actives(screener_client: ScreenerClient, top: int = ALPACA_SCANNER_TOP) -> List[str]:
     """Return ticker symbols from Alpaca's most-actives screener, sorted by volume."""
     try:
         request  = MostActivesRequest(top=top, by='volume')
-        response = data_client.get_stock_most_actives(request)
+        response = screener_client.get_most_actives(request)
         symbols  = [item.symbol for item in response.most_actives]
         logger.debug(f"SCANNER: most-actives returned {len(symbols)} symbols")
         return symbols
@@ -78,7 +78,7 @@ def get_candidates(
     a large percentage gain (e.g., early-session breakouts).
     """
     gainers = get_top_gainers(screener_client)
-    actives = get_most_actives(data_client)
+    actives = get_most_actives(screener_client)
 
     seen:   set       = set()
     result: List[str] = []
