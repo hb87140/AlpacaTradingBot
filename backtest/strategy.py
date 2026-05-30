@@ -304,9 +304,9 @@ class VelocityBacktest:
 
     # ── Cache helpers ─────────────────────────────────────────────────────────
     def _cache_path(self) -> str:
+        # min_dollar_vol excluded: it's a scan-time filter; raw OHLCV is identical for all thresholds.
         key = (
             f"{self._data_start}_{self.end}"
-            f"_dv{int(self._min_dollar_vol/1e6)}"
             f"_rv{self._rvol_min}"
         )
         h   = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()[:10]
