@@ -63,15 +63,15 @@ def parse_args():
     p.add_argument("--break-even-pct",  default=BREAK_EVEN_PCT,       type=float,
                    help=f"Break-even stop activation threshold (default: {break_even_default})")
     p.add_argument("--profit-min",        default=PROFIT_MIN_THRESHOLD, type=float,
-                   help=f"Velocity exit: min profit threshold (default: {PROFIT_MIN_THRESHOLD:.0%})")
+                   help=f"Velocity exit: min profit threshold (default: {PROFIT_MIN_THRESHOLD*100:.0f}%%)")
     p.add_argument("--friday-min-profit", default=FRIDAY_MIN_PROFIT_PCT, type=float,
-                   help=f"Friday close: exit if profit < this pct (default: {FRIDAY_MIN_PROFIT_PCT:.0%}); set 0 to disable")
+                   help=f"Friday close: exit if profit < this pct (default: {FRIDAY_MIN_PROFIT_PCT*100:.0f}%%); set 0 to disable")
     p.add_argument("--chandelier-mult",  default=CHANDELIER_MULT,    type=float,
                    help=f"Chandelier ATR multiplier (default: {CHANDELIER_MULT})")
     p.add_argument("--donchian-period",  default=DONCHIAN_PERIOD,          type=int,
                    help=f"Donchian channel lookback period (default: {DONCHIAN_PERIOD})")
     p.add_argument("--donchian-tol",     default=BACKTEST_DONCHIAN_TOL_PCT, type=float,
-                   help=f"Donchian floor tolerance %% (default: {BACKTEST_DONCHIAN_TOL_PCT:.0%})")
+                   help=f"Donchian floor tolerance (default: {BACKTEST_DONCHIAN_TOL_PCT*100:.0f}%%)")
     p.add_argument("--rsi-oversold",     default=RSI_OVERSOLD_THRESHOLD,   type=float,
                    help=f"RSI oversold threshold (default: {RSI_OVERSOLD_THRESHOLD})")
     p.add_argument("--rsi-bounce-max",   default=RSI_BOUNCE_MAX,           type=float,
