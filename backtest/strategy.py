@@ -188,6 +188,7 @@ class VelocityBacktest:
         profit_min_threshold: float = PROFIT_MIN_THRESHOLD,
         friday_min_profit:    float = FRIDAY_MIN_PROFIT_PCT,
         chandelier_mult:      float = CHANDELIER_MULT,
+        donchian_period:      int   = DONCHIAN_PERIOD,
         commission_per_order: float = BACKTEST_COMMISSION_PER_ORDER,
         use_cache:            bool  = True,
     ):
@@ -208,6 +209,7 @@ class VelocityBacktest:
         self._profit_min_threshold = profit_min_threshold
         self._friday_min_profit    = friday_min_profit
         self._chandelier_mult      = chandelier_mult
+        self._donchian_period      = donchian_period
         self._round_trip_cost      = max(0.0, float(commission_per_order)) * 2.0
         self._use_cache            = use_cache
 
@@ -362,7 +364,7 @@ class VelocityBacktest:
                     continue
                 df = apply_all(
                     df, RSI_PERIOD, ATR_PERIOD, MA_FAST, MA_SLOW,
-                    donchian_period=DONCHIAN_PERIOD
+                    donchian_period=self._donchian_period
                 )
                 df['RSI_PREV']         = df['RSI'].shift(1)
                 df['RSI_MIN_LOOKBACK'] = df['RSI'].shift(1).rolling(RSI_OVERSOLD_LOOKBACK).min()

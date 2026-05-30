@@ -38,7 +38,7 @@ from src.config import (
     BACKTEST_RVOL_MIN, BREAK_EVEN_PCT, SCAN_MIN_SCORE,
     CHANDELIER_MULT, CHANDELIER_PERIOD, PROFIT_MIN_THRESHOLD,
     BACKTEST_HOLD_BARS, BACKTEST_SLIPPAGE, BACKTEST_EXIT_SLIPPAGE,
-    MAX_POSITIONS_CAP, MIN_BUCKET_SIZE, FRIDAY_MIN_PROFIT_PCT,
+    MAX_POSITIONS_CAP, MIN_BUCKET_SIZE, FRIDAY_MIN_PROFIT_PCT, DONCHIAN_PERIOD,
 )
 
 
@@ -65,8 +65,10 @@ def parse_args():
                    help=f"Velocity exit: min profit threshold (default: {PROFIT_MIN_THRESHOLD:.0%})")
     p.add_argument("--friday-min-profit", default=FRIDAY_MIN_PROFIT_PCT, type=float,
                    help=f"Friday close: exit if profit < this pct (default: {FRIDAY_MIN_PROFIT_PCT:.0%}); set 0 to disable")
-    p.add_argument("--chandelier-mult", default=CHANDELIER_MULT,     type=float,
+    p.add_argument("--chandelier-mult",  default=CHANDELIER_MULT,    type=float,
                    help=f"Chandelier ATR multiplier (default: {CHANDELIER_MULT})")
+    p.add_argument("--donchian-period",  default=DONCHIAN_PERIOD,    type=int,
+                   help=f"Donchian channel lookback period (default: {DONCHIAN_PERIOD})")
     p.add_argument("--no-spy-filter",   action="store_true",
                    help="Disable SPY regime filter (allow entries in bear market)")
     p.add_argument("--vix-filter",      action="store_true",
@@ -113,6 +115,7 @@ def main():
         profit_min_threshold = args.profit_min,
         friday_min_profit  = args.friday_min_profit,
         chandelier_mult    = args.chandelier_mult,
+        donchian_period    = args.donchian_period,
         use_spy_filter     = not args.no_spy_filter,
         use_vix_filter     = args.vix_filter,
         use_cache          = not args.no_cache,
