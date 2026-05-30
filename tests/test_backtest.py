@@ -87,9 +87,10 @@ class TestEntrySignal:
     Positional args:      prev_rsi, rvol, rvol_min
     """
 
-    def _row(self, close=100.0, donch_lower=99.8, rsi=38.0, rsi_min_lookback=28.0):
-        """Default passing row: price within 0.2% of lower band, RSI was oversold."""
+    def _row(self, close=100.0, open_=99.5, donch_lower=99.8, rsi=38.0, rsi_min_lookback=28.0):
+        """Default passing row: green candle (open < close), within 0.2% of Donchian floor, RSI was oversold."""
         return pd.Series({
+            'open':            open_,
             'close':           close,
             'DONCH_LOWER':     donch_lower,
             'RSI':             rsi,
@@ -190,6 +191,38 @@ class TestEntrySignal:
             self._row(), prev_rsi=35.0, rvol=BACKTEST_RVOL_MIN + 0.5,
             rvol_min=BACKTEST_RVOL_MIN,
             flags={'use_rsi_delta': True, 'use_rvol': True})
+
+    def test_fails_red_candle_at_floor(self):
+        # close < open (red candle) — day-strength not confirmed, entry rejected
+        assert not VelocityBacktest._entry_signal(
+            self._row(close=99.5, open_=100.2), prev_rsi=35.0,
+            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
+
+    def test_fails_doji_candle_at_floor(self):
+        # close == open (doji) — treated as red candle (not strictly green), rejected
+        assert not VelocityBacktest._entry_signal(
+            self._row(close=100.0, open_=100.0), prev_rsi=35.0,
+            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
+
+    def test_passes_green_candle_at_floor(self):
+        # close > open (green candle) — day-strength confirmed, passes
+        assert VelocityBacktest._entry_signal(
+            self._row(close=100.0, open_=99.5), prev_rsi=35.0,
+            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
+
+    def test_passes_when_open_missing_from_row(self):
+        # open field absent → fail-open (don't silently block entries with incomplete data)
+        row = self._row()
+        row = row.drop('open')
+        assert VelocityBacktest._entry_signal(
+            row, prev_rsi=35.0, rvol=BACKTEST_RVOL_MIN + 0.5,
+            rvol_min=BACKTEST_RVOL_MIN)
+
+    def test_green_candle_filter_in_source(self):
+        import inspect, backtest.strategy as bs
+        src = inspect.getsource(bs.VelocityBacktest._entry_signal)
+        assert "row['close']" in src and "open_" in src, \
+            "_entry_signal must contain the green-candle (close > open) check"
 
 
 # ── Metrics ───────────────────────────────────────────────────────────────────

@@ -35,10 +35,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 from backtest.strategy import VelocityBacktest
 from src.config import (
     BACKTEST_SCAN_COUNT, BACKTEST_INITIAL_CAPITAL, BACKTEST_COMMISSION_PER_ORDER,
-    BACKTEST_RVOL_MIN, BREAK_EVEN_PCT,
+    BACKTEST_RVOL_MIN, BREAK_EVEN_PCT, SCAN_MIN_SCORE,
     CHANDELIER_MULT, CHANDELIER_PERIOD, PROFIT_MIN_THRESHOLD,
     BACKTEST_HOLD_BARS, BACKTEST_SLIPPAGE, BACKTEST_EXIT_SLIPPAGE,
-    MAX_POSITIONS_CAP, MIN_BUCKET_SIZE,
+    MAX_POSITIONS_CAP, MIN_BUCKET_SIZE, FRIDAY_MIN_PROFIT_PCT,
 )
 
 
@@ -57,8 +57,14 @@ def parse_args():
                    help=f"Trading bars before velocity-exit check (default: {BACKTEST_HOLD_BARS} = matches live HOLD_TRADING_BARS=2)")
     p.add_argument("--rvol",            default=BACKTEST_RVOL_MIN,    type=float,
                    help=f"Daily RVOL threshold (default: {BACKTEST_RVOL_MIN}×)")
+    p.add_argument("--min-score",       default=SCAN_MIN_SCORE,       type=float,
+                   help=f"Minimum composite score gate 0-100 (default: {SCAN_MIN_SCORE:.0f})")
     p.add_argument("--break-even-pct",  default=BREAK_EVEN_PCT,       type=float,
                    help=f"Break-even stop activation threshold (default: {break_even_default})")
+    p.add_argument("--friday-min-profit", default=FRIDAY_MIN_PROFIT_PCT, type=float,
+                   help=f"Friday close: exit if profit < this pct (default: {FRIDAY_MIN_PROFIT_PCT:.0%}); set 0 to disable")
+    p.add_argument("--chandelier-mult", default=CHANDELIER_MULT,     type=float,
+                   help=f"Chandelier ATR multiplier (default: {CHANDELIER_MULT})")
     p.add_argument("--no-spy-filter",   action="store_true",
                    help="Disable SPY regime filter (allow entries in bear market)")
     p.add_argument("--vix-filter",      action="store_true",
@@ -81,6 +87,7 @@ def main():
     print(f"  Max pos       : {MAX_POSITIONS_CAP} cap  |  Dynamic max = floor(equity / ${MIN_BUCKET_SIZE:.0f}/slot)  |  Initial slots={_init_slots}, bucket≈{_init_bucket_str}")
     print("  Entry rules   : 12-filter production screener")
     print(f"  RVOL min      : {args.rvol:.1f}× (daily close proxy)")
+    print(f"  Min score     : {args.min_score:.0f}/100 composite gate")
     print(f"  Exit          : Chandelier (ATR{CHANDELIER_PERIOD}×{CHANDELIER_MULT}) + 7% hard stop + {args.break_even_pct:.0%} break-even")
     print(f"  Velocity exit : profit_min {PROFIT_MIN_THRESHOLD:.0%} after {args.hold_bars} bars")
     print(f"  Hold bars     : {args.hold_bars} trading days before velocity check")
@@ -92,17 +99,20 @@ def main():
     print()
 
     bt = VelocityBacktest(
-        start          = args.start,
-        end            = args.end,
-        capital        = args.capital,
-        scan_count     = args.scan_count,
+        start              = args.start,
+        end                = args.end,
+        capital            = args.capital,
+        scan_count         = args.scan_count,
         commission_per_order = args.commission_per_order,
-        hold_bars      = args.hold_bars,
-        rvol_min       = args.rvol,
-        break_even_pct = args.break_even_pct,
-        use_spy_filter = not args.no_spy_filter,
-        use_vix_filter = args.vix_filter,
-        use_cache      = not args.no_cache,
+        hold_bars          = args.hold_bars,
+        rvol_min           = args.rvol,
+        min_score          = args.min_score,
+        break_even_pct     = args.break_even_pct,
+        friday_min_profit  = args.friday_min_profit,
+        chandelier_mult    = args.chandelier_mult,
+        use_spy_filter     = not args.no_spy_filter,
+        use_vix_filter     = args.vix_filter,
+        use_cache          = not args.no_cache,
     )
     result = bt.run()
     VelocityBacktest.print_report(result, capital=args.capital)

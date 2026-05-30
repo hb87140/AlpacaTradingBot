@@ -183,8 +183,10 @@ class VelocityBacktest:
         use_spy_filter: bool  = True,
         use_vix_filter: bool  = False,
         rvol_min:             float = BACKTEST_RVOL_MIN,
+        min_score:            float = SCAN_MIN_SCORE,
         break_even_pct:       float = BREAK_EVEN_PCT,
         profit_min_threshold: float = PROFIT_MIN_THRESHOLD,
+        friday_min_profit:    float = FRIDAY_MIN_PROFIT_PCT,
         chandelier_mult:      float = CHANDELIER_MULT,
         commission_per_order: float = BACKTEST_COMMISSION_PER_ORDER,
         use_cache:            bool  = True,
@@ -201,8 +203,10 @@ class VelocityBacktest:
         self._use_spy_filter       = use_spy_filter
         self._use_vix_filter       = use_vix_filter
         self._rvol_min             = rvol_min
+        self._min_score            = min_score
         self._break_even_pct       = break_even_pct
         self._profit_min_threshold = profit_min_threshold
+        self._friday_min_profit    = friday_min_profit
         self._chandelier_mult      = chandelier_mult
         self._round_trip_cost      = max(0.0, float(commission_per_order)) * 2.0
         self._use_cache            = use_cache
@@ -284,7 +288,6 @@ class VelocityBacktest:
             f"{self._data_start}_{self.end}"
             f"_dv{int(self._min_dollar_vol/1e6)}"
             f"_rv{self._rvol_min}"
-            f"_ch{self._chandelier_mult}"
         )
         h   = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()[:10]
         os.makedirs(_CACHE_DIR, exist_ok=True)
@@ -492,7 +495,7 @@ class VelocityBacktest:
             liq_score = vol_pts   # spread half unavailable in daily data
 
             score = donchian_score + rvol_score + rsi_score + liq_score
-            if score < SCAN_MIN_SCORE:
+            if score < self._min_score:
                 continue
             scored.append((sym, score, rvol))
 
@@ -543,6 +546,12 @@ class VelocityBacktest:
 
         # RVOL confirmation
         if rvol < rvol_min:
+            return False
+
+        # Day-strength: green candle required (close > open — daily analog of check_day_strength)
+        # Skip when open is unavailable (fail-open: don't silently block all entries)
+        open_ = row.get('open')
+        if open_ is not None and not pd.isna(open_) and float(row['close']) <= float(open_):
             return False
 
         return True
@@ -705,7 +714,7 @@ class VelocityBacktest:
                     # not at the stop level. Using min() prevents the optimistic
                     # assumption that we always filled exactly at the stop price.
                     exit_price  = round(min(float(row['open']), effective_stop), 4)
-                elif pd.Timestamp(today).dayofweek == 4 and profit_pct < FRIDAY_MIN_PROFIT_PCT:
+                elif pd.Timestamp(today).dayofweek == 4 and profit_pct < self._friday_min_profit:
                     # Friday afternoon close: market order — apply exit slippage.
                     exit_reason = "friday_close"
                     exit_price  = round(float(row['close']) * (1 - BACKTEST_EXIT_SLIPPAGE), 4)
