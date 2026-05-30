@@ -74,7 +74,7 @@ from src.config import (
     BACKTEST_HOLD_BARS, BACKTEST_SLIPPAGE, BACKTEST_EXIT_SLIPPAGE,
     VOL_MULT_FRIDAY, FRIDAY_MIN_PROFIT_PCT,
     SCAN_MIN_SCORE, BUCKET_CASH_PCT,
-    DONCHIAN_PERIOD, BACKTEST_DONCHIAN_TOL_PCT,
+    DONCHIAN_PERIOD, BACKTEST_DONCHIAN_TOL_PCT, BACKTEST_MIN_BODY_PCT,
     RSI_OVERSOLD_THRESHOLD, RSI_OVERSOLD_LOOKBACK, RSI_BOUNCE_MAX,
     SPY_EMA_PERIOD, SPY_REGIME_SIZE_CUT, SPY_REGIME_RVOL_MULT,
     SCORE_DONCHIAN_MAX, SCORE_RVOL_MAX, SCORE_RSI_DELTA_MAX, SCORE_LIQUIDITY_MAX,
@@ -548,11 +548,13 @@ class VelocityBacktest:
         if rvol < rvol_min:
             return False
 
-        # Day-strength: green candle required (close > open — daily analog of check_day_strength)
-        # Skip when open is unavailable (fail-open: don't silently block all entries)
+        # Day-strength: meaningful green candle required (close >= 0.5% above open)
+        # Requires genuine buying pressure, not a doji or barely-green candle.
+        # Skip when open is unavailable (fail-open: don't silently block all entries).
         open_ = row.get('open')
-        if open_ is not None and not pd.isna(open_) and float(row['close']) <= float(open_):
-            return False
+        if open_ is not None and not pd.isna(open_) and float(open_) > 0:
+            if float(row['close']) / float(open_) < 1.0 + BACKTEST_MIN_BODY_PCT:
+                return False
 
         return True
 

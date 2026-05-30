@@ -198,16 +198,28 @@ class TestEntrySignal:
             self._row(close=99.5, open_=100.2), prev_rsi=35.0,
             rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
-    def test_fails_doji_candle_at_floor(self):
-        # close == open (doji) — treated as red candle (not strictly green), rejected
+    def test_fails_weak_green_candle_below_min_body(self):
+        # close/open = 100.1/100.0 = 0.1% < BACKTEST_MIN_BODY_PCT (0.5%) — rejected
+        from src.config import BACKTEST_MIN_BODY_PCT
+        open_price = 100.0
+        close_price = open_price * (1 + BACKTEST_MIN_BODY_PCT * 0.2)  # 0.2× threshold
         assert not VelocityBacktest._entry_signal(
-            self._row(close=100.0, open_=100.0), prev_rsi=35.0,
+            self._row(close=close_price, open_=open_price), prev_rsi=35.0,
             rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
-    def test_passes_green_candle_at_floor(self):
-        # close > open (green candle) — day-strength confirmed, passes
+    def test_passes_green_candle_at_min_body_threshold(self):
+        # close/open exactly at BACKTEST_MIN_BODY_PCT — just passes
+        from src.config import BACKTEST_MIN_BODY_PCT
+        open_price = 100.0
+        close_price = open_price * (1.0 + BACKTEST_MIN_BODY_PCT)
         assert VelocityBacktest._entry_signal(
-            self._row(close=100.0, open_=99.5), prev_rsi=35.0,
+            self._row(close=close_price, open_=open_price), prev_rsi=35.0,
+            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
+
+    def test_passes_strong_green_candle_at_floor(self):
+        # close=100, open=99.0 → 1% body, well above 0.5% threshold
+        assert VelocityBacktest._entry_signal(
+            self._row(close=100.0, open_=99.0), prev_rsi=35.0,
             rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
     def test_passes_when_open_missing_from_row(self):
@@ -221,8 +233,8 @@ class TestEntrySignal:
     def test_green_candle_filter_in_source(self):
         import inspect, backtest.strategy as bs
         src = inspect.getsource(bs.VelocityBacktest._entry_signal)
-        assert "row['close']" in src and "open_" in src, \
-            "_entry_signal must contain the green-candle (close > open) check"
+        assert "BACKTEST_MIN_BODY_PCT" in src, \
+            "_entry_signal must use BACKTEST_MIN_BODY_PCT for the green-candle body check"
 
 
 # ── Metrics ───────────────────────────────────────────────────────────────────

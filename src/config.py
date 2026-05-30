@@ -84,6 +84,7 @@ RSI_BOUNCE_MAX         = 50     # RSI at entry must not exceed this (avoid suppo
 
 # Day-strength gate (confirms price is recovering, not fading)
 DAY_STRENGTH_OPEN_PCT  = 0.005  # price must be ≥ 0.5% above today's open
+BACKTEST_MIN_BODY_PCT  = 0.005  # daily close must be ≥ 0.5% above open (meaningful green candle)
 
 # SPY regime (soft — bearish regime cuts size + tightens RVOL, does not block)
 SPY_EMA_PERIOD      = 50        # EMA period used for SPY regime check
