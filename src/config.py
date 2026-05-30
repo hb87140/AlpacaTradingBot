@@ -84,7 +84,7 @@ RSI_BOUNCE_MAX         = 60     # RSI at entry must not exceed this (avoid suppo
 
 # Day-strength gate (confirms price is recovering, not fading)
 DAY_STRENGTH_OPEN_PCT  = 0.005  # price must be ≥ 0.5% above today's open
-BACKTEST_MIN_BODY_PCT  = 0.005  # daily close must be ≥ 0.5% above open (meaningful green candle)
+BACKTEST_MIN_BODY_PCT  = 0.002  # daily close must be ≥ 0.2% above open (minimal green direction)
 
 # SPY regime (soft — bearish regime cuts size + tightens RVOL, does not block)
 # Disabled for Donchian bounce: mean-reversion works better without regime filter;

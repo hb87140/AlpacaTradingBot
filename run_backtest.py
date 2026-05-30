@@ -43,6 +43,7 @@ from src.config import (
     RSI_MIN_DELTA, RSI_OVERSOLD_LOOKBACK,
     RISK_PER_TRADE_PCT, HARD_STOP_PCT,
     SCAN_MIN_DOLLAR_VOL, BACKTEST_MIN_BODY_PCT,
+    SCAN_MIN_PRICE, SCAN_MIN_VOLUME,
 )
 
 
@@ -95,6 +96,10 @@ def parse_args():
                    help=f"Minimum 20-day avg dollar volume (default: ${SCAN_MIN_DOLLAR_VOL/1e6:.0f}M)")
     p.add_argument("--min-body-pct",    default=BACKTEST_MIN_BODY_PCT, type=float,
                    help=f"Day-strength: min candle body pct close/open-1 (default: {BACKTEST_MIN_BODY_PCT:.1%}; 0=disable)")
+    p.add_argument("--min-price",       default=SCAN_MIN_PRICE, type=float,
+                   help=f"Minimum stock price filter (default: ${SCAN_MIN_PRICE:.0f})")
+    p.add_argument("--min-volume",      default=SCAN_MIN_VOLUME, type=float,
+                   help=f"Minimum 20-day avg share volume (default: {SCAN_MIN_VOLUME/1e6:.0f}M)")
     p.add_argument("--vix-filter",      action="store_true",
                    help="Enable VIX > 35 regime gate")
     p.add_argument("--trades",          action="store_true",
@@ -150,6 +155,8 @@ def main():
         hard_stop_pct      = args.hard_stop_pct,
         min_dollar_vol     = args.min_dollar_vol,
         min_body_pct       = args.min_body_pct,
+        min_price          = args.min_price,
+        min_volume         = args.min_volume,
         use_spy_filter     = args.spy_filter,
         use_vix_filter     = args.vix_filter,
         use_cache          = not args.no_cache,
