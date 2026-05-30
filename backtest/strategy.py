@@ -175,6 +175,7 @@ class VelocityBacktest:
         end:            str   = "2026-05-01",
         capital:        float = BACKTEST_INITIAL_CAPITAL,
         max_pos:        int   = MAX_POSITIONS_CAP,
+        min_bucket_size: float = MIN_BUCKET_SIZE,
         hold_bars:      int   = BACKTEST_HOLD_BARS,
         scan_count:     int   = BACKTEST_SCAN_COUNT,
         min_price:      float = SCAN_MIN_PRICE,
@@ -205,6 +206,7 @@ class VelocityBacktest:
         self.end                     = end
         self.capital                 = capital
         self.max_pos                 = max_pos
+        self._min_bucket_size        = min_bucket_size
         self.hold_bars               = hold_bars
         self._scan_count             = scan_count
         self._min_price              = min_price
@@ -835,8 +837,8 @@ class VelocityBacktest:
             # - maximum simultaneous positions compounds with total equity;
             # - new entry slots are additionally constrained by settled cash.
             dynamic_max_pos = (
-                min(int(equity_mtm / MIN_BUCKET_SIZE), self.max_pos)
-                if equity_mtm >= MIN_BUCKET_SIZE else 0
+                min(int(equity_mtm / self._min_bucket_size), self.max_pos)
+                if equity_mtm >= self._min_bucket_size else 0
             )
 
             if past_start:
@@ -870,7 +872,7 @@ class VelocityBacktest:
 
                 for sym, rvol, row, prev_rsi in _today_cands:
                     capacity_slots = max(0, dynamic_max_pos - len(open_positions))
-                    cash_slots = int(settled_cash / MIN_BUCKET_SIZE) if settled_cash >= MIN_BUCKET_SIZE else 0
+                    cash_slots = int(settled_cash / self._min_bucket_size) if settled_cash >= self._min_bucket_size else 0
                     entry_slots = min(capacity_slots, cash_slots)
                     if sym in open_positions or entry_slots <= 0:
                         if sym not in open_positions:

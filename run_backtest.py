@@ -54,6 +54,10 @@ def parse_args():
     p.add_argument("--end",             default=date.today().isoformat(), help="End date YYYY-MM-DD (default: today)")
     p.add_argument("--capital",         default=BACKTEST_INITIAL_CAPITAL, type=float,
                    help=f"Starting capital USD (default: ${BACKTEST_INITIAL_CAPITAL:,.0f})")
+    p.add_argument("--max-pos",         default=MAX_POSITIONS_CAP,        type=int,
+                   help=f"Max simultaneous positions cap (default: {MAX_POSITIONS_CAP})")
+    p.add_argument("--bucket-size",     default=MIN_BUCKET_SIZE,          type=float,
+                   help=f"Min equity per position slot in $ (default: ${MIN_BUCKET_SIZE:.0f})")
     p.add_argument("--scan-count",      default=BACKTEST_SCAN_COUNT,      type=int,
                    help="Top-N daily scanner picks; 0 means all scanner-passed stocks (default: all)")
     p.add_argument("--commission-per-order", default=BACKTEST_COMMISSION_PER_ORDER, type=float,
@@ -135,6 +139,8 @@ def main():
         start              = args.start,
         end                = args.end,
         capital            = args.capital,
+        max_pos            = args.max_pos,
+        min_bucket_size    = args.bucket_size,
         scan_count         = args.scan_count,
         commission_per_order = args.commission_per_order,
         hold_bars          = args.hold_bars,
