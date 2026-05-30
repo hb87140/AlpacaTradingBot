@@ -123,8 +123,8 @@ class TestExpertFilter:
     exactly one field of the baseline ctx to verify the engine blocks that
     specific failing condition.
 
-    Base ctx: price=100 (0.2% above donchian_lower=99.8), rsi=38/prev=35 (Δ=3.0),
-              rsi_history has values below oversold threshold=35, price 1% above open,
+    Base ctx: price=100 (0.2% above donchian_lower=99.8), rsi=42/prev=35 (Δ=7.0),
+              rsi_history has values below oversold threshold=40, price 1% above open,
               in upper 86% of intraday range, rvol=3.0, spread=0.2%, dol_vol=300M.
     """
 
@@ -133,9 +133,9 @@ class TestExpertFilter:
             # Donchian bounce fields
             'donchian_lower':  99.8,
             'donchian_upper':  110.0,
-            # RSI momentum: delta=3.0 >= RSI_MIN_DELTA; history has oversold values
-            'rsi':              38.0,   'rsi_prev':        35.0,
-            'rsi_history':     [28.0, 30.0, 32.0, 35.0, 38.0],
+            # RSI momentum: delta=7.0 >= RSI_MIN_DELTA; history has oversold values
+            'rsi':              42.0,   'rsi_prev':        35.0,
+            'rsi_history':     [28.0, 30.0, 32.0, 35.0, 42.0],
             # Day strength: 1% above open, in upper 86% of range
             'intraday_open':   99.0,
             'intraday_high':  100.5,
@@ -682,8 +682,8 @@ class TestBuyOrderTif:
         ctx = {
             'live_price': 100.0, 'close': 99.5,
             'donchian_lower': 99.8, 'donchian_upper': 110.0,
-            'rsi': 38.0, 'rsi_prev': 35.0,
-            'rsi_history': [28.0, 30.0, 32.0, 35.0, 38.0],
+            'rsi': 42.0, 'rsi_prev': 35.0,
+            'rsi_history': [28.0, 30.0, 32.0, 35.0, 42.0],
             'intraday_open': 99.0, 'intraday_high': 100.5, 'intraday_low': 97.0,
             'atr': 2.0, 'atr_chandelier': 2.0,
             'rvol': 3.0, 'spread_pct': 0.002,
@@ -1581,8 +1581,8 @@ class TestExitRecheckBetweenEntries:
         signals_ctx = {
             'live_price': 100.0, 'close': 99.5, 'ask': 100.1,
             'donchian_lower': 99.8, 'donchian_upper': 110.0,
-            'rsi': 38.0, 'rsi_prev': 35.0,
-            'rsi_history': [28.0, 30.0, 32.0, 35.0, 38.0],
+            'rsi': 42.0, 'rsi_prev': 35.0,
+            'rsi_history': [28.0, 30.0, 32.0, 35.0, 42.0],
             'intraday_open': 99.0, 'intraday_high': 100.5, 'intraday_low': 97.0,
             'atr': 2.0, 'atr_chandelier': 2.0,
             'rvol': 3.0, 'spread_pct': 0.002,

@@ -1132,10 +1132,10 @@ class TestTwelveRuleFilter:
             # Donchian: price 0.2% above lower band (within 0.5% tolerance)
             'donchian_lower':   99.8,
             'donchian_upper':  110.0,
-            # RSI momentum: delta=3.0 >= RSI_MIN_DELTA, history has oversold values
-            'rsi':              38.0,
+            # RSI momentum: delta=7.0 >= RSI_MIN_DELTA, history has values below threshold=40
+            'rsi':              42.0,
             'rsi_prev':         35.0,
-            'rsi_history':     [28.0, 30.0, 32.0, 35.0, 38.0],
+            'rsi_history':     [28.0, 30.0, 32.0, 35.0, 42.0],
             # Day strength: 1% above open, in upper 86% of intraday range
             'intraday_open':    99.0,
             'intraday_high':   100.5,

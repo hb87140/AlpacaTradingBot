@@ -1804,7 +1804,7 @@ class TestRsiDeltaGate:
         tc.get_order_by_id.return_value = filled
 
         engine = _make_engine(trading_client=tc)
-        rsi_prev = 35.0   # in bounce zone (35-50); rsi will be 35 + RSI_MIN_DELTA
+        rsi_prev = 37.0   # in bounce zone (40-55); rsi will be 37 + RSI_MIN_DELTA = 40.0
         rsi      = rsi_prev + RSI_MIN_DELTA
         ctx = _ctx(price=101.0, orb=100.0, rsi=rsi, rsi_prev=rsi_prev,
                    ma50=95.0, ma200=85.0)
