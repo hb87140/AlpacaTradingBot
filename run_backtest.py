@@ -54,7 +54,7 @@ def parse_args():
     p.add_argument("--commission-per-order", default=BACKTEST_COMMISSION_PER_ORDER, type=float,
                    help=f"Backtest commission assumption per order (default: ${BACKTEST_COMMISSION_PER_ORDER:.2f}; Alpaca is commission-free)")
     p.add_argument("--hold-bars",       default=BACKTEST_HOLD_BARS,   type=int,
-                   help=f"Trading bars before velocity-exit check (default: {BACKTEST_HOLD_BARS} = matches live HOLD_TRADING_BARS=2)")
+                   help=f"Trading bars before velocity-exit check (default: {BACKTEST_HOLD_BARS} = matches live HOLD_TRADING_BARS)")
     p.add_argument("--rvol",            default=BACKTEST_RVOL_MIN,    type=float,
                    help=f"Daily RVOL threshold (default: {BACKTEST_RVOL_MIN}×)")
     p.add_argument("--min-score",       default=SCAN_MIN_SCORE,       type=float,
