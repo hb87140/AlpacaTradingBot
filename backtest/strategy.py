@@ -295,6 +295,27 @@ class VelocityBacktest:
         os.makedirs(_CACHE_DIR, exist_ok=True)
         return os.path.join(_CACHE_DIR, f"bt_{h}.pkl")
 
+    _RAW_COLS = ['open', 'high', 'low', 'close', 'volume']
+
+    def _apply_indicators(self, raw: Dict[str, 'pd.DataFrame']) -> None:
+        """Apply all indicators to raw OHLCV frames and populate self._data."""
+        loaded = 0
+        for sym, df in raw.items():
+            try:
+                df = apply_all(
+                    df, RSI_PERIOD, ATR_PERIOD, MA_FAST, MA_SLOW,
+                    donchian_period=self._donchian_period
+                )
+                df['RSI_PREV']          = df['RSI'].shift(1)
+                df['RSI_MIN_LOOKBACK']  = df['RSI'].shift(1).rolling(RSI_OVERSOLD_LOOKBACK).min()
+                df['avg_vol_20']        = df['volume'].rolling(20).mean()
+                df['avg_dollar_vol_20'] = (df['close'] * df['volume']).rolling(20).mean()
+                self._data[sym] = df
+                loaded += 1
+            except Exception:
+                continue
+        print(f"  Indicators applied: {loaded:,} symbols.")
+
     def _try_load_cache(self) -> bool:
         path = self._cache_path()
         if not os.path.exists(path):
@@ -303,19 +324,31 @@ class VelocityBacktest:
             print(f"  Loading cached data from {path} …")
             with open(path, 'rb') as f:
                 cached = pickle.load(f)
-            self._data = cached.get('data', {})
-            print(f"  Loaded {len(self._data):,} symbols from cache.")
+            raw = cached.get('raw')
+            if raw is not None:
+                # New-format cache: raw OHLCV only — recompute indicators now.
+                print(f"  Loaded {len(raw):,} symbols from cache. Computing indicators …")
+                self._apply_indicators(raw)
+            else:
+                # Legacy cache: already indicator-enriched. Use as-is (period=20 assumed).
+                self._data = cached.get('data', {})
+                print(f"  Loaded {len(self._data):,} symbols from cache (legacy format).")
             return True
         except Exception as e:
             print(f"  Cache load failed ({e}), re-downloading …")
             return False
 
     def _save_cache(self) -> None:
+        """Save raw OHLCV to cache (indicator-free so any param set can reuse it)."""
         path = self._cache_path()
         try:
+            raw = {
+                sym: df[self._RAW_COLS].copy()
+                for sym, df in self._data.items()
+                if all(c in df.columns for c in self._RAW_COLS)
+            }
             with open(path, 'wb') as f:
-                pickle.dump({'data': self._data}, f,
-                            protocol=pickle.HIGHEST_PROTOCOL)
+                pickle.dump({'raw': raw}, f, protocol=pickle.HIGHEST_PROTOCOL)
             print(f"  Data cached → {path}")
         except Exception as e:
             print(f"  Cache save failed: {e}")
@@ -353,8 +386,8 @@ class VelocityBacktest:
         except Exception as e:
             raise RuntimeError(f"Data download failed: {e}")
 
-        loaded = 0
         single = len(tickers) == 1
+        raw_ohlcv: Dict[str, 'pd.DataFrame'] = {}
         for sym in tickers:
             try:
                 df = raw.copy() if single else raw[sym].copy()
@@ -362,22 +395,12 @@ class VelocityBacktest:
                 df = df[['open', 'high', 'low', 'close', 'volume']].dropna()
                 if len(df) < MIN_CANDLES + 5:
                     continue
-                df = apply_all(
-                    df, RSI_PERIOD, ATR_PERIOD, MA_FAST, MA_SLOW,
-                    donchian_period=self._donchian_period
-                )
-                df['RSI_PREV']         = df['RSI'].shift(1)
-                df['RSI_MIN_LOOKBACK'] = df['RSI'].shift(1).rolling(RSI_OVERSOLD_LOOKBACK).min()
-                df['avg_vol_20']       = df['volume'].rolling(20).mean()
-                df['avg_dollar_vol_20'] = (
-                    (df['close'] * df['volume']).rolling(20).mean()
-                )
-                self._data[sym] = df
-                loaded += 1
+                raw_ohlcv[sym] = df
             except Exception:
                 continue
 
-        print(f"  Loaded   : {loaded:,} symbols with ≥{MIN_CANDLES + 5} bars.")
+        print(f"  Parsed   : {len(raw_ohlcv):,} symbols with ≥{MIN_CANDLES + 5} bars.")
+        self._apply_indicators(raw_ohlcv)
         self._download_regime_data()
 
     def _download_regime_data(self) -> None:
