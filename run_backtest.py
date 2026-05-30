@@ -61,6 +61,8 @@ def parse_args():
                    help=f"Minimum composite score gate 0-100 (default: {SCAN_MIN_SCORE:.0f})")
     p.add_argument("--break-even-pct",  default=BREAK_EVEN_PCT,       type=float,
                    help=f"Break-even stop activation threshold (default: {break_even_default})")
+    p.add_argument("--profit-min",        default=PROFIT_MIN_THRESHOLD, type=float,
+                   help=f"Velocity exit: min profit threshold (default: {PROFIT_MIN_THRESHOLD:.0%})")
     p.add_argument("--friday-min-profit", default=FRIDAY_MIN_PROFIT_PCT, type=float,
                    help=f"Friday close: exit if profit < this pct (default: {FRIDAY_MIN_PROFIT_PCT:.0%}); set 0 to disable")
     p.add_argument("--chandelier-mult", default=CHANDELIER_MULT,     type=float,
@@ -89,7 +91,7 @@ def main():
     print(f"  RVOL min      : {args.rvol:.1f}× (daily close proxy)")
     print(f"  Min score     : {args.min_score:.0f}/100 composite gate")
     print(f"  Exit          : Chandelier (ATR{CHANDELIER_PERIOD}×{CHANDELIER_MULT}) + 7% hard stop + {args.break_even_pct:.0%} break-even")
-    print(f"  Velocity exit : profit_min {PROFIT_MIN_THRESHOLD:.0%} after {args.hold_bars} bars")
+    print(f"  Velocity exit : profit_min {args.profit_min:.0%} after {args.hold_bars} bars")
     print(f"  Hold bars     : {args.hold_bars} trading days before velocity check")
     print("  Position size : ATR-based (2% equity risk) capped by bucket")
     print(f"  Slippage      : {BACKTEST_SLIPPAGE:.1%} entry, {BACKTEST_EXIT_SLIPPAGE:.1%} exit (mkt orders)  |  Commission: ${args.commission_per_order*2:.2f}/round-trip")
@@ -108,6 +110,7 @@ def main():
         rvol_min           = args.rvol,
         min_score          = args.min_score,
         break_even_pct     = args.break_even_pct,
+        profit_min_threshold = args.profit_min,
         friday_min_profit  = args.friday_min_profit,
         chandelier_mult    = args.chandelier_mult,
         use_spy_filter     = not args.no_spy_filter,
