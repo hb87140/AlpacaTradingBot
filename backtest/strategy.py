@@ -188,6 +188,7 @@ class VelocityBacktest:
         profit_min_threshold: float = PROFIT_MIN_THRESHOLD,
         friday_min_profit:    float = FRIDAY_MIN_PROFIT_PCT,
         chandelier_mult:      float = CHANDELIER_MULT,
+        chandelier_period:    int   = CHANDELIER_PERIOD,
         donchian_period:      int   = DONCHIAN_PERIOD,
         donchian_tol_pct:     float = BACKTEST_DONCHIAN_TOL_PCT,
         rsi_oversold_threshold: float = RSI_OVERSOLD_THRESHOLD,
@@ -214,6 +215,7 @@ class VelocityBacktest:
         self._profit_min_threshold   = profit_min_threshold
         self._friday_min_profit      = friday_min_profit
         self._chandelier_mult        = chandelier_mult
+        self._chandelier_period      = chandelier_period
         self._donchian_period        = donchian_period
         self._donchian_tol_pct       = donchian_tol_pct
         self._rsi_oversold_threshold = rsi_oversold_threshold
@@ -314,6 +316,7 @@ class VelocityBacktest:
             try:
                 df = apply_all(
                     df, RSI_PERIOD, ATR_PERIOD, MA_FAST, MA_SLOW,
+                    chandelier_period=self._chandelier_period,
                     donchian_period=self._donchian_period
                 )
                 df['RSI_PREV']          = df['RSI'].shift(1)

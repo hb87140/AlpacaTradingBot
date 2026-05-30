@@ -67,8 +67,10 @@ def parse_args():
                    help=f"Velocity exit: min profit threshold (default: {PROFIT_MIN_THRESHOLD*100:.0f}%%)")
     p.add_argument("--friday-min-profit", default=FRIDAY_MIN_PROFIT_PCT, type=float,
                    help=f"Friday close: exit if profit < this pct (default: {FRIDAY_MIN_PROFIT_PCT*100:.0f}%%); set 0 to disable")
-    p.add_argument("--chandelier-mult",  default=CHANDELIER_MULT,    type=float,
+    p.add_argument("--chandelier-mult",    default=CHANDELIER_MULT,    type=float,
                    help=f"Chandelier ATR multiplier (default: {CHANDELIER_MULT})")
+    p.add_argument("--chandelier-period", default=CHANDELIER_PERIOD,  type=int,
+                   help=f"Chandelier ATR lookback period (default: {CHANDELIER_PERIOD})")
     p.add_argument("--donchian-period",  default=DONCHIAN_PERIOD,          type=int,
                    help=f"Donchian channel lookback period (default: {DONCHIAN_PERIOD})")
     p.add_argument("--donchian-tol",     default=BACKTEST_DONCHIAN_TOL_PCT, type=float,
@@ -127,6 +129,7 @@ def main():
         profit_min_threshold = args.profit_min,
         friday_min_profit  = args.friday_min_profit,
         chandelier_mult    = args.chandelier_mult,
+        chandelier_period  = args.chandelier_period,
         donchian_period    = args.donchian_period,
         donchian_tol_pct   = args.donchian_tol,
         rsi_oversold_threshold = args.rsi_oversold,
