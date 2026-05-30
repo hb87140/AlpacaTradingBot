@@ -39,6 +39,7 @@ from src.config import (
     CHANDELIER_MULT, CHANDELIER_PERIOD, PROFIT_MIN_THRESHOLD,
     BACKTEST_HOLD_BARS, BACKTEST_SLIPPAGE, BACKTEST_EXIT_SLIPPAGE,
     MAX_POSITIONS_CAP, MIN_BUCKET_SIZE, FRIDAY_MIN_PROFIT_PCT, DONCHIAN_PERIOD,
+    BACKTEST_DONCHIAN_TOL_PCT, RSI_OVERSOLD_THRESHOLD, RSI_BOUNCE_MAX,
 )
 
 
@@ -67,8 +68,14 @@ def parse_args():
                    help=f"Friday close: exit if profit < this pct (default: {FRIDAY_MIN_PROFIT_PCT:.0%}); set 0 to disable")
     p.add_argument("--chandelier-mult",  default=CHANDELIER_MULT,    type=float,
                    help=f"Chandelier ATR multiplier (default: {CHANDELIER_MULT})")
-    p.add_argument("--donchian-period",  default=DONCHIAN_PERIOD,    type=int,
+    p.add_argument("--donchian-period",  default=DONCHIAN_PERIOD,          type=int,
                    help=f"Donchian channel lookback period (default: {DONCHIAN_PERIOD})")
+    p.add_argument("--donchian-tol",     default=BACKTEST_DONCHIAN_TOL_PCT, type=float,
+                   help=f"Donchian floor tolerance %% (default: {BACKTEST_DONCHIAN_TOL_PCT:.0%})")
+    p.add_argument("--rsi-oversold",     default=RSI_OVERSOLD_THRESHOLD,   type=float,
+                   help=f"RSI oversold threshold (default: {RSI_OVERSOLD_THRESHOLD})")
+    p.add_argument("--rsi-bounce-max",   default=RSI_BOUNCE_MAX,           type=float,
+                   help=f"RSI bounce max at entry (default: {RSI_BOUNCE_MAX})")
     p.add_argument("--no-spy-filter",   action="store_true",
                    help="Disable SPY regime filter (allow entries in bear market)")
     p.add_argument("--vix-filter",      action="store_true",
@@ -116,6 +123,9 @@ def main():
         friday_min_profit  = args.friday_min_profit,
         chandelier_mult    = args.chandelier_mult,
         donchian_period    = args.donchian_period,
+        donchian_tol_pct   = args.donchian_tol,
+        rsi_oversold_threshold = args.rsi_oversold,
+        rsi_bounce_max     = args.rsi_bounce_max,
         use_spy_filter     = not args.no_spy_filter,
         use_vix_filter     = args.vix_filter,
         use_cache          = not args.no_cache,

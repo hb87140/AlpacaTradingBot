@@ -189,29 +189,35 @@ class VelocityBacktest:
         friday_min_profit:    float = FRIDAY_MIN_PROFIT_PCT,
         chandelier_mult:      float = CHANDELIER_MULT,
         donchian_period:      int   = DONCHIAN_PERIOD,
+        donchian_tol_pct:     float = BACKTEST_DONCHIAN_TOL_PCT,
+        rsi_oversold_threshold: float = RSI_OVERSOLD_THRESHOLD,
+        rsi_bounce_max:       float = RSI_BOUNCE_MAX,
         commission_per_order: float = BACKTEST_COMMISSION_PER_ORDER,
         use_cache:            bool  = True,
     ):
-        self.start                 = start
-        self.end                   = end
-        self.capital               = capital
-        self.max_pos               = max_pos
-        self.hold_bars             = hold_bars
-        self._scan_count           = scan_count
-        self._min_price            = min_price
-        self._min_volume           = min_volume
-        self._min_dollar_vol       = min_dollar_vol
-        self._use_spy_filter       = use_spy_filter
-        self._use_vix_filter       = use_vix_filter
-        self._rvol_min             = rvol_min
-        self._min_score            = min_score
-        self._break_even_pct       = break_even_pct
-        self._profit_min_threshold = profit_min_threshold
-        self._friday_min_profit    = friday_min_profit
-        self._chandelier_mult      = chandelier_mult
-        self._donchian_period      = donchian_period
-        self._round_trip_cost      = max(0.0, float(commission_per_order)) * 2.0
-        self._use_cache            = use_cache
+        self.start                   = start
+        self.end                     = end
+        self.capital                 = capital
+        self.max_pos                 = max_pos
+        self.hold_bars               = hold_bars
+        self._scan_count             = scan_count
+        self._min_price              = min_price
+        self._min_volume             = min_volume
+        self._min_dollar_vol         = min_dollar_vol
+        self._use_spy_filter         = use_spy_filter
+        self._use_vix_filter         = use_vix_filter
+        self._rvol_min               = rvol_min
+        self._min_score              = min_score
+        self._break_even_pct         = break_even_pct
+        self._profit_min_threshold   = profit_min_threshold
+        self._friday_min_profit      = friday_min_profit
+        self._chandelier_mult        = chandelier_mult
+        self._donchian_period        = donchian_period
+        self._donchian_tol_pct       = donchian_tol_pct
+        self._rsi_oversold_threshold = rsi_oversold_threshold
+        self._rsi_bounce_max         = rsi_bounce_max
+        self._round_trip_cost        = max(0.0, float(commission_per_order)) * 2.0
+        self._use_cache              = use_cache
 
         self._data:        Dict[str, pd.DataFrame] = {}
         self._vix_series:  Optional[pd.Series]     = None
@@ -482,12 +488,12 @@ class VelocityBacktest:
 
             # Coarse Donchian proximity filter: price within tolerance of lower band
             proximity = (row['close'] - donch_lower) / donch_lower
-            if proximity > BACKTEST_DONCHIAN_TOL_PCT:
+            if proximity > self._donchian_tol_pct:
                 continue
 
             # RSI oversold lookback: RSI must have dipped below threshold recently
             rsi_min_lb = row.get('RSI_MIN_LOOKBACK', float('nan'))
-            if pd.isna(rsi_min_lb) or rsi_min_lb >= RSI_OVERSOLD_THRESHOLD:
+            if pd.isna(rsi_min_lb) or rsi_min_lb >= self._rsi_oversold_threshold:
                 continue
 
             # RVOL filter (backtest threshold — daily close RVOL proxy)
@@ -505,7 +511,7 @@ class VelocityBacktest:
             rsi      = row.get('RSI', float('nan'))
             rsi_prev = row.get('RSI_PREV', float('nan'))
 
-            donchian_score = max(0.0, (1.0 - proximity / BACKTEST_DONCHIAN_TOL_PCT) * SCORE_DONCHIAN_MAX)
+            donchian_score = max(0.0, (1.0 - proximity / self._donchian_tol_pct) * SCORE_DONCHIAN_MAX)
 
             rvol_excess = max(0.0, rvol - effective_rvol_min)
             rvol_score  = min(SCORE_RVOL_MAX,
@@ -532,12 +538,15 @@ class VelocityBacktest:
     @staticmethod
     def _entry_signal(row: pd.Series, prev_rsi: float, rvol: float,
                       rvol_min: float,
-                      flags: dict = None) -> bool:
+                      flags: dict = None,
+                      donchian_tol_pct: float = BACKTEST_DONCHIAN_TOL_PCT,
+                      rsi_oversold_threshold: float = RSI_OVERSOLD_THRESHOLD,
+                      rsi_bounce_max: float = RSI_BOUNCE_MAX) -> bool:
         """Donchian bounce entry filter — daily-bar approximation of src/rules.py CYCLE_RULES.
 
         Rules checked (all mandatory):
-          1. DONCH_LOWER available and price within BACKTEST_DONCHIAN_TOL_PCT (3%) of lower band
-          2. RSI oversold in lookback window (RSI_MIN_LOOKBACK < RSI_OVERSOLD_THRESHOLD)
+          1. DONCH_LOWER available and price within donchian_tol_pct of lower band
+          2. RSI oversold in lookback window (RSI_MIN_LOOKBACK < rsi_oversold_threshold)
           3. RSI delta >= RSI_MIN_DELTA (momentum turn confirmed)
           4. RVOL >= rvol_min (already verified in _daily_scan; re-checked for safety)
         """
@@ -546,12 +555,12 @@ class VelocityBacktest:
         if pd.isna(donch_lower) or donch_lower <= 0:
             return False
         proximity = (float(row['close']) - float(donch_lower)) / float(donch_lower)
-        if proximity > BACKTEST_DONCHIAN_TOL_PCT:
+        if proximity > donchian_tol_pct:
             return False
 
         # RSI oversold in recent lookback
         rsi_min_lb = row.get('RSI_MIN_LOOKBACK', float('nan'))
-        if pd.isna(rsi_min_lb) or float(rsi_min_lb) >= RSI_OVERSOLD_THRESHOLD:
+        if pd.isna(rsi_min_lb) or float(rsi_min_lb) >= rsi_oversold_threshold:
             return False
 
         # RSI delta confirms momentum turn
@@ -562,11 +571,11 @@ class VelocityBacktest:
             return False
 
         # RSI must have crossed above the oversold threshold (bounce confirmed, not still falling)
-        if float(rsi) < RSI_OVERSOLD_THRESHOLD:
+        if float(rsi) < rsi_oversold_threshold:
             return False
 
         # RSI must not be fully recovered — avoid support-failure re-tests
-        if float(rsi) > RSI_BOUNCE_MAX:
+        if float(rsi) > rsi_bounce_max:
             return False
 
         # RVOL confirmation
@@ -854,7 +863,10 @@ class VelocityBacktest:
                         continue
 
                     if self._entry_signal(row, prev_rsi, rvol, effective_rvol_min,
-                                          flags=flags):
+                                          flags=flags,
+                                          donchian_tol_pct=self._donchian_tol_pct,
+                                          rsi_oversold_threshold=self._rsi_oversold_threshold,
+                                          rsi_bounce_max=self._rsi_bounce_max):
                         self._filter_stats['fine_signals'] += 1
 
                         # Entry at open (Donchian bounce — not an ORB breakout strategy),
