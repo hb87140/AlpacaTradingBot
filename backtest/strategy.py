@@ -192,6 +192,8 @@ class VelocityBacktest:
         donchian_tol_pct:     float = BACKTEST_DONCHIAN_TOL_PCT,
         rsi_oversold_threshold: float = RSI_OVERSOLD_THRESHOLD,
         rsi_bounce_max:       float = RSI_BOUNCE_MAX,
+        rsi_min_delta:        float = RSI_MIN_DELTA,
+        rsi_oversold_lookback: int  = RSI_OVERSOLD_LOOKBACK,
         commission_per_order: float = BACKTEST_COMMISSION_PER_ORDER,
         use_cache:            bool  = True,
     ):
@@ -216,6 +218,8 @@ class VelocityBacktest:
         self._donchian_tol_pct       = donchian_tol_pct
         self._rsi_oversold_threshold = rsi_oversold_threshold
         self._rsi_bounce_max         = rsi_bounce_max
+        self._rsi_min_delta          = rsi_min_delta
+        self._rsi_oversold_lookback  = rsi_oversold_lookback
         self._round_trip_cost        = max(0.0, float(commission_per_order)) * 2.0
         self._use_cache              = use_cache
 
@@ -313,7 +317,7 @@ class VelocityBacktest:
                     donchian_period=self._donchian_period
                 )
                 df['RSI_PREV']          = df['RSI'].shift(1)
-                df['RSI_MIN_LOOKBACK']  = df['RSI'].shift(1).rolling(RSI_OVERSOLD_LOOKBACK).min()
+                df['RSI_MIN_LOOKBACK']  = df['RSI'].shift(1).rolling(self._rsi_oversold_lookback).min()
                 df['avg_vol_20']        = df['volume'].rolling(20).mean()
                 df['avg_dollar_vol_20'] = (df['close'] * df['volume']).rolling(20).mean()
                 self._data[sym] = df
@@ -541,7 +545,8 @@ class VelocityBacktest:
                       flags: dict = None,
                       donchian_tol_pct: float = BACKTEST_DONCHIAN_TOL_PCT,
                       rsi_oversold_threshold: float = RSI_OVERSOLD_THRESHOLD,
-                      rsi_bounce_max: float = RSI_BOUNCE_MAX) -> bool:
+                      rsi_bounce_max: float = RSI_BOUNCE_MAX,
+                      rsi_min_delta: float = RSI_MIN_DELTA) -> bool:
         """Donchian bounce entry filter — daily-bar approximation of src/rules.py CYCLE_RULES.
 
         Rules checked (all mandatory):
@@ -567,7 +572,7 @@ class VelocityBacktest:
         rsi = row.get('RSI', float('nan'))
         if pd.isna(rsi) or pd.isna(prev_rsi):
             return False
-        if (float(rsi) - float(prev_rsi)) < RSI_MIN_DELTA:
+        if (float(rsi) - float(prev_rsi)) < rsi_min_delta:
             return False
 
         # RSI must have crossed above the oversold threshold (bounce confirmed, not still falling)
@@ -866,7 +871,8 @@ class VelocityBacktest:
                                           flags=flags,
                                           donchian_tol_pct=self._donchian_tol_pct,
                                           rsi_oversold_threshold=self._rsi_oversold_threshold,
-                                          rsi_bounce_max=self._rsi_bounce_max):
+                                          rsi_bounce_max=self._rsi_bounce_max,
+                                          rsi_min_delta=self._rsi_min_delta):
                         self._filter_stats['fine_signals'] += 1
 
                         # Entry at open (Donchian bounce — not an ORB breakout strategy),

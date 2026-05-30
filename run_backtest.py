@@ -40,6 +40,7 @@ from src.config import (
     BACKTEST_HOLD_BARS, BACKTEST_SLIPPAGE, BACKTEST_EXIT_SLIPPAGE,
     MAX_POSITIONS_CAP, MIN_BUCKET_SIZE, FRIDAY_MIN_PROFIT_PCT, DONCHIAN_PERIOD,
     BACKTEST_DONCHIAN_TOL_PCT, RSI_OVERSOLD_THRESHOLD, RSI_BOUNCE_MAX,
+    RSI_MIN_DELTA, RSI_OVERSOLD_LOOKBACK,
 )
 
 
@@ -76,6 +77,10 @@ def parse_args():
                    help=f"RSI oversold threshold (default: {RSI_OVERSOLD_THRESHOLD})")
     p.add_argument("--rsi-bounce-max",   default=RSI_BOUNCE_MAX,           type=float,
                    help=f"RSI bounce max at entry (default: {RSI_BOUNCE_MAX})")
+    p.add_argument("--rsi-min-delta",    default=RSI_MIN_DELTA,            type=float,
+                   help=f"Minimum RSI point rise for momentum confirmation (default: {RSI_MIN_DELTA})")
+    p.add_argument("--rsi-lookback",     default=RSI_OVERSOLD_LOOKBACK,    type=int,
+                   help=f"Days to look back for RSI oversold condition (default: {RSI_OVERSOLD_LOOKBACK})")
     p.add_argument("--no-spy-filter",   action="store_true",
                    help="Disable SPY regime filter (allow entries in bear market)")
     p.add_argument("--vix-filter",      action="store_true",
@@ -126,6 +131,8 @@ def main():
         donchian_tol_pct   = args.donchian_tol,
         rsi_oversold_threshold = args.rsi_oversold,
         rsi_bounce_max     = args.rsi_bounce_max,
+        rsi_min_delta      = args.rsi_min_delta,
+        rsi_oversold_lookback = args.rsi_lookback,
         use_spy_filter     = not args.no_spy_filter,
         use_vix_filter     = args.vix_filter,
         use_cache          = not args.no_cache,
