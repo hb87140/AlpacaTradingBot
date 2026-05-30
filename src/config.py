@@ -39,7 +39,7 @@ CHANDELIER_MULT   = 2.0    # ATR multiplier — stop = peak − ATR(22) × 2
 # ── Risk rules ────────────────────────────────────────────────────────────────
 VIX_THRESHOLD        = 35
 HOLD_TRADING_BARS    = 1       # Mon-Fri trading sessions before velocity exit fires
-PROFIT_MIN_THRESHOLD = 0.05    # 5% min gain to avoid velocity exit
+PROFIT_MIN_THRESHOLD = 0.10    # 10% min gain to avoid velocity exit (plateau; ≥10% identical)
 GAP_MAX_PCT          = 0.10    # kept for backtest compatibility
 MAX_DAILY_LOSS_PCT   = 0.03    # 3% intraday equity drawdown halts new entries
 RSI_MIN_DELTA        = 3.0     # minimum RSI point rise to confirm momentum turn
