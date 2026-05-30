@@ -109,7 +109,7 @@ ORB_BAR_MINUTES    = 15    # kept for backtest compatibility
 
 # ── Scanner filters ───────────────────────────────────────────────────────────
 SCAN_MIN_PRICE      = 10.0              # Universe filter: price > $10
-SCAN_MIN_VOLUME     = 2_000_000        # Universe filter: 20-day avg daily vol > 2M shares
+SCAN_MIN_VOLUME     = 1_000_000        # Universe filter: 20-day avg daily vol > 1M shares
 SCAN_MIN_GAIN_PCT   = 2.0              # minimum daily % gain (backtest coarse filter)
 SCAN_MIN_DOLLAR_VOL = 20_000_000       # 20-day avg dollar volume floor ($20M)
 SCAN_MIN_SCORE      = 30.0             # minimum composite score (0-100) before entry
