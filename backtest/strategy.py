@@ -29,9 +29,9 @@ Entry rules (Donchian bounce — matches src/rules.py CYCLE_RULES):
   2. Price floor         : close ≥ SCAN_MIN_PRICE ($10)
   3. Volume              : avg 20-day share vol ≥ SCAN_MIN_VOLUME
   4. Dollar volume       : avg 20-day dollar vol ≥ SCAN_MIN_DOLLAR_VOL (2× on Fridays)
-  5. Donchian floor      : close within BACKTEST_DONCHIAN_TOL_PCT (3%) of 20-day low (wider than live 0.5% — daily close data)
+  5. Donchian floor      : close within BACKTEST_DONCHIAN_TOL_PCT (5%) of 20-day low (wider than live 0.5% — daily close data)
   6. RVOL                : volume / 20d avg ≥ BACKTEST_RVOL_MIN; tighter in bearish regime
-  7. RSI oversold        : RSI was < RSI_OVERSOLD_THRESHOLD (35) in last RSI_OVERSOLD_LOOKBACK (3) bars
+  7. RSI oversold        : RSI was < RSI_OVERSOLD_THRESHOLD (40) in last RSI_OVERSOLD_LOOKBACK (3) bars
   8. RSI delta           : RSI rose ≥ RSI_MIN_DELTA (3.0 pts) vs previous bar
   9. Spread              : not available in daily data — skipped
   10. Day strength        : not available in daily OHLCV — skipped
@@ -41,7 +41,7 @@ Exit rules (unchanged from momentum strategy):
   • Chandelier trailing stop : peak_high - ATR_CHAND × CHANDELIER_MULT (dollar-distance, matches Alpaca trail_price)
   • Hard stop                : entry × (1 - HARD_STOP_PCT) = 7%
   • Break-even floor         : once peak ≥ BREAK_EVEN_PCT above entry, stop ≥ entry
-  • Velocity time exit       : held ≥ hold_bars and profit < PROFIT_MIN_THRESHOLD (5%)
+  • Velocity time exit       : held ≥ hold_bars and profit < PROFIT_MIN_THRESHOLD (10%)
   • Friday close             : profit < FRIDAY_MIN_PROFIT_PCT (3%) on Fridays
 """
 
