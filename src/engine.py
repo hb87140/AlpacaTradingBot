@@ -54,7 +54,7 @@ from src.config import (
     CONCENTRATION_WARN_PCT, CONCENTRATION_HALT_PCT,
     REPRICE_DRIFT_MAX_PCT,
     DONCHIAN_PERIOD, RSI_OVERSOLD_LOOKBACK,
-    SPY_EMA_PERIOD, SPY_REGIME_SIZE_CUT, SPY_REGIME_RVOL_MULT,
+    SPY_EMA_PERIOD, SPY_REGIME_SIZE_CUT, SPY_REGIME_RVOL_MULT, SPY_FILTER_ENABLED,
 )
 from src.indicators import apply_all, compute_ma
 from src.rules import (
@@ -1491,18 +1491,22 @@ class VelocityEngine:
             return
 
         # 8. SPY regime (soft — bearish cuts size + tightens RVOL, does not block)
-        regime           = self._fetch_spy_trend()
-        is_bull          = regime['is_bull']
-        spy_size_factor  = regime['size_factor']
-        effective_rvol   = RVOL_MIN * regime['rvol_mult']
-        if not is_bull:
-            logger.warning(
-                f"REGIME: SPY bearish (close={regime['spy_close']:.2f} < "
-                f"EMA{SPY_EMA_PERIOD}={regime['ema50']:.2f}) — "
-                f"size cut {SPY_REGIME_SIZE_CUT*100:.0f}%, "
-                f"RVOL threshold raised to {effective_rvol:.2f}x"
-            )
-            bucket_size = round(bucket_size * spy_size_factor, 2)
+        # SPY_FILTER_ENABLED=False by default: Donchian bounce improves without regime filter.
+        if SPY_FILTER_ENABLED:
+            regime           = self._fetch_spy_trend()
+            is_bull          = regime['is_bull']
+            effective_rvol   = RVOL_MIN * regime['rvol_mult']
+            if not is_bull:
+                logger.warning(
+                    f"REGIME: SPY bearish (close={regime['spy_close']:.2f} < "
+                    f"EMA{SPY_EMA_PERIOD}={regime['ema50']:.2f}) — "
+                    f"size cut {SPY_REGIME_SIZE_CUT*100:.0f}%, "
+                    f"RVOL threshold raised to {effective_rvol:.2f}x"
+                )
+                bucket_size = round(bucket_size * regime['size_factor'], 2)
+        else:
+            is_bull        = True
+            effective_rvol = RVOL_MIN
 
         is_friday = (now_ny.weekday() == 4)
 

@@ -41,6 +41,8 @@ from src.config import (
     MAX_POSITIONS_CAP, MIN_BUCKET_SIZE, FRIDAY_MIN_PROFIT_PCT, DONCHIAN_PERIOD,
     BACKTEST_DONCHIAN_TOL_PCT, RSI_OVERSOLD_THRESHOLD, RSI_BOUNCE_MAX,
     RSI_MIN_DELTA, RSI_OVERSOLD_LOOKBACK,
+    RISK_PER_TRADE_PCT, HARD_STOP_PCT,
+    SCAN_MIN_DOLLAR_VOL, BACKTEST_MIN_BODY_PCT,
 )
 
 
@@ -83,8 +85,16 @@ def parse_args():
                    help=f"Minimum RSI point rise for momentum confirmation (default: {RSI_MIN_DELTA})")
     p.add_argument("--rsi-lookback",     default=RSI_OVERSOLD_LOOKBACK,    type=int,
                    help=f"Days to look back for RSI oversold condition (default: {RSI_OVERSOLD_LOOKBACK})")
-    p.add_argument("--no-spy-filter",   action="store_true",
-                   help="Disable SPY regime filter (allow entries in bear market)")
+    p.add_argument("--risk-per-trade",   default=RISK_PER_TRADE_PCT,       type=float,
+                   help=f"Equity fraction risked per trade (default: {RISK_PER_TRADE_PCT:.0%})")
+    p.add_argument("--hard-stop-pct",    default=HARD_STOP_PCT,            type=float,
+                   help=f"Hard stop loss from entry (default: {HARD_STOP_PCT:.0%})")
+    p.add_argument("--spy-filter",       action="store_true",
+                   help="Enable SPY regime filter (default: OFF — Donchian bounce improves without it)")
+    p.add_argument("--min-dollar-vol",  default=SCAN_MIN_DOLLAR_VOL, type=float,
+                   help=f"Minimum 20-day avg dollar volume (default: ${SCAN_MIN_DOLLAR_VOL/1e6:.0f}M)")
+    p.add_argument("--min-body-pct",    default=BACKTEST_MIN_BODY_PCT, type=float,
+                   help=f"Day-strength: min candle body pct close/open-1 (default: {BACKTEST_MIN_BODY_PCT:.1%}; 0=disable)")
     p.add_argument("--vix-filter",      action="store_true",
                    help="Enable VIX > 35 regime gate")
     p.add_argument("--trades",          action="store_true",
@@ -111,7 +121,7 @@ def main():
     print(f"  Hold bars     : {args.hold_bars} trading days before velocity check")
     print("  Position size : ATR-based (2% equity risk) capped by bucket")
     print(f"  Slippage      : {BACKTEST_SLIPPAGE:.1%} entry, {BACKTEST_EXIT_SLIPPAGE:.1%} exit (mkt orders)  |  Commission: ${args.commission_per_order*2:.2f}/round-trip")
-    print(f"  SPY filter    : {'OFF' if args.no_spy_filter else 'ON (SPY > SMA50 > SMA200)'}")
+    print(f"  SPY filter    : {'ON (EMA50 soft regime)' if args.spy_filter else 'OFF (mean-reversion default)'}")
     print(f"  VIX filter    : {'ON (VIX > 35 blocks entries)' if args.vix_filter else 'OFF'}")
     print(f"  Cache         : {'OFF (forced re-download)' if args.no_cache else 'ON (backtest/.cache/)'}")
     print()
@@ -136,7 +146,11 @@ def main():
         rsi_bounce_max     = args.rsi_bounce_max,
         rsi_min_delta      = args.rsi_min_delta,
         rsi_oversold_lookback = args.rsi_lookback,
-        use_spy_filter     = not args.no_spy_filter,
+        risk_per_trade_pct = args.risk_per_trade,
+        hard_stop_pct      = args.hard_stop_pct,
+        min_dollar_vol     = args.min_dollar_vol,
+        min_body_pct       = args.min_body_pct,
+        use_spy_filter     = args.spy_filter,
         use_vix_filter     = args.vix_filter,
         use_cache          = not args.no_cache,
     )

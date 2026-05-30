@@ -87,6 +87,9 @@ DAY_STRENGTH_OPEN_PCT  = 0.005  # price must be ≥ 0.5% above today's open
 BACKTEST_MIN_BODY_PCT  = 0.005  # daily close must be ≥ 0.5% above open (meaningful green candle)
 
 # SPY regime (soft — bearish regime cuts size + tightens RVOL, does not block)
+# Disabled for Donchian bounce: mean-reversion works better without regime filter;
+# bear markets produce more Donchian floor setups, not fewer.
+SPY_FILTER_ENABLED  = False     # set True to re-enable soft SPY regime
 SPY_EMA_PERIOD      = 50        # EMA period used for SPY regime check
 SPY_REGIME_SIZE_CUT = 0.50      # reduce position bucket by 50% in bearish regime
 SPY_REGIME_RVOL_MULT = 1.33    # multiply RVOL threshold by this in bearish regime

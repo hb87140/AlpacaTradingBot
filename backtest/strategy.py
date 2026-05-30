@@ -160,7 +160,7 @@ class VelocityBacktest:
     min_price       : minimum close price filter
     min_volume      : minimum daily share volume filter
     min_dollar_vol  : minimum 20-day avg dollar volume
-    use_spy_filter  : if True, skip entries when SPY < SMA50 or SMA50 < SMA200
+    use_spy_filter  : if True, apply soft SPY regime (size cut + RVOL tightening in bear market); default False
     use_vix_filter  : if True, skip new entries when VIX > VIX_THRESHOLD
     rvol_min             : daily RVOL threshold (1.2× optimal — much lower than live 2.5× intraday)
     break_even_pct       : once profit exceeds this, floor the stop at entry (0.04 optimal)
@@ -180,7 +180,7 @@ class VelocityBacktest:
         min_price:      float = SCAN_MIN_PRICE,
         min_volume:     float = SCAN_MIN_VOLUME,
         min_dollar_vol: float = SCAN_MIN_DOLLAR_VOL,
-        use_spy_filter: bool  = True,
+        use_spy_filter: bool  = False,
         use_vix_filter: bool  = False,
         rvol_min:             float = BACKTEST_RVOL_MIN,
         min_score:            float = SCAN_MIN_SCORE,
@@ -196,6 +196,9 @@ class VelocityBacktest:
         rsi_min_delta:        float = RSI_MIN_DELTA,
         rsi_oversold_lookback: int  = RSI_OVERSOLD_LOOKBACK,
         commission_per_order: float = BACKTEST_COMMISSION_PER_ORDER,
+        risk_per_trade_pct:   float = RISK_PER_TRADE_PCT,
+        hard_stop_pct:        float = HARD_STOP_PCT,
+        min_body_pct:         float = BACKTEST_MIN_BODY_PCT,
         use_cache:            bool  = True,
     ):
         self.start                   = start
@@ -223,6 +226,9 @@ class VelocityBacktest:
         self._rsi_min_delta          = rsi_min_delta
         self._rsi_oversold_lookback  = rsi_oversold_lookback
         self._round_trip_cost        = max(0.0, float(commission_per_order)) * 2.0
+        self._risk_per_trade_pct     = risk_per_trade_pct
+        self._hard_stop_pct          = hard_stop_pct
+        self._min_body_pct           = min_body_pct
         self._use_cache              = use_cache
 
         self._data:        Dict[str, pd.DataFrame] = {}
@@ -549,7 +555,8 @@ class VelocityBacktest:
                       donchian_tol_pct: float = BACKTEST_DONCHIAN_TOL_PCT,
                       rsi_oversold_threshold: float = RSI_OVERSOLD_THRESHOLD,
                       rsi_bounce_max: float = RSI_BOUNCE_MAX,
-                      rsi_min_delta: float = RSI_MIN_DELTA) -> bool:
+                      rsi_min_delta: float = RSI_MIN_DELTA,
+                      min_body_pct: float = BACKTEST_MIN_BODY_PCT) -> bool:
         """Donchian bounce entry filter — daily-bar approximation of src/rules.py CYCLE_RULES.
 
         Rules checked (all mandatory):
@@ -590,12 +597,12 @@ class VelocityBacktest:
         if rvol < rvol_min:
             return False
 
-        # Day-strength: meaningful green candle required (close >= 0.5% above open)
+        # Day-strength: meaningful green candle required (close >= min_body_pct above open)
         # Requires genuine buying pressure, not a doji or barely-green candle.
         # Skip when open is unavailable (fail-open: don't silently block all entries).
         open_ = row.get('open')
         if open_ is not None and not pd.isna(open_) and float(open_) > 0:
-            if float(row['close']) / float(open_) < 1.0 + BACKTEST_MIN_BODY_PCT:
+            if float(row['close']) / float(open_) < 1.0 + min_body_pct:
                 return False
 
         return True
@@ -735,8 +742,8 @@ class VelocityBacktest:
                 # the peak, never widening or narrowing in percentage terms.
                 chand_stop = peak_high - chand_dist
 
-                # Hard stop: flat 7% below entry
-                hard_stop = t.entry_price * (1 - HARD_STOP_PCT)
+                # Hard stop: configurable % below entry (default 7%)
+                hard_stop = t.entry_price * (1 - self._hard_stop_pct)
 
                 # Break-even floor: once up BREAK_EVEN_PCT, stop ≥ entry
                 if peak_high >= t.entry_price * (1 + self._break_even_pct):
@@ -875,7 +882,8 @@ class VelocityBacktest:
                                           donchian_tol_pct=self._donchian_tol_pct,
                                           rsi_oversold_threshold=self._rsi_oversold_threshold,
                                           rsi_bounce_max=self._rsi_bounce_max,
-                                          rsi_min_delta=self._rsi_min_delta):
+                                          rsi_min_delta=self._rsi_min_delta,
+                                          min_body_pct=self._min_body_pct):
                         self._filter_stats['fine_signals'] += 1
 
                         # Entry at open (Donchian bounce — not an ORB breakout strategy),
@@ -890,7 +898,7 @@ class VelocityBacktest:
                         # ATR-based position sizing: risk 2% of equity per trade
                         atr_chand_val   = float(row['ATR_CHAND'])
                         chand_dist      = atr_chand_val * self._chandelier_mult
-                        hard_stop_dist  = entry_price * HARD_STOP_PCT
+                        hard_stop_dist  = entry_price * self._hard_stop_pct
                         # The tighter stop is the one that fires first → defines risk
                         risk_stop_dist  = min(chand_dist, hard_stop_dist)
                         risk_stop_dist  = max(risk_stop_dist, 0.01)  # floor at 1¢
@@ -899,7 +907,7 @@ class VelocityBacktest:
                         # by BUCKET_CASH_PCT reserve and soft-regime size factor.
                         bucket        = settled_cash * BUCKET_CASH_PCT * spy_size_factor / entry_slots
 
-                        risk_dollars  = equity_mtm * RISK_PER_TRADE_PCT
+                        risk_dollars  = equity_mtm * self._risk_per_trade_pct
                         qty_risk      = risk_dollars / risk_stop_dist
                         qty_bucket    = bucket / entry_price
                         qty           = int(min(qty_risk, qty_bucket))   # whole shares only
