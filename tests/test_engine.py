@@ -983,7 +983,7 @@ class TestBreakEvenFloor:
 
     def test_break_even_threshold_uses_config_constant(self):
         from src.config import BREAK_EVEN_PCT
-        assert BREAK_EVEN_PCT == 0.04
+        assert BREAK_EVEN_PCT == 0.06
 
 
 # ── Equity history downsampling ───────────────────────────────────────────────
