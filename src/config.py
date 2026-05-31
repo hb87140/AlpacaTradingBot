@@ -79,12 +79,12 @@ BACKTEST_DONCHIAN_TOL_PCT = 0.16  # wider 16% for daily close data — daily clo
 
 # RSI oversold lookback (bounce signal)
 RSI_OVERSOLD_THRESHOLD = 50     # RSI must have been below this threshold
-RSI_OVERSOLD_LOOKBACK  = 4      # … within the last N daily candles
-RSI_BOUNCE_MAX         = 70     # RSI at entry must not exceed this (avoid support-failure pattern)
+RSI_OVERSOLD_LOOKBACK  = 32     # … within the last N daily candles
+RSI_BOUNCE_MAX         = 78     # RSI at entry must not exceed this (avoid support-failure pattern)
 
 # Day-strength gate (confirms price is recovering, not fading)
 DAY_STRENGTH_OPEN_PCT  = 0.005  # price must be ≥ 0.5% above today's open
-BACKTEST_MIN_BODY_PCT  = 0.012  # daily close must be ≥ 1.2% above open — strong recovery confirmation
+BACKTEST_MIN_BODY_PCT  = 0.005  # daily close must be ≥ 0.5% above open — strong recovery confirmation
 
 # SPY regime (soft — bearish regime cuts size + tightens RVOL, does not block)
 # Disabled for Donchian bounce: mean-reversion works better without regime filter;
