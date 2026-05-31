@@ -87,8 +87,8 @@ class TestEntrySignal:
     Positional args:      prev_rsi, rvol, rvol_min
     """
 
-    def _row(self, close=100.0, open_=99.5, donch_lower=99.8, rsi=42.0, rsi_min_lookback=28.0):
-        """Default passing row: green candle (open < close), within 0.2% of Donchian floor, RSI was oversold."""
+    def _row(self, close=100.0, open_=98.9, donch_lower=99.8, rsi=52.0, rsi_min_lookback=28.0):
+        """Default passing row: green candle (≥1% body), within 0.2% of Donchian floor, RSI was oversold."""
         return pd.Series({
             'open':            open_,
             'close':           close,
@@ -98,7 +98,7 @@ class TestEntrySignal:
         })
 
     def test_all_conditions_pass(self):
-        # close=100 within 0.2% of lower=99.8; RSI_MIN_LOOKBACK=28<40; delta=7.0>=3; rvol ok
+        # close=100 within 0.2% of lower=99.8; RSI_MIN_LOOKBACK=28<50; delta=17.0>=3; rvol ok
         assert VelocityBacktest._entry_signal(
             self._row(), prev_rsi=35.0, rvol=BACKTEST_RVOL_MIN + 0.5,
             rvol_min=BACKTEST_RVOL_MIN)
@@ -117,9 +117,9 @@ class TestEntrySignal:
             rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
     def test_fails_rsi_never_oversold_in_lookback(self):
-        # RSI_MIN_LOOKBACK=45 >= RSI_OVERSOLD_THRESHOLD(40) → oversold lookback fails
+        # RSI_MIN_LOOKBACK=55 >= RSI_OVERSOLD_THRESHOLD(50) → oversold lookback fails
         assert not VelocityBacktest._entry_signal(
-            self._row(rsi_min_lookback=45.0), prev_rsi=35.0,
+            self._row(rsi_min_lookback=55.0), prev_rsi=35.0,
             rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
     def test_fails_rsi_delta_below_minimum(self):

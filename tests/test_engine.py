@@ -123,8 +123,8 @@ class TestExpertFilter:
     exactly one field of the baseline ctx to verify the engine blocks that
     specific failing condition.
 
-    Base ctx: price=100 (0.2% above donchian_lower=99.8), rsi=42/prev=35 (Δ=7.0),
-              rsi_history has values below oversold threshold=40, price 1% above open,
+    Base ctx: price=100 (0.2% above donchian_lower=99.8), rsi=52/prev=45 (Δ=7.0),
+              rsi_history has values below oversold threshold=50, price 1% above open,
               in upper 86% of intraday range, rvol=3.0, spread=0.2%, dol_vol=300M.
     """
 
@@ -134,7 +134,7 @@ class TestExpertFilter:
             'donchian_lower':  99.8,
             'donchian_upper':  110.0,
             # RSI momentum: delta=7.0 >= RSI_MIN_DELTA; history has oversold values
-            'rsi':              42.0,   'rsi_prev':        35.0,
+            'rsi':              52.0,   'rsi_prev':        45.0,
             'rsi_history':     [28.0, 30.0, 32.0, 35.0, 42.0],
             # Day strength: 1% above open, in upper 86% of range
             'intraday_open':   99.0,
@@ -259,8 +259,8 @@ class TestExpertFilter:
         assert self._engine_passes(ctx) is False
 
     def test_fails_when_dollar_volume_below_threshold(self):
-        """Dollar volume 5M < SCAN_MIN_DOLLAR_VOL=20M fails dollar_vol rule."""
-        ctx = self._base_ctx(); ctx['dollar_vol_20d'] = 5_000_000
+        """Dollar volume 4M < SCAN_MIN_DOLLAR_VOL=5M fails dollar_vol rule."""
+        ctx = self._base_ctx(); ctx['dollar_vol_20d'] = 4_000_000
         assert self._engine_passes(ctx) is False
 
     def test_passes_when_dollar_volume_at_threshold(self):
@@ -682,7 +682,7 @@ class TestBuyOrderTif:
         ctx = {
             'live_price': 100.0, 'close': 99.5,
             'donchian_lower': 99.8, 'donchian_upper': 110.0,
-            'rsi': 42.0, 'rsi_prev': 35.0,
+            'rsi': 52.0, 'rsi_prev': 45.0,
             'rsi_history': [28.0, 30.0, 32.0, 35.0, 42.0],
             'intraday_open': 99.0, 'intraday_high': 100.5, 'intraday_low': 97.0,
             'atr': 2.0, 'atr_chandelier': 2.0,
@@ -766,7 +766,7 @@ class TestDailyScanSkip:
         engine = _make_engine()
         engine.state = {}
 
-        # dollar_vol_20d=5M < SCAN_MIN_DOLLAR_VOL=20M → PERMANENT_DAY_RULES fail
+        # dollar_vol_20d=4M < SCAN_MIN_DOLLAR_VOL=5M → PERMANENT_DAY_RULES fail
         ctx = {
             'live_price': 100.0,
             'donchian_lower': 99.8, 'donchian_upper': 110.0,
@@ -775,7 +775,7 @@ class TestDailyScanSkip:
             'intraday_open': 99.0, 'intraday_high': 100.5, 'intraday_low': 97.0,
             'atr': 2.0, 'atr_chandelier': 2.0,
             'rvol': 3.0, 'spread_pct': 0.002,
-            'dollar_vol_20d': 5_000_000,   # below 20M threshold → permanent fail
+            'dollar_vol_20d': 4_000_000,   # below 5M threshold → permanent fail
             'avg_20d_vol': 5_000_000, 'volume': 5_000_000,
             'close': 99.5,
             'price_fetched_at': _TZ_NY.localize(datetime(2024, 6, 5, 10, 30)),
@@ -1581,7 +1581,7 @@ class TestExitRecheckBetweenEntries:
         signals_ctx = {
             'live_price': 100.0, 'close': 99.5, 'ask': 100.1,
             'donchian_lower': 99.8, 'donchian_upper': 110.0,
-            'rsi': 42.0, 'rsi_prev': 35.0,
+            'rsi': 52.0, 'rsi_prev': 45.0,
             'rsi_history': [28.0, 30.0, 32.0, 35.0, 42.0],
             'intraday_open': 99.0, 'intraday_high': 100.5, 'intraday_low': 97.0,
             'atr': 2.0, 'atr_chandelier': 2.0,

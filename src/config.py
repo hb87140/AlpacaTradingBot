@@ -78,13 +78,13 @@ DONCHIAN_FLOOR_TOL_PCT = 0.005  # price must be within 0.5% of lower band to qua
 BACKTEST_DONCHIAN_TOL_PCT = 0.08  # wider 8% for daily close data — daily close rarely ≤0.5% above band low
 
 # RSI oversold lookback (bounce signal)
-RSI_OVERSOLD_THRESHOLD = 40     # RSI must have been below this threshold
+RSI_OVERSOLD_THRESHOLD = 50     # RSI must have been below this threshold
 RSI_OVERSOLD_LOOKBACK  = 3      # … within the last N daily candles
 RSI_BOUNCE_MAX         = 60     # RSI at entry must not exceed this (avoid support-failure pattern)
 
 # Day-strength gate (confirms price is recovering, not fading)
 DAY_STRENGTH_OPEN_PCT  = 0.005  # price must be ≥ 0.5% above today's open
-BACKTEST_MIN_BODY_PCT  = 0.002  # daily close must be ≥ 0.2% above open (minimal green direction)
+BACKTEST_MIN_BODY_PCT  = 0.010  # daily close must be ≥ 1.0% above open — strong recovery confirmation
 
 # SPY regime (soft — bearish regime cuts size + tightens RVOL, does not block)
 # Disabled for Donchian bounce: mean-reversion works better without regime filter;
@@ -111,7 +111,7 @@ ORB_BAR_MINUTES    = 15    # kept for backtest compatibility
 SCAN_MIN_PRICE      = 10.0              # Universe filter: price > $10
 SCAN_MIN_VOLUME     = 1_000_000        # Universe filter: 20-day avg daily vol > 1M shares
 SCAN_MIN_GAIN_PCT   = 2.0              # minimum daily % gain (backtest coarse filter)
-SCAN_MIN_DOLLAR_VOL = 20_000_000       # 20-day avg dollar volume floor ($20M)
+SCAN_MIN_DOLLAR_VOL = 5_000_000        # 20-day avg dollar volume floor ($5M)
 SCAN_MIN_SCORE      = 20.0             # minimum composite score (0-100) before entry
 
 # ── Ticker blocklist ─────────────────────────────────────────────────────────

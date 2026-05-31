@@ -31,7 +31,7 @@ Entry rules (Donchian bounce — matches src/rules.py CYCLE_RULES):
   4. Dollar volume       : avg 20-day dollar vol ≥ SCAN_MIN_DOLLAR_VOL (2× on Fridays)
   5. Donchian floor      : close within BACKTEST_DONCHIAN_TOL_PCT (5%) of 20-day low (wider than live 0.5% — daily close data)
   6. RVOL                : volume / 20d avg ≥ BACKTEST_RVOL_MIN; tighter in bearish regime
-  7. RSI oversold        : RSI was < RSI_OVERSOLD_THRESHOLD (40) in last RSI_OVERSOLD_LOOKBACK (3) bars
+  7. RSI oversold        : RSI was < RSI_OVERSOLD_THRESHOLD (50) in last RSI_OVERSOLD_LOOKBACK (3) bars
   8. RSI delta           : RSI rose ≥ RSI_MIN_DELTA (3.0 pts) vs previous bar
   9. Spread              : not available in daily data — skipped
   10. Day strength        : not available in daily OHLCV — skipped
