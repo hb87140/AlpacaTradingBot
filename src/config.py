@@ -33,8 +33,8 @@ MAX_POSITIONS_CAP = int(os.getenv("VELOCITY_MAX_POSITIONS_CAP", "8"))
 BUCKET_CASH_PCT   = 0.90   # deploy 90% of bucket; 10% reserve avoids overdraft
 
 # ── Chandelier Exit trailing stop ─────────────────────────────────────────────
-CHANDELIER_PERIOD = 26     # lookback for ATR and highest-high
-CHANDELIER_MULT   = 2.0    # ATR multiplier — stop = peak − ATR(22) × 2
+CHANDELIER_PERIOD = 14     # lookback for ATR and highest-high
+CHANDELIER_MULT   = 1.5    # ATR multiplier — stop = peak − ATR(14) × 1.5
 
 # ── Risk rules ────────────────────────────────────────────────────────────────
 VIX_THRESHOLD        = 35
@@ -43,7 +43,7 @@ PROFIT_MIN_THRESHOLD = 0.10    # 10% min gain to avoid velocity exit (plateau; �
 GAP_MAX_PCT          = 0.10    # kept for backtest compatibility
 MAX_DAILY_LOSS_PCT   = 0.03    # 3% intraday equity drawdown halts new entries
 RSI_MIN_DELTA        = 3.0     # minimum RSI point rise to confirm momentum turn
-HARD_STOP_PCT        = 0.07    # 7% drawdown from entry → forced market exit
+HARD_STOP_PCT        = 0.05    # 5% drawdown from entry → forced market exit
 RISK_PER_TRADE_PCT   = 0.02    # risk 2% of equity per trade (ATR-based sizing)
 BREAK_EVEN_PCT       = 0.06    # once profit ≥ 6%, floor stop at entry
 LIMIT_BUF_MIN_PCT    = 0.002   # minimum limit-price buffer above ask (0.2%)
@@ -53,7 +53,7 @@ CONCENTRATION_HALT_PCT = 0.95  # deployed ≥ 95% of equity → halt all order a
 REPRICE_DRIFT_MAX_PCT  = 0.02  # skip entry if price moved >2% since scan snapshot
 MIN_TREND_SEP        = 0.03    # kept for backtest compatibility
 FRIDAY_CLOSE_HOUR    = 15      # ET hour after which Friday positions are evaluated
-FRIDAY_MIN_PROFIT_PCT = 0.03   # Friday close: exit if profit < 3%
+FRIDAY_MIN_PROFIT_PCT = 0.00   # Friday close rule disabled — mean-reversion bounces benefit from weekend hold
 
 # ── Session timing ────────────────────────────────────────────────────────────
 ENTRY_START          = (10, 0)   # first valid entry (after opening volatility settles)
