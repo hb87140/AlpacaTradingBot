@@ -87,8 +87,8 @@ class TestEntrySignal:
     Positional args:      prev_rsi, rvol, rvol_min
     """
 
-    def _row(self, close=100.0, open_=98.9, donch_lower=99.8, rsi=52.0, rsi_min_lookback=28.0):
-        """Default passing row: green candle (≥1% body), within 0.2% of Donchian floor, RSI was oversold."""
+    def _row(self, close=100.0, open_=98.7, donch_lower=99.8, rsi=52.0, rsi_min_lookback=28.0):
+        """Default passing row: green candle (≥1.2% body), within 0.2% of Donchian floor, RSI was oversold."""
         return pd.Series({
             'open':            open_,
             'close':           close,
@@ -217,9 +217,9 @@ class TestEntrySignal:
             rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
     def test_passes_strong_green_candle_at_floor(self):
-        # close=100, open=99.0 → 1% body, well above 0.5% threshold
+        # close=100, open=98.7 → 1.3% body, well above 1.2% threshold
         assert VelocityBacktest._entry_signal(
-            self._row(close=100.0, open_=99.0), prev_rsi=35.0,
+            self._row(close=100.0, open_=98.7), prev_rsi=35.0,
             rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
     def test_passes_when_open_missing_from_row(self):
