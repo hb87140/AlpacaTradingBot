@@ -73,7 +73,7 @@ HIGH200_MIN_PCT = 0.85          # kept for backtest compatibility
 SMA200_SLOPE_LOOKBACK = 5       # kept for backtest compatibility
 
 # Donchian Channel (mean-reversion floor/ceiling)
-DONCHIAN_PERIOD        = 10     # lookback for Donchian Channel bands
+DONCHIAN_PERIOD        = 5      # lookback for Donchian Channel bands
 DONCHIAN_FLOOR_TOL_PCT = 0.005  # price must be within 0.5% of lower band to qualify (live intraday)
 BACKTEST_DONCHIAN_TOL_PCT = 0.08  # wider 8% for daily close data — daily close rarely ≤0.5% above band low
 
