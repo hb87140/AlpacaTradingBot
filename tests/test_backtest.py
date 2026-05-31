@@ -111,9 +111,9 @@ class TestEntrySignal:
             rvol_min=BACKTEST_RVOL_MIN)
 
     def test_fails_price_too_far_above_lower_band(self):
-        # proximity = (109 - 99.8) / 99.8 = 9.2% > BACKTEST_DONCHIAN_TOL_PCT (8%)
+        # proximity = (113 - 99.8) / 99.8 = 13.2% > BACKTEST_DONCHIAN_TOL_PCT (12%)
         assert not VelocityBacktest._entry_signal(
-            self._row(close=109.0, donch_lower=99.8), prev_rsi=35.0,
+            self._row(close=113.0, donch_lower=99.8), prev_rsi=35.0,
             rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
     def test_fails_rsi_never_oversold_in_lookback(self):
