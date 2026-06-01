@@ -110,8 +110,8 @@ def _ctx(price=100.0, orb=95.0, ma50=105.0, ma200=90.0,
     # Donchian defaults: price 0.2% above lower band (well within 40% tolerance)
     dl = donchian_lower if donchian_lower is not None else round(price * 0.998, 4)
     du = donchian_upper if donchian_upper is not None else round(price * 1.10, 4)
-    # Day-strength defaults: price 0.8% above open, in upper 86% of intraday range
-    io = intraday_open if intraday_open is not None else round(price * 0.992, 4)
+    # Day-strength defaults: price 1.2% above open, in upper 86% of intraday range
+    io = intraday_open if intraday_open is not None else round(price * 0.988, 4)
     ih = intraday_high if intraday_high is not None else round(price * 1.005, 4)
     il = intraday_low  if intraday_low  is not None else round(price * 0.970, 4)
     # RSI history: contains oversold values (<35) within last 3 bars for lookback check

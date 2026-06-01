@@ -83,7 +83,7 @@ RSI_OVERSOLD_LOOKBACK  = 50     # … within the last N daily candles
 RSI_BOUNCE_MAX         = 86     # RSI at entry must not exceed this (avoid support-failure pattern)
 
 # Day-strength gate (confirms price is recovering, not fading)
-DAY_STRENGTH_OPEN_PCT  = 0.005  # price must be ≥ 0.5% above today's open
+DAY_STRENGTH_OPEN_PCT  = 0.010  # price must be ≥ 1.0% above today's open — aligned with BACKTEST_MIN_BODY_PCT
 BACKTEST_MIN_BODY_PCT  = 0.010  # daily close must be ≥ 1.0% above open — strong recovery confirmation
 
 # SPY regime (soft — bearish regime cuts size + tightens RVOL, does not block)
