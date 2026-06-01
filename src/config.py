@@ -79,7 +79,7 @@ BACKTEST_DONCHIAN_TOL_PCT = 0.40  # wider 40% for daily close data — peak at s
 
 # RSI oversold lookback (bounce signal)
 RSI_OVERSOLD_THRESHOLD = 45     # RSI must have been below this threshold
-RSI_OVERSOLD_LOOKBACK  = 32     # … within the last N daily candles
+RSI_OVERSOLD_LOOKBACK  = 50     # … within the last N daily candles
 RSI_BOUNCE_MAX         = 86     # RSI at entry must not exceed this (avoid support-failure pattern)
 
 # Day-strength gate (confirms price is recovering, not fading)
