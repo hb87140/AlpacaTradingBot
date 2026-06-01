@@ -50,7 +50,7 @@ from src.config import (
 def parse_args():
     p = argparse.ArgumentParser(description="Velocity Strategy Forward Backtester")
     break_even_default = f"{BREAK_EVEN_PCT:.0%}".replace("%", "%%")
-    p.add_argument("--start",           default="2025-01-01",        help="Start date YYYY-MM-DD")
+    p.add_argument("--start",           default="2021-01-01",        help="Start date YYYY-MM-DD")
     p.add_argument("--end",             default=date.today().isoformat(), help="End date YYYY-MM-DD (default: today)")
     p.add_argument("--capital",         default=BACKTEST_INITIAL_CAPITAL, type=float,
                    help=f"Starting capital USD (default: ${BACKTEST_INITIAL_CAPITAL:,.0f})")
