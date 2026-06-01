@@ -56,6 +56,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Dict, List, Optional, Tuple
 
+import joblib
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -371,10 +372,10 @@ class VelocityBacktest:
         if os.path.exists(ind_path):
             try:
                 print(f"  Loading indicator cache from {ind_path} …")
-                with open(ind_path, 'rb') as f:
-                    self._data = pickle.load(f)
+                self._data = joblib.load(ind_path)
                 print(f"  Loaded {len(self._data):,} symbols. Recomputing RSI_MIN_LOOKBACK …")
                 self._apply_rsi_lookback()
+                self._prefilter_universe()
                 return True
             except Exception as e:
                 print(f"  Indicator cache load failed ({e}), trying raw cache …")
@@ -433,19 +434,38 @@ class VelocityBacktest:
         except Exception as e:
             print(f"  Raw cache save failed: {e}")
 
+    def _prefilter_universe(self) -> None:
+        """Drop symbols that never pass the basic price/volume/dollar-vol floors
+        on any day in the loaded data. Shrinks the iteration space before the
+        simulation loop runs without affecting results (symbols that never qualify
+        are never entered anyway)."""
+        before = len(self._data)
+        keep = {}
+        for sym, df in self._data.items():
+            price_ok  = (df['close'] >= self._min_price).any()
+            vol_ok    = (df['volume'] >= self._min_volume).any()
+            dvol_ok   = ('avg_dollar_vol_20' not in df.columns or
+                         (df['avg_dollar_vol_20'] >= self._min_dollar_vol).any())
+            if price_ok and vol_ok and dvol_ok:
+                keep[sym] = df
+        self._data = keep
+        dropped = before - len(self._data)
+        if dropped:
+            print(f"  Universe pre-filter: kept {len(self._data):,} / {before:,} symbols "
+                  f"({dropped:,} never pass price/vol/dollar-vol floors).")
+
     def _save_ind_cache(self) -> None:
         """Save only the columns the simulation reads (_IND_CACHE_COLS) to the
-        level-2 cache. Excludes RSI_MIN_LOOKBACK (always recomputed) and unused
-        columns (MA50, MA200, ADX, HIGH200, DONCH_HIGH) to keep the file small
-        and deserialization fast."""
+        level-2 cache using joblib (numpy-native format, much faster than pickle).
+        Excludes RSI_MIN_LOOKBACK (always recomputed) and unused columns
+        (MA50, MA200, ADX, HIGH200, DONCH_HIGH)."""
         path = self._ind_cache_path()
         try:
             snapshot = {}
             for sym, df in self._data.items():
                 keep = [c for c in _IND_CACHE_COLS if c in df.columns]
                 snapshot[sym] = df[keep].copy()
-            with open(path, 'wb') as f:
-                pickle.dump(snapshot, f, protocol=pickle.HIGHEST_PROTOCOL)
+            joblib.dump(snapshot, path, compress=0)
             size_mb = os.path.getsize(path) / 1024 / 1024
             print(f"  Indicator cache saved → {path} ({size_mb:.0f} MB)")
         except Exception as e:

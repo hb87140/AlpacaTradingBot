@@ -135,11 +135,19 @@ _SWEEP_PARAM_MAP = {
     "min-dollar-vol":   ("_min_dollar_vol",           float, False),
     "rvol":             ("_rvol_min",                 float, False),
     "min-score":        ("_min_score",                float, False),
-    "min-price":        ("_min_price",                float, False),
+    "min-price":         ("_min_price",                float, False),
+    "friday-min-profit": ("_friday_min_profit",        float, False),
     # These change indicator columns — expensive; sweep externally if needed.
     "donchian-period":  ("_donchian_period",          int,   True),
     "chandelier-period":("_chandelier_period",        int,   True),
 }
+
+# Parameters that only affect exit logic — the daily scan result is identical
+# across all values, so precomputed scans can be reused for a 10-20x speedup.
+_EXIT_ONLY_PARAMS = frozenset([
+    "hard-stop-pct", "profit-min", "hold-bars", "break-even-pct",
+    "chandelier-mult", "friday-min-profit",
+])
 
 
 def _build_backtest(args) -> "VelocityBacktest":
@@ -242,6 +250,15 @@ def _run_sweep(args) -> None:
     bt.load_data()
     print(f"  Data loaded: {len(bt._data):,} symbols. Starting sweep …\n", flush=True)
 
+    # For exit-only params the daily scan is identical across all values.
+    # Precompute it once; each simulation skips O(n_symbols × n_days) scan.
+    precomputed = None
+    if param_str in _EXIT_ONLY_PARAMS:
+        print("  Precomputing scan candidates (exit-only param — scan results are constant) …",
+              flush=True)
+        precomputed = bt._precompute_scans_enriched()
+        print(f"  Precomputed {len(precomputed):,} trading days. Starting sweep …\n", flush=True)
+
     for val in values:
         setattr(bt, attr, val)
         if param_str == "rsi-lookback":
@@ -249,7 +266,7 @@ def _run_sweep(args) -> None:
         elif needs_recompute:
             bt._apply_indicators({s: df[bt._RAW_COLS] for s, df in bt._data.items()})
             bt._save_ind_cache()
-        result = bt.run_with_flags({})
+        result = bt.run_with_flags({}, precomputed_scans=precomputed)
         sharpe = result.metrics.get("sharpe_ratio", 0.0)
         print(f"  {param_str}={val}:   Sharpe Ratio      : {sharpe:.2f}", flush=True)
 
