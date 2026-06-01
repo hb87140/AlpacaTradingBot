@@ -36,9 +36,11 @@ from src.config import (
     PROFIT_MIN_THRESHOLD, HARD_STOP_PCT, BREAK_EVEN_PCT,
     FRIDAY_MIN_PROFIT_PCT, MAX_DAILY_LOSS_PCT, CORR_MAX, MAX_SECTOR_COUNT,
     ENTRY_START, ENTRY_END, FRIDAY_CLOSE_HOUR,
-    RSI_PERIOD, RSI_MIN_DELTA, RSI_THRESHOLD, MA_FAST, MA_SLOW,
-    MIN_TREND_SEP, ORB_BAR_MINUTES,
-    ADX_PERIOD, ADX_THRESHOLD, HIGH200_MIN_PCT,
+    RSI_PERIOD, RSI_MIN_DELTA,
+    RSI_OVERSOLD_THRESHOLD, RSI_OVERSOLD_LOOKBACK, RSI_BOUNCE_MAX,
+    DONCHIAN_PERIOD, DONCHIAN_FLOOR_TOL_PCT,
+    DAY_STRENGTH_OPEN_PCT,
+    SCAN_MIN_SCORE,
     ALPACA_PAPER,
 )
 
@@ -1144,18 +1146,17 @@ setInterval(refresh, 5000);
 # Inject config-driven condition descriptions so the dashboard always reflects
 # current strategy parameters from config.py.
 _COND_JS = (
-    f'["1",  "ORB Breakout",    "en", "Live price above the Opening Range High ({ORB_BAR_MINUTES}-min bar, 09:30–09:45 ET) — confirmed momentum breakout"],\n'
-    f'  ["2",  "Trend Filter",    "en", "Price > MA{MA_FAST} > MA{MA_SLOW} — full institutional uptrend; MA{MA_FAST} ≥ {MIN_TREND_SEP*100:.0f}% above MA{MA_SLOW}"],\n'
-    f'  ["3",  "Momentum Hook",   "en", "RSI({RSI_PERIOD}) rising ≥ {RSI_MIN_DELTA:.0f} pt AND RSI > {RSI_THRESHOLD} — acceleration, not exhaustion"],\n'
-    f'  ["4",  "Universe Filter", "en", "Alpaca scan: Top gainers ≥ {SCAN_MIN_GAIN_PCT:.0f}% + most actives | Price > ${SCAN_MIN_PRICE:.0f} | RVOL ≥ {RVOL_MIN:.1f}× | Vol > {SCAN_MIN_VOLUME/1e6:.0f}M | Spread ≤ {SPREAD_MAX_PCT*100:.1f}%"],\n'
-    f'  ["5",  "SPY Regime",      "en", "SPY > SMA50 > SMA200 AND SMA200 slope > 0 — blocks all entries during bear-market conditions and false recoveries"],\n'
-    f'  ["6",  "Trend Strength",  "en", "ADX({ADX_PERIOD}) > {ADX_THRESHOLD} AND close ≥ {HIGH200_MIN_PCT*100:.0f}% of 200-day high — real trend momentum and market leadership"],\n'
-    f'  ["7",  "VIX Filter",      "en", "VIX ≤ {VIX_THRESHOLD} required — VIX > {VIX_THRESHOLD} suspends all new entries (Risk-Off regime)"],\n'
-    f'  ["8",  "Session Window",  "en", "Entries only {ENTRY_START[0]:02d}:{ENTRY_START[1]:02d}–{ENTRY_END[0]:02d}:{ENTRY_END[1]:02d} ET Mon–Fri (30-min post-open buffer avoids ORB noise)"],\n'
-    f'  ["9",  "Position Limit",  "en", "Max {MAX_POSITIONS_CAP} concurrent positions — dynamic: floor(equity/${MIN_BUCKET_SIZE:.0f}), capped at {MAX_POSITIONS_CAP}. Max {MAX_SECTOR_COUNT} per sector. Settled cash constrains new entries (T+1)."],\n'
-    f'  ["10", "Score Ranking",   "en", "All Alpaca scanner results evaluated; scored Trend 30 + RVOL 25 + Momentum 25 + Liquidity 20 = 100 max; minimum score {30} required to enter"],\n'
-    f'  ["11", "Friday Filter",   "en", "Dollar-volume threshold doubled to 2× on Fridays — higher conviction required to enter a position that may need to hold over the weekend"],\n'
-    f'  ["12", "Chandelier Stop", "en", "Entry requires ATR({CHANDELIER_PERIOD})×{CHANDELIER_MULT:.1f} stop distance from live price. Bucket = settled cash × {BUCKET_CASH_PCT*100:.0f}% ÷ open slots. Recalculated every 60-sec cycle."]\n'
+    f'["1",  "Donchian Floor",   "en", "Live price within {DONCHIAN_FLOOR_TOL_PCT*100:.0f}% of {DONCHIAN_PERIOD}-day Donchian lower band — stock touching its recent floor, primed for a bounce"],\n'
+    f'  ["2",  "RSI Oversold",    "en", "RSI({RSI_PERIOD}) was below {RSI_OVERSOLD_THRESHOLD} within the last {RSI_OVERSOLD_LOOKBACK} daily bars — confirms a genuine oversold dip, not a gradual bleed"],\n'
+    f'  ["3",  "RSI Recovery",    "en", "RSI({RSI_PERIOD}) rising ≥ {RSI_MIN_DELTA:.0f} pt AND {RSI_OVERSOLD_THRESHOLD} ≤ RSI ≤ {RSI_BOUNCE_MAX} — momentum turn confirmed, not yet exhausted"],\n'
+    f'  ["4",  "Universe Filter", "en", "Alpaca scan: Top gainers + most actives | Price > ${SCAN_MIN_PRICE:.0f} | RVOL ≥ {RVOL_MIN:.1f}× | Vol > {SCAN_MIN_VOLUME/1e6:.0f}M shares | Spread ≤ {SPREAD_MAX_PCT*100:.1f}%"],\n'
+    f'  ["5",  "Day Strength",    "en", "Price ≥ {DAY_STRENGTH_OPEN_PCT*100:.1f}% above today\'s open AND in upper half of intraday range — buying pressure, not a dead-cat intraday fade"],\n'
+    f'  ["6",  "VIX Filter",      "en", "VIX ≤ {VIX_THRESHOLD} required — VIX > {VIX_THRESHOLD} suspends all new entries (Risk-Off regime)"],\n'
+    f'  ["7",  "Session Window",  "en", "Entries only {ENTRY_START[0]:02d}:{ENTRY_START[1]:02d}–{ENTRY_END[0]:02d}:{ENTRY_END[1]:02d} ET Mon–Fri — avoids opening auction volatility and late-day liquidity risk"],\n'
+    f'  ["8",  "Position Limit",  "en", "Max {MAX_POSITIONS_CAP} concurrent positions — dynamic: floor(equity/${MIN_BUCKET_SIZE:.0f}), capped at {MAX_POSITIONS_CAP}. Max {MAX_SECTOR_COUNT} per sector. Settled cash constrains new entries (T+1)."],\n'
+    f'  ["9",  "Score Ranking",   "en", "All candidates scored: Donchian Proximity 30 + RVOL 25 + RSI Delta 25 + Liquidity 20 = 100 max; minimum score {SCAN_MIN_SCORE:.0f} required to enter"],\n'
+    f'  ["10", "Friday Filter",   "en", "Dollar-volume threshold doubled to 2× on Fridays — higher conviction required to enter a position that may need to hold over the weekend"],\n'
+    f'  ["11", "Chandelier Stop", "en", "Entry requires ATR({CHANDELIER_PERIOD})×{CHANDELIER_MULT:.1f} stop distance from live price. Bucket = settled cash × {BUCKET_CASH_PCT*100:.0f}% ÷ open slots. Recalculated every 60-sec cycle."]\n'
     f'];\n'
     f'const EXIT_CONDITIONS = [\n'
     f'  ["1", "Chandelier Trail", "ex", "TRAIL SELL at ATR({CHANDELIER_PERIOD})×{CHANDELIER_MULT:.1f} from peak price — Alpaca raises the stop automatically as price climbs"],\n'

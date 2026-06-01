@@ -105,7 +105,6 @@ SCORE_LIQUIDITY_MAX = 20.0
 # ── Historical data windows ───────────────────────────────────────────────────
 # Expressed as calendar days so Alpaca's date-based API can use them directly.
 DAILY_HISTORY_DAYS = 400   # enough to produce 200+ trading-day bars
-ORB_BAR_MINUTES    = 15    # kept for backtest compatibility
 
 # ── Scanner filters ───────────────────────────────────────────────────────────
 SCAN_MIN_PRICE      = 10.0              # Universe filter: price > $10

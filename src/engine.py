@@ -152,7 +152,7 @@ class VelocityEngine:
         self._day_start_date:   Optional[str]   = None
 
         # Caches — all keyed by symbol
-        self._bar_cache:   Dict[str, dict] = {}   # daily + ORB bars, date-scoped
+        self._bar_cache:   Dict[str, dict] = {}   # daily bars, date-scoped
         self._spy_cache:   dict            = {}   # SPY trend, date-scoped
         self._sector_cache: Dict[str, str] = {}   # stable, never invalidated
 
