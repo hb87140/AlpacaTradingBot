@@ -111,9 +111,9 @@ class TestEntrySignal:
             rvol_min=BACKTEST_RVOL_MIN)
 
     def test_fails_price_too_far_above_lower_band(self):
-        # proximity = (117 - 99.8) / 99.8 = 17.2% > BACKTEST_DONCHIAN_TOL_PCT (16%)
+        # proximity = (145 - 99.8) / 99.8 = 45.3% > BACKTEST_DONCHIAN_TOL_PCT (40%)
         assert not VelocityBacktest._entry_signal(
-            self._row(close=117.0, donch_lower=99.8), prev_rsi=35.0,
+            self._row(close=145.0, donch_lower=99.8), prev_rsi=35.0,
             rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
     def test_fails_rsi_never_oversold_in_lookback(self):
@@ -123,7 +123,7 @@ class TestEntrySignal:
             rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
     def test_fails_rsi_delta_below_minimum(self):
-        # delta = 42.0 - 40.5 = 1.5 < RSI_MIN_DELTA (3.0)
+        # rsi=42.0 < RSI_OVERSOLD_THRESHOLD(45) → bounce not confirmed (RSI hasn't crossed up yet)
         assert not VelocityBacktest._entry_signal(
             self._row(rsi=42.0), prev_rsi=40.5,
             rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)

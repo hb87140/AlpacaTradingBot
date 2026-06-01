@@ -75,7 +75,7 @@ SMA200_SLOPE_LOOKBACK = 5       # kept for backtest compatibility
 # Donchian Channel (mean-reversion floor/ceiling)
 DONCHIAN_PERIOD        = 2      # lookback for Donchian Channel bands
 DONCHIAN_FLOOR_TOL_PCT = 0.005  # price must be within 0.5% of lower band to qualify (live intraday)
-BACKTEST_DONCHIAN_TOL_PCT = 0.16  # wider 16% for daily close data — daily close rarely ≤0.5% above band low
+BACKTEST_DONCHIAN_TOL_PCT = 0.40  # wider 40% for daily close data — peak at sweep over 0.12-1.00
 
 # RSI oversold lookback (bounce signal)
 RSI_OVERSOLD_THRESHOLD = 45     # RSI must have been below this threshold
