@@ -97,6 +97,13 @@ _PRECOMPUTE_COLS = (
     'close', 'open', 'DONCH_LOWER', 'RSI', 'RSI_PREV', 'RSI_MIN_LOOKBACK',
     'ATR', 'ATR_CHAND', 'avg_vol_20', 'avg_dollar_vol_20',
 )
+# Minimal column set stored in the indicator cache (excludes RSI_MIN_LOOKBACK which
+# is always recomputed, and unused columns like MA50/MA200/ADX/HIGH200/DONCH_HIGH).
+_IND_CACHE_COLS = frozenset([
+    'open', 'high', 'low', 'close', 'volume',
+    'RSI', 'RSI_PREV', 'ATR', 'ATR_CHAND', 'DONCH_LOWER',
+    'avg_vol_20', 'avg_dollar_vol_20',
+])
 
 
 # ── Data types ────────────────────────────────────────────────────────────────
@@ -427,18 +434,20 @@ class VelocityBacktest:
             print(f"  Raw cache save failed: {e}")
 
     def _save_ind_cache(self) -> None:
-        """Save indicator-enriched DataFrames to level-2 cache. RSI_MIN_LOOKBACK
-        is excluded because it depends on rsi_oversold_lookback (a sweep parameter)
-        and is cheap to recompute from the cached RSI column."""
+        """Save only the columns the simulation reads (_IND_CACHE_COLS) to the
+        level-2 cache. Excludes RSI_MIN_LOOKBACK (always recomputed) and unused
+        columns (MA50, MA200, ADX, HIGH200, DONCH_HIGH) to keep the file small
+        and deserialization fast."""
         path = self._ind_cache_path()
         try:
-            snapshot = {
-                sym: df.drop(columns=['RSI_MIN_LOOKBACK'], errors='ignore')
-                for sym, df in self._data.items()
-            }
+            snapshot = {}
+            for sym, df in self._data.items():
+                keep = [c for c in _IND_CACHE_COLS if c in df.columns]
+                snapshot[sym] = df[keep].copy()
             with open(path, 'wb') as f:
                 pickle.dump(snapshot, f, protocol=pickle.HIGHEST_PROTOCOL)
-            print(f"  Indicator cache saved → {path}")
+            size_mb = os.path.getsize(path) / 1024 / 1024
+            print(f"  Indicator cache saved → {path} ({size_mb:.0f} MB)")
         except Exception as e:
             print(f"  Indicator cache save failed: {e}")
 
@@ -738,6 +747,18 @@ class VelocityBacktest:
                 enriched.append((sym, rvol, row_data, prev_rsi))
             result[today] = enriched
         return result
+
+    def load_data(self) -> None:
+        """Load indicator cache (or download if needed) without running the simulation.
+        Subsequent calls to run_with_flags() will reuse the loaded data."""
+        if self._data:
+            return
+        if self._use_cache and self._try_load_cache():
+            self._download_regime_data()
+        else:
+            self._download()
+        if not self._data:
+            raise RuntimeError("No usable data downloaded. Check tickers / dates.")
 
     def run_with_flags(self, flags: dict, precomputed_scans: dict = None) -> BacktestResult:
         """Run _run_loop with custom signal flags; data must already be loaded.

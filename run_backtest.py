@@ -110,32 +110,40 @@ def parse_args():
                    help="Print top-20 trade log after summary")
     p.add_argument("--no-cache",        action="store_true",
                    help="Force fresh data download (ignore backtest/.cache/)")
+    p.add_argument("--sweep",           default="",
+                   metavar="PARAM=V1,V2,...",
+                   help="In-process sweep: load data once, simulate for each value. "
+                        "PARAM is the CLI flag name without '--' (e.g. rsi-bounce-max=80,82,84). "
+                        "Parameters that change indicator columns (donchian-period, chandelier-period) "
+                        "require full recomputation and cannot be swept this way.")
     return p.parse_args()
 
 
-def main():
-    args = parse_args()
-    print("\nVELOCITY STRATEGY — FORWARD BACKTEST")
-    print(f"{'─' * 50}")
-    print(f"  Period        : {args.start} → {args.end}")
-    print(f"  Capital       : ${args.capital:,.2f}")
-    _init_slots      = min(int(args.capital / MIN_BUCKET_SIZE), MAX_POSITIONS_CAP) if args.capital >= MIN_BUCKET_SIZE else 0
-    _init_bucket_str = f"${args.capital / _init_slots:,.2f}" if _init_slots > 0 else "N/A"
-    print(f"  Max pos       : {MAX_POSITIONS_CAP} cap  |  Dynamic max = floor(equity / ${MIN_BUCKET_SIZE:.0f}/slot)  |  Initial slots={_init_slots}, bucket≈{_init_bucket_str}")
-    print("  Entry rules   : 12-filter production screener")
-    print(f"  RVOL min      : {args.rvol:.1f}× (daily close proxy)")
-    print(f"  Min score     : {args.min_score:.0f}/100 composite gate")
-    print(f"  Exit          : Chandelier (ATR{CHANDELIER_PERIOD}×{CHANDELIER_MULT}) + 7% hard stop + {args.break_even_pct:.0%} break-even")
-    print(f"  Velocity exit : profit_min {args.profit_min:.0%} after {args.hold_bars} bars")
-    print(f"  Hold bars     : {args.hold_bars} trading days before velocity check")
-    print("  Position size : ATR-based (2% equity risk) capped by bucket")
-    print(f"  Slippage      : {BACKTEST_SLIPPAGE:.1%} entry, {BACKTEST_EXIT_SLIPPAGE:.1%} exit (mkt orders)  |  Commission: ${args.commission_per_order*2:.2f}/round-trip")
-    print(f"  SPY filter    : {'ON (EMA50 soft regime)' if args.spy_filter else 'OFF (mean-reversion default)'}")
-    print(f"  VIX filter    : {'ON (VIX > 35 blocks entries)' if args.vix_filter else 'OFF'}")
-    print(f"  Cache         : {'OFF (forced re-download)' if args.no_cache else 'ON (backtest/.cache/)'}")
-    print()
+# Maps CLI flag name → (instance_attr, type, needs_indicator_recompute)
+_SWEEP_PARAM_MAP = {
+    "rsi-bounce-max":   ("_rsi_bounce_max",          float, False),
+    "min-body-pct":     ("_min_body_pct",             float, False),
+    "rsi-oversold":     ("_rsi_oversold_threshold",   float, False),
+    "rsi-lookback":     ("_rsi_oversold_lookback",    int,   False),  # triggers _apply_rsi_lookback
+    "rsi-min-delta":    ("_rsi_min_delta",            float, False),
+    "donchian-tol":     ("_donchian_tol_pct",         float, False),
+    "chandelier-mult":  ("_chandelier_mult",          float, False),
+    "hard-stop-pct":    ("_hard_stop_pct",            float, False),
+    "profit-min":       ("_profit_min_threshold",     float, False),
+    "hold-bars":        ("hold_bars",                 int,   False),
+    "break-even-pct":   ("_break_even_pct",           float, False),
+    "min-dollar-vol":   ("_min_dollar_vol",           float, False),
+    "rvol":             ("_rvol_min",                 float, False),
+    "min-score":        ("_min_score",                float, False),
+    "min-price":        ("_min_price",                float, False),
+    # These change indicator columns — expensive; sweep externally if needed.
+    "donchian-period":  ("_donchian_period",          int,   True),
+    "chandelier-period":("_chandelier_period",        int,   True),
+}
 
-    bt = VelocityBacktest(
+
+def _build_backtest(args) -> "VelocityBacktest":
+    return VelocityBacktest(
         start              = args.start,
         end                = args.end,
         capital            = args.capital,
@@ -167,11 +175,83 @@ def main():
         use_vix_filter     = args.vix_filter,
         use_cache          = not args.no_cache,
     )
+
+
+def main():
+    args = parse_args()
+
+    if args.sweep:
+        _run_sweep(args)
+        return
+
+    print("\nVELOCITY STRATEGY — FORWARD BACKTEST")
+    print(f"{'─' * 50}")
+    print(f"  Period        : {args.start} → {args.end}")
+    print(f"  Capital       : ${args.capital:,.2f}")
+    _init_slots      = min(int(args.capital / MIN_BUCKET_SIZE), MAX_POSITIONS_CAP) if args.capital >= MIN_BUCKET_SIZE else 0
+    _init_bucket_str = f"${args.capital / _init_slots:,.2f}" if _init_slots > 0 else "N/A"
+    print(f"  Max pos       : {MAX_POSITIONS_CAP} cap  |  Dynamic max = floor(equity / ${MIN_BUCKET_SIZE:.0f}/slot)  |  Initial slots={_init_slots}, bucket≈{_init_bucket_str}")
+    print("  Entry rules   : 12-filter production screener")
+    print(f"  RVOL min      : {args.rvol:.1f}× (daily close proxy)")
+    print(f"  Min score     : {args.min_score:.0f}/100 composite gate")
+    print(f"  Exit          : Chandelier (ATR{CHANDELIER_PERIOD}×{CHANDELIER_MULT}) + 7% hard stop + {args.break_even_pct:.0%} break-even")
+    print(f"  Velocity exit : profit_min {args.profit_min:.0%} after {args.hold_bars} bars")
+    print(f"  Hold bars     : {args.hold_bars} trading days before velocity check")
+    print("  Position size : ATR-based (2% equity risk) capped by bucket")
+    print(f"  Slippage      : {BACKTEST_SLIPPAGE:.1%} entry, {BACKTEST_EXIT_SLIPPAGE:.1%} exit (mkt orders)  |  Commission: ${args.commission_per_order*2:.2f}/round-trip")
+    print(f"  SPY filter    : {'ON (EMA50 soft regime)' if args.spy_filter else 'OFF (mean-reversion default)'}")
+    print(f"  VIX filter    : {'ON (VIX > 35 blocks entries)' if args.vix_filter else 'OFF'}")
+    print(f"  Cache         : {'OFF (forced re-download)' if args.no_cache else 'ON (backtest/.cache/)'}")
+    print()
+
+    bt = _build_backtest(args)
     result = bt.run()
     VelocityBacktest.print_report(result, capital=args.capital)
 
     if args.trades:
         VelocityBacktest.print_trades(result)
+
+
+def _run_sweep(args) -> None:
+    """In-process parameter sweep: load indicator cache once, simulate for each value.
+
+    Usage:
+        run_backtest.py --start 2021-01-01 --end 2026-05-31 \\
+            --sweep rsi-bounce-max=80,82,84,86,90,95,100
+    """
+    try:
+        param_str, values_str = args.sweep.split("=", 1)
+    except ValueError:
+        print(f"ERROR: --sweep must be PARAM=V1,V2,... (got: {args.sweep!r})", file=sys.stderr)
+        sys.exit(1)
+
+    param_str = param_str.strip()
+    if param_str not in _SWEEP_PARAM_MAP:
+        print(f"ERROR: unknown sweep param {param_str!r}. Known: {', '.join(_SWEEP_PARAM_MAP)}", file=sys.stderr)
+        sys.exit(1)
+
+    attr, cast, needs_recompute = _SWEEP_PARAM_MAP[param_str]
+    values = [cast(v.strip()) for v in values_str.split(",")]
+
+    if needs_recompute:
+        print(f"WARNING: {param_str} changes indicator columns — each value triggers full indicator recomputation.", file=sys.stderr)
+
+    # Load indicator cache ONCE — the expensive part (all values share this).
+    bt = _build_backtest(args)
+    print(f"Loading data for sweep: {param_str} ∈ {values} …", flush=True)
+    bt.load_data()
+    print(f"  Data loaded: {len(bt._data):,} symbols. Starting sweep …\n", flush=True)
+
+    for val in values:
+        setattr(bt, attr, val)
+        if param_str == "rsi-lookback":
+            bt._apply_rsi_lookback()
+        elif needs_recompute:
+            bt._apply_indicators({s: df[bt._RAW_COLS] for s, df in bt._data.items()})
+            bt._save_ind_cache()
+        result = bt.run_with_flags({})
+        sharpe = result.metrics.get("sharpe_ratio", 0.0)
+        print(f"  {param_str}={val}:   Sharpe Ratio      : {sharpe:.2f}", flush=True)
 
 
 if __name__ == "__main__":
