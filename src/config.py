@@ -42,7 +42,7 @@ HOLD_TRADING_BARS    = 1       # Mon-Fri trading sessions before velocity exit f
 PROFIT_MIN_THRESHOLD = 0.30    # 30% min gain to avoid velocity exit (plateau at ≥30%)
 GAP_MAX_PCT          = 0.10    # kept for backtest compatibility
 MAX_DAILY_LOSS_PCT   = 0.03    # 3% intraday equity drawdown halts new entries
-RSI_MIN_DELTA        = 3.0     # minimum RSI point rise to confirm momentum turn
+RSI_MIN_DELTA        = 1.0     # minimum RSI point rise to confirm momentum turn
 HARD_STOP_PCT        = 0.05    # 5% drawdown from entry → forced market exit
 RISK_PER_TRADE_PCT   = 0.02    # risk 2% of equity per trade (ATR-based sizing)
 BREAK_EVEN_PCT       = 0.06    # once profit ≥ 6%, floor stop at entry
@@ -78,7 +78,7 @@ DONCHIAN_FLOOR_TOL_PCT = 0.005  # price must be within 0.5% of lower band to qua
 BACKTEST_DONCHIAN_TOL_PCT = 0.16  # wider 16% for daily close data — daily close rarely ≤0.5% above band low
 
 # RSI oversold lookback (bounce signal)
-RSI_OVERSOLD_THRESHOLD = 50     # RSI must have been below this threshold
+RSI_OVERSOLD_THRESHOLD = 45     # RSI must have been below this threshold
 RSI_OVERSOLD_LOOKBACK  = 32     # … within the last N daily candles
 RSI_BOUNCE_MAX         = 86     # RSI at entry must not exceed this (avoid support-failure pattern)
 
