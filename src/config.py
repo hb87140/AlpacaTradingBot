@@ -74,8 +74,8 @@ SMA200_SLOPE_LOOKBACK = 5       # kept for backtest compatibility
 
 # Donchian Channel (mean-reversion floor/ceiling)
 DONCHIAN_PERIOD        = 2      # lookback for Donchian Channel bands
-DONCHIAN_FLOOR_TOL_PCT = 0.005  # price must be within 0.5% of lower band to qualify (live intraday)
-BACKTEST_DONCHIAN_TOL_PCT = 0.40  # wider 40% for daily close data — peak at sweep over 0.12-1.00
+DONCHIAN_FLOOR_TOL_PCT = 0.40   # price must be within 40% of lower band — aligned with backtest optimal
+BACKTEST_DONCHIAN_TOL_PCT = 0.40  # daily close data — same 40% as live; peak at sweep over 0.12-1.00
 
 # RSI oversold lookback (bounce signal)
 RSI_OVERSOLD_THRESHOLD = 45     # RSI must have been below this threshold
@@ -134,8 +134,8 @@ TICKER_BLOCKLIST: set = {
 
 # ── Screener rules ────────────────────────────────────────────────────────────
 MIN_CANDLES          = 210     # minimum daily bars (SMA200 + slope buffer)
-RVOL_MIN             = 2.5     # minimum relative volume (live intraday)
-BACKTEST_RVOL_MIN    = 1.2     # daily close RVOL proxy for backtests
+RVOL_MIN             = 1.2     # minimum relative volume — aligned with backtest optimal (BACKTEST_RVOL_MIN)
+BACKTEST_RVOL_MIN    = 1.2     # daily close RVOL proxy — matches live RVOL_MIN after parameter alignment
 BACKTEST_HOLD_BARS   = 1
 BACKTEST_SLIPPAGE    = 0.001   # 0.1% entry slippage
 BACKTEST_EXIT_SLIPPAGE = 0.001

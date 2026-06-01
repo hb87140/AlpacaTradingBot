@@ -1129,7 +1129,7 @@ class TestTwelveRuleFilter:
         fixed_ny = datetime(2026, 5, 19, 11, 0, tzinfo=pytz.timezone('US/Eastern'))
         return {
             'live_price':      100.0,
-            # Donchian: price 0.2% above lower band (within 0.5% tolerance)
+            # Donchian: price 0.2% above lower band (within 40% tolerance)
             'donchian_lower':   99.8,
             'donchian_upper':  110.0,
             # RSI momentum: delta=7.0 >= RSI_MIN_DELTA, history has values below threshold=50
@@ -1191,10 +1191,10 @@ class TestTwelveRuleFilter:
         assert tc.submit_order.call_count == 0
 
     def test_fails_donchian_floor_too_far(self):
-        """Price too far above lower band (>0.5%) → donchian_floor fails."""
+        """Price too far above lower band (>40%) → donchian_floor fails."""
         ctx = self._make_passing_ctx()
-        ctx['live_price']     = 101.0
-        ctx['donchian_lower'] = 100.0   # 1% gap exceeds 0.5% tolerance
+        ctx['live_price']     = 141.0
+        ctx['donchian_lower'] = 100.0   # 41% gap exceeds 40% tolerance
         tc, _ = self._run_cycle_with_conditions(ctx)
         assert tc.submit_order.call_count == 0
 

@@ -214,11 +214,10 @@ class TestExpertFilter:
         assert self._engine_passes(ctx) is False
 
     def test_fails_when_price_too_far_above_donchian_floor(self):
-        """Price 1% above lower band when tolerance is 0.5% → donchian_floor fails."""
-        from src.config import DONCHIAN_FLOOR_TOL_PCT
+        """Price 41% above lower band when tolerance is 40% → donchian_floor fails."""
         ctx = self._base_ctx()
-        ctx['live_price']     = 101.0
-        ctx['donchian_lower'] = 100.0   # 1% below price, > 0.5% tolerance
+        ctx['live_price']     = 141.0
+        ctx['donchian_lower'] = 100.0   # 41% below price, > 40% tolerance
         assert self._engine_passes(ctx) is False
 
     def test_fails_when_rsi_not_rising(self):
@@ -827,7 +826,7 @@ class TestDailyScanSkip:
             'rsi_history': [28.0, 30.0, 32.0, 35.0, 38.0],
             'intraday_open': 99.0, 'intraday_high': 100.5, 'intraday_low': 97.0,
             'atr': 2.0, 'atr_chandelier': 2.0,
-            'rvol': 0.0,   # below RVOL_MIN=2.5 → cycle fail only
+            'rvol': 0.0,   # below RVOL_MIN=1.2 → cycle fail only
             'spread_pct': 0.002,
             'dollar_vol_20d': 500_000_000,   # passes permanent dollar_vol check
             'avg_20d_vol': 5_000_000, 'volume': 5_000_000,

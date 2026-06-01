@@ -5,9 +5,9 @@ Mirrors the live VelocityEngine Donchian mean-reversion bounce strategy.
 Always keep in sync with src/rules.py and src/engine.py.
 
 Key design decisions:
-  1. RVOL uses BACKTEST_RVOL_MIN (1.2×) not RVOL_MIN (2.5×).
-     End-of-day volume does not spike the same way intraday RVOL does;
-     2.5× eliminates ~95% of valid daily setups when applied to close-of-day data.
+  1. RVOL uses BACKTEST_RVOL_MIN (1.2×) == RVOL_MIN (1.2×) after parameter alignment.
+     End-of-day close volume and intraday time-normalized RVOL measure different things;
+     the 1.2× threshold was optimized on daily data and applied uniformly to both systems.
   2. bars_held counts actual trading bars open (not calendar days).
   3. Break-even floor: once profit ≥ BREAK_EVEN_PCT (4%), stop ≥ entry.
   4. ATR-based position sizing: 2% equity risk per trade, tighter of
@@ -29,10 +29,10 @@ Entry rules (Donchian bounce — matches src/rules.py CYCLE_RULES):
   2. Price floor         : close ≥ SCAN_MIN_PRICE ($10)
   3. Volume              : avg 20-day share vol ≥ SCAN_MIN_VOLUME
   4. Dollar volume       : avg 20-day dollar vol ≥ SCAN_MIN_DOLLAR_VOL (2× on Fridays)
-  5. Donchian floor      : close within BACKTEST_DONCHIAN_TOL_PCT (5%) of 20-day low (wider than live 0.5% — daily close data)
-  6. RVOL                : volume / 20d avg ≥ BACKTEST_RVOL_MIN; tighter in bearish regime
-  7. RSI oversold        : RSI was < RSI_OVERSOLD_THRESHOLD (50) in last RSI_OVERSOLD_LOOKBACK (3) bars
-  8. RSI delta           : RSI rose ≥ RSI_MIN_DELTA (3.0 pts) vs previous bar
+  5. Donchian floor      : close within BACKTEST_DONCHIAN_TOL_PCT (40%) of 2-day low (same as live DONCHIAN_FLOOR_TOL_PCT)
+  6. RVOL                : volume / 20d avg ≥ BACKTEST_RVOL_MIN (1.2×); tighter in bearish regime
+  7. RSI oversold        : RSI was < RSI_OVERSOLD_THRESHOLD (45) in last RSI_OVERSOLD_LOOKBACK (50) bars
+  8. RSI delta           : RSI rose ≥ RSI_MIN_DELTA (1.0 pts) vs previous bar
   9. Spread              : not available in daily data — skipped
   10. Day strength        : not available in daily OHLCV — skipped
   SPY regime             : SPY close > EMA50 → bull (soft: smaller bucket + tighter RVOL in bear)

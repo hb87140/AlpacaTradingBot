@@ -107,7 +107,7 @@ def _ctx(price=100.0, orb=95.0, ma50=105.0, ma200=90.0,
          rsi_history=None):
     """Build a get_technical_context()-style dict with all production-rule fields."""
     h200 = high200 if high200 is not None else round(price * 1.1, 4)
-    # Donchian defaults: price 0.2% above lower band (well within 0.5% tolerance)
+    # Donchian defaults: price 0.2% above lower band (well within 40% tolerance)
     dl = donchian_lower if donchian_lower is not None else round(price * 0.998, 4)
     du = donchian_upper if donchian_upper is not None else round(price * 1.10, 4)
     # Day-strength defaults: price 0.8% above open, in upper 86% of intraday range
@@ -458,10 +458,10 @@ class TestScoringDonchianProximity:
       proximity = (price - lower) / lower
       donchian_score = max(0, (1 - proximity / DONCHIAN_FLOOR_TOL_PCT) * 30)
 
-      proximity=0% (price==lower) → 30 pts
-      proximity=0.25% (half tolerance) → 15 pts
-      proximity=0.5% (at ceiling)  → 0 pts
-      proximity>0.5% → clamped at 0
+      proximity=0%  (price==lower)    → 30 pts
+      proximity=20% (half of 40% tol) → 15 pts
+      proximity=40% (at ceiling)      → 0 pts
+      proximity>40% → clamped at 0
       lower=0       → 0 pts (unavailable)
 
     Isolation: rvol=RVOL_MIN → 0; rsi_delta=0 → 0; spread=SPREAD_MAX, vol=0 → 0.
@@ -482,16 +482,16 @@ class TestScoringDonchianProximity:
         assert self._donchian_score(100.0, 100.0) == pytest.approx(30.0, abs=0.1)
 
     def test_half_tolerance_gives_15_pts(self):
-        """proximity=0.25% (half of 0.5%) → 15 pts."""
-        assert self._donchian_score(100.25, 100.0) == pytest.approx(15.0, abs=0.1)
+        """proximity=20% (half of 40% DONCHIAN_FLOOR_TOL_PCT) → 15 pts."""
+        assert self._donchian_score(120.0, 100.0) == pytest.approx(15.0, abs=0.1)
 
     def test_at_tolerance_ceiling_gives_0_pts(self):
-        """proximity=0.5% (DONCHIAN_FLOOR_TOL_PCT) → 0 pts."""
-        assert self._donchian_score(100.5, 100.0) == pytest.approx(0.0, abs=0.1)
+        """proximity=40% (DONCHIAN_FLOOR_TOL_PCT ceiling) → 0 pts."""
+        assert self._donchian_score(140.0, 100.0) == pytest.approx(0.0, abs=0.1)
 
     def test_above_tolerance_clamped_at_zero(self):
-        """proximity>0.5% → 0 pts (clamped)."""
-        assert self._donchian_score(101.0, 100.0) == pytest.approx(0.0, abs=0.1)
+        """proximity>40% → 0 pts (clamped)."""
+        assert self._donchian_score(145.0, 100.0) == pytest.approx(0.0, abs=0.1)
 
     def test_lower_unavailable_gives_zero(self):
         """donchian_lower=0 → component contributes 0."""
@@ -506,12 +506,12 @@ class TestScoringRVOL:
     """RVOL component (0-25 pts):
       rvol_score = min(25, max(0, rvol - RVOL_MIN) / (5.0 - RVOL_MIN) × 25)
 
-      RVOL_MIN = 2.5
-      rvol=2.5 (floor) → 0 pts
-      rvol=3.75 (midpoint) → 12.5 pts
+      RVOL_MIN = 1.2
+      rvol=1.2 (floor) → 0 pts
+      rvol=3.1 (midpoint) → 12.5 pts
       rvol=5.0 → 25 pts
       rvol>5.0 → capped at 25
-      rvol<2.5 → 0 pts
+      rvol<1.2 → 0 pts
 
     Isolation: donchian_lower=0 → 0; rsi_delta=0 → 0; spread=max, vol=0 → 0.
     Total = 0 + rvol_score + 0 + 0 = rvol_score.
@@ -530,8 +530,8 @@ class TestScoringRVOL:
         assert self._rvol_score(RVOL_MIN) == pytest.approx(0.0, abs=0.1)
 
     def test_rvol_at_midpoint_gives_12_5(self):
-        """midpoint = (2.5 + 5.0) / 2 = 3.75 → 12.5 pts."""
-        assert self._rvol_score(3.75) == pytest.approx(12.5, abs=0.1)
+        """midpoint = (1.2 + 5.0) / 2 = 3.1 → 12.5 pts."""
+        assert self._rvol_score(3.1) == pytest.approx(12.5, abs=0.1)
 
     def test_rvol_at_5x_gives_25(self):
         assert self._rvol_score(5.0) == pytest.approx(25.0, abs=0.1)
@@ -1373,7 +1373,7 @@ class TestEdgeCases:
         from src.config import DONCHIAN_FLOOR_TOL_PCT
         tc = _mock_trading_client()
         engine = _make_engine(trading_client=tc)
-        # Price 1% above lower band when tolerance is 0.5% — fails
+        # Price 0.5% above DONCHIAN_FLOOR_TOL_PCT (40%) ceiling — fails
         lower = 100.0
         price = lower * (1 + DONCHIAN_FLOOR_TOL_PCT + 0.005)
         ctx = _ctx(price=price, donchian_lower=lower, rsi=52.0, rsi_prev=35.0)
