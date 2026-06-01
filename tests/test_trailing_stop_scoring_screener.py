@@ -244,7 +244,7 @@ class TestEntryOrderConstruction:
 
     ATR_CHAND  = 3.00
     ENTRY      = 100.00
-    CHAND_DIST = round(3.00 * 2.0, 2)   # 6.00
+    CHAND_DIST = round(3.00 * 2.5, 2)   # 7.50
 
     def _setup(self, equity=2500.0, cash=2500.0):
         from src.config import CHANDELIER_MULT
@@ -277,7 +277,7 @@ class TestEntryOrderConstruction:
 
     def test_chandelier_dist_equals_atr_chandelier_times_mult(self):
         from src.config import CHANDELIER_MULT
-        assert CHANDELIER_MULT == 2.0
+        assert CHANDELIER_MULT == 2.5
         chandelier_dist = round(self.ATR_CHAND * CHANDELIER_MULT, 2)
         assert chandelier_dist == self.CHAND_DIST
 

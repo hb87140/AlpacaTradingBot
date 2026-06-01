@@ -34,7 +34,7 @@ BUCKET_CASH_PCT   = 0.90   # deploy 90% of bucket; 10% reserve avoids overdraft
 
 # ── Chandelier Exit trailing stop ─────────────────────────────────────────────
 CHANDELIER_PERIOD = 14     # lookback for ATR and highest-high
-CHANDELIER_MULT   = 2.0    # ATR multiplier — stop = peak − ATR(26) × 2
+CHANDELIER_MULT   = 2.5    # ATR multiplier — stop = peak − ATR(14) × 2.5
 
 # ── Risk rules ────────────────────────────────────────────────────────────────
 VIX_THRESHOLD        = 35
