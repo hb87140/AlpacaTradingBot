@@ -305,20 +305,40 @@ class VelocityBacktest:
         return sorted(tickers)
 
     # ── Cache helpers ─────────────────────────────────────────────────────────
-    def _cache_path(self) -> str:
-        # min_dollar_vol excluded: it's a scan-time filter; raw OHLCV is identical for all thresholds.
+    _RAW_COLS = ['open', 'high', 'low', 'close', 'volume']
+
+    def _raw_cache_path(self) -> str:
+        """Level-1 cache: raw OHLCV only. Keyed by date range — no indicator params."""
+        key = f"{self._data_start}_{self.end}"
+        h   = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()[:10]
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        return os.path.join(_CACHE_DIR, f"bt_raw_{h}.pkl")
+
+    def _ind_cache_path(self) -> str:
+        """Level-2 cache: indicator-enriched DataFrames (no RSI_MIN_LOOKBACK).
+        Keyed by date range + indicator params that affect computed columns."""
         key = (
             f"{self._data_start}_{self.end}"
-            f"_rv{self._rvol_min}"
+            f"_dp{self._donchian_period}"
+            f"_cp{self._chandelier_period}"
         )
         h   = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()[:10]
         os.makedirs(_CACHE_DIR, exist_ok=True)
+        return os.path.join(_CACHE_DIR, f"bt_ind_{h}.pkl")
+
+    # Legacy path (for backward-compat reads of old bt_*.pkl files)
+    def _cache_path(self) -> str:
+        key = f"{self._data_start}_{self.end}_rv{self._rvol_min}"
+        h   = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()[:10]
         return os.path.join(_CACHE_DIR, f"bt_{h}.pkl")
 
-    _RAW_COLS = ['open', 'high', 'low', 'close', 'volume']
+    def _apply_rsi_lookback(self) -> None:
+        """Recompute RSI_MIN_LOOKBACK for every loaded symbol. Fast rolling op."""
+        for df in self._data.values():
+            df['RSI_MIN_LOOKBACK'] = df['RSI'].shift(1).rolling(self._rsi_oversold_lookback).min()
 
     def _apply_indicators(self, raw: Dict[str, 'pd.DataFrame']) -> None:
-        """Apply all indicators to raw OHLCV frames and populate self._data."""
+        """Compute all indicators from raw OHLCV and populate self._data."""
         loaded = 0
         for sym, df in raw.items():
             try:
@@ -328,7 +348,6 @@ class VelocityBacktest:
                     donchian_period=self._donchian_period
                 )
                 df['RSI_PREV']          = df['RSI'].shift(1)
-                df['RSI_MIN_LOOKBACK']  = df['RSI'].shift(1).rolling(self._rsi_oversold_lookback).min()
                 df['avg_vol_20']        = df['volume'].rolling(20).mean()
                 df['avg_dollar_vol_20'] = (df['close'] * df['volume']).rolling(20).mean()
                 self._data[sym] = df
@@ -336,32 +355,65 @@ class VelocityBacktest:
             except Exception:
                 continue
         print(f"  Indicators applied: {loaded:,} symbols.")
+        self._apply_rsi_lookback()
 
     def _try_load_cache(self) -> bool:
-        path = self._cache_path()
-        if not os.path.exists(path):
-            return False
-        try:
-            print(f"  Loading cached data from {path} …")
-            with open(path, 'rb') as f:
-                cached = pickle.load(f)
-            raw = cached.get('raw')
-            if raw is not None:
-                # New-format cache: raw OHLCV only — recompute indicators now.
-                print(f"  Loaded {len(raw):,} symbols from cache. Computing indicators …")
-                self._apply_indicators(raw)
-            else:
-                # Legacy cache: already indicator-enriched. Use as-is (period=20 assumed).
-                self._data = cached.get('data', {})
-                print(f"  Loaded {len(self._data):,} symbols from cache (legacy format).")
-            return True
-        except Exception as e:
-            print(f"  Cache load failed ({e}), re-downloading …")
-            return False
+        """Load from fastest available cache level; fall back through levels."""
+        # Level 2: indicator cache — fastest path, only RSI_MIN_LOOKBACK recomputed.
+        ind_path = self._ind_cache_path()
+        if os.path.exists(ind_path):
+            try:
+                print(f"  Loading indicator cache from {ind_path} …")
+                with open(ind_path, 'rb') as f:
+                    self._data = pickle.load(f)
+                print(f"  Loaded {len(self._data):,} symbols. Recomputing RSI_MIN_LOOKBACK …")
+                self._apply_rsi_lookback()
+                return True
+            except Exception as e:
+                print(f"  Indicator cache load failed ({e}), trying raw cache …")
+                self._data = {}
 
-    def _save_cache(self) -> None:
-        """Save raw OHLCV to cache (indicator-free so any param set can reuse it)."""
-        path = self._cache_path()
+        # Level 1: raw OHLCV cache — recompute all indicators.
+        raw_path = self._raw_cache_path()
+        if os.path.exists(raw_path):
+            try:
+                print(f"  Loading raw cache from {raw_path} …")
+                with open(raw_path, 'rb') as f:
+                    raw = pickle.load(f)
+                print(f"  Loaded {len(raw):,} symbols. Computing indicators …")
+                self._apply_indicators(raw)
+                self._save_ind_cache()
+                return True
+            except Exception as e:
+                print(f"  Raw cache load failed ({e}), trying legacy …")
+
+        # Legacy: old bt_*.pkl files (raw or pre-enriched).
+        legacy_path = self._cache_path()
+        if os.path.exists(legacy_path):
+            try:
+                print(f"  Loading legacy cache from {legacy_path} …")
+                with open(legacy_path, 'rb') as f:
+                    cached = pickle.load(f)
+                raw = cached.get('raw')
+                if raw is not None:
+                    print(f"  Loaded {len(raw):,} symbols. Computing indicators …")
+                    self._apply_indicators(raw)
+                    self._save_raw_cache()
+                    self._save_ind_cache()
+                else:
+                    self._data = cached.get('data', {})
+                    print(f"  Loaded {len(self._data):,} symbols (legacy enriched).")
+                    self._apply_rsi_lookback()
+                return True
+            except Exception as e:
+                print(f"  Legacy cache load failed ({e}), re-downloading …")
+
+        return False
+
+    def _save_raw_cache(self) -> None:
+        """Save raw OHLCV to level-1 cache so future runs with different indicator
+        params skip the yfinance download entirely."""
+        path = self._raw_cache_path()
         try:
             raw = {
                 sym: df[self._RAW_COLS].copy()
@@ -369,10 +421,31 @@ class VelocityBacktest:
                 if all(c in df.columns for c in self._RAW_COLS)
             }
             with open(path, 'wb') as f:
-                pickle.dump({'raw': raw}, f, protocol=pickle.HIGHEST_PROTOCOL)
-            print(f"  Data cached → {path}")
+                pickle.dump(raw, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print(f"  Raw OHLCV cached → {path}")
         except Exception as e:
-            print(f"  Cache save failed: {e}")
+            print(f"  Raw cache save failed: {e}")
+
+    def _save_ind_cache(self) -> None:
+        """Save indicator-enriched DataFrames to level-2 cache. RSI_MIN_LOOKBACK
+        is excluded because it depends on rsi_oversold_lookback (a sweep parameter)
+        and is cheap to recompute from the cached RSI column."""
+        path = self._ind_cache_path()
+        try:
+            snapshot = {
+                sym: df.drop(columns=['RSI_MIN_LOOKBACK'], errors='ignore')
+                for sym, df in self._data.items()
+            }
+            with open(path, 'wb') as f:
+                pickle.dump(snapshot, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print(f"  Indicator cache saved → {path}")
+        except Exception as e:
+            print(f"  Indicator cache save failed: {e}")
+
+    def _save_cache(self) -> None:
+        """Legacy entry point — delegates to the two new cache levels."""
+        self._save_raw_cache()
+        self._save_ind_cache()
 
     # ── Data download ─────────────────────────────────────────────────────────
     def _download(self) -> None:
@@ -422,6 +495,8 @@ class VelocityBacktest:
 
         print(f"  Parsed   : {len(raw_ohlcv):,} symbols with ≥{MIN_CANDLES + 5} bars.")
         self._apply_indicators(raw_ohlcv)
+        self._save_raw_cache()
+        self._save_ind_cache()
         self._download_regime_data()
 
     def _download_regime_data(self) -> None:
@@ -615,9 +690,7 @@ class VelocityBacktest:
             # Cache only stores stock data — always refresh regime signals live
             self._download_regime_data()
         else:
-            self._download()   # _download() calls _download_regime_data() at the end
-            if self._use_cache:
-                self._save_cache()
+            self._download()   # saves both cache levels + calls _download_regime_data()
         if not self._data:
             raise RuntimeError("No usable data downloaded. Check tickers / dates.")
         return self._run_loop()
