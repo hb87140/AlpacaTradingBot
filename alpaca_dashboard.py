@@ -1152,7 +1152,7 @@ _COND_JS = (
     f'  ["4",  "Universe Filter", "en", "Alpaca scan: Top gainers + most actives | Price > ${SCAN_MIN_PRICE:.0f} | RVOL ≥ {RVOL_MIN:.1f}× | Vol > {SCAN_MIN_VOLUME/1e6:.0f}M shares | Spread ≤ {SPREAD_MAX_PCT*100:.1f}%"],\n'
     f'  ["5",  "Day Strength",    "en", "Price ≥ {DAY_STRENGTH_OPEN_PCT*100:.1f}% above today\'s open AND in upper half of intraday range — buying pressure, not a dead-cat intraday fade"],\n'
     f'  ["6",  "VIX Filter",      "en", "VIX ≤ {VIX_THRESHOLD} required — VIX > {VIX_THRESHOLD} suspends all new entries (Risk-Off regime)"],\n'
-    f'  ["7",  "Session Window",  "en", "Entries only {ENTRY_START[0]:02d}:{ENTRY_START[1]:02d}–{ENTRY_END[0]:02d}:{ENTRY_END[1]:02d} ET Mon–Fri — avoids opening auction volatility and late-day liquidity risk"],\n'
+    f'  ["7",  "Session Window",  "en", "Entries {ENTRY_START[0]:02d}:{ENTRY_START[1]:02d}–{ENTRY_END[0]:02d}:{ENTRY_END[1]:02d} ET Mon–Fri — full session, no ORB wait required"],\n'
     f'  ["8",  "Position Limit",  "en", "Max {MAX_POSITIONS_CAP} concurrent positions — dynamic: floor(equity/${MIN_BUCKET_SIZE:.0f}), capped at {MAX_POSITIONS_CAP}. Max {MAX_SECTOR_COUNT} per sector. Settled cash constrains new entries (T+1)."],\n'
     f'  ["9",  "Score Ranking",   "en", "All candidates scored: Donchian Proximity 30 + RVOL 25 + RSI Delta 25 + Liquidity 20 = 100 max; minimum score {SCAN_MIN_SCORE:.0f} required to enter"],\n'
     f'  ["10", "Friday Filter",   "en", "Dollar-volume threshold doubled to 2× on Fridays — higher conviction required to enter a position that may need to hold over the weekend"],\n'

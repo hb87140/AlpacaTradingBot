@@ -56,7 +56,7 @@ FRIDAY_CLOSE_HOUR    = 15      # ET hour after which Friday positions are evalua
 FRIDAY_MIN_PROFIT_PCT = 0.00   # Friday close rule disabled — mean-reversion bounces benefit from weekend hold
 
 # ── Session timing ────────────────────────────────────────────────────────────
-ENTRY_START          = (10, 0)   # first valid entry (after opening volatility settles)
+ENTRY_START          = (9, 30)   # first valid entry (market open — no ORB dependency)
 ENTRY_END            = (15, 30)
 VOL_MULT_FRIDAY      = 2.0       # Friday liquidity gate: 2× normal threshold
 PRE_ENTRY_SYNC_TIME  = (9, 44)   # pre-entry position re-sync + stop audit
