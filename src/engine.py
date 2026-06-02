@@ -878,6 +878,34 @@ class VelocityEngine:
         return pct, pct >= CONCENTRATION_WARN_PCT, pct >= CONCENTRATION_HALT_PCT
 
     # ── Position sync ─────────────────────────────────────────────────────────
+    def _get_fill_time(self, symbol: str) -> str:
+        """Return the filled_at timestamp of the most recent filled BUY order for symbol.
+
+        Falls back to now() if Alpaca order history is unavailable or empty.
+        """
+        try:
+            orders = self.trading_client.get_orders(
+                GetOrdersRequest(
+                    status=QueryOrderStatus.CLOSED,
+                    symbols=[symbol],
+                    side=OrderSide.BUY,
+                    limit=10,
+                )
+            )
+            filled = [
+                o for o in orders
+                if str(o.status) in ('OrderStatus.FILLED', 'filled') and o.filled_at
+            ]
+            if filled:
+                # Most recent fill first (Alpaca returns newest-first)
+                fill_time = filled[0].filled_at
+                if fill_time.tzinfo is None:
+                    fill_time = _TZ_NY.localize(fill_time)
+                return fill_time.isoformat()
+        except Exception as e:
+            logger.debug(f"SYNC: could not fetch fill time for {symbol}: {e}")
+        return datetime.now(_TZ_NY).isoformat()
+
     def _sync_positions(self):
         """Reconcile self.state against actual Alpaca positions every cycle."""
         try:
@@ -897,11 +925,12 @@ class VelocityEngine:
                 continue
 
             if sym not in self.state:
+                fill_time = self._get_fill_time(sym)
                 self.state[sym] = {
                     'price':      round(avg_cost, 2),
                     'fill_price': round(avg_cost, 2),
                     'peak_price': round(avg_cost, 2),
-                    'time':       datetime.now(_TZ_NY).isoformat(),
+                    'time':       fill_time,
                     'qty':        round(qty, 4),
                     'stop_loss':  0.0,
                     'volume':     0,
@@ -909,7 +938,7 @@ class VelocityEngine:
                 }
                 logger.info(
                     f"SYNC: Added {sym} from Alpaca "
-                    f"(qty={qty} avg_entry=${avg_cost:.2f})"
+                    f"(qty={qty} avg_entry=${avg_cost:.2f} filled_at={fill_time})"
                 )
                 changed = True
             else:
