@@ -30,7 +30,7 @@ from src.config import (
     ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_PAPER, ALPACA_DATA_FEED,
     MAX_POSITIONS_CAP, MIN_BUCKET_SIZE, BUCKET_CASH_PCT,
     VIX_THRESHOLD, HOLD_TRADING_BARS, PROFIT_MIN_THRESHOLD,
-    ENTRY_START, ENTRY_END, VOL_MULT_FRIDAY, PRE_ENTRY_SYNC_TIME,
+    ENTRY_START, ENTRY_END, EXIT_START, VOL_MULT_FRIDAY, PRE_ENTRY_SYNC_TIME,
     RSI_PERIOD, ATR_PERIOD, MA_FAST, MA_SLOW,
     DAILY_HISTORY_DAYS,
     SCAN_MIN_DOLLAR_VOL,
@@ -1173,6 +1173,12 @@ class VelocityEngine:
         Returns {symbol: current_price} for positions surviving this cycle.
         """
         now_et          = datetime.now(_TZ_NY)
+        if (now_et.hour, now_et.minute) < EXIT_START:
+            logger.debug(
+                f"EXIT: before {EXIT_START[0]:02d}:{EXIT_START[1]:02d} ET — "
+                f"software exits suppressed during opening print volatility."
+            )
+            return {}
         is_friday_close = (now_et.weekday() == 4 and now_et.hour >= FRIDAY_CLOSE_HOUR)
         prefetched: Dict[str, float] = {}
 
