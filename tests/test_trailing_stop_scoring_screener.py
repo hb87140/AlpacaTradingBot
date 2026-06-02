@@ -193,7 +193,7 @@ def _run_multi_signal_cycle(engine, ctx_map, equity=2500.0, cash=2500.0):
 
     symbols = list(ctx_map.keys())
 
-    def _ctx_for(sym):
+    def _ctx_for(sym, snap=None):
         return ctx_map.get(sym)
 
     # Build a sector map: held positions → 'OtherSector', candidates → 'Technology'.

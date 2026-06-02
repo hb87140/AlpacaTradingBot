@@ -657,6 +657,56 @@ class VelocityEngine:
             logger.warning(f"DATA: daily bars fetch failed for {symbol}: {e}")
             return None
 
+    def _batch_fetch_snapshots(self, symbols: list) -> dict:
+        """Fetch snapshots for all symbols in a single API call.
+
+        Returns a dict of symbol → parsed snap dict (same shape as _fetch_snapshot).
+        Symbols with no IEX coverage or no data are absent from the result.
+        """
+        if not symbols:
+            return {}
+        try:
+            req   = StockSnapshotRequest(symbol_or_symbols=symbols, feed=ALPACA_DATA_FEED)
+            snaps = self.data_client.get_stock_snapshot(req)
+        except Exception as e:
+            logger.warning(f"DATA: batch snapshot fetch failed: {e}")
+            return {}
+        result = {}
+        for sym, snap in snaps.items():
+            parsed = self._parse_snapshot(snap)
+            if parsed is not None:
+                result[sym] = parsed
+        return result
+
+    def _parse_snapshot(self, snap) -> Optional[dict]:
+        """Convert a raw Alpaca Snapshot object into the standard snap dict."""
+        if snap is None:
+            return None
+        live_price: float = 0.0
+        if snap.latest_trade and snap.latest_trade.price:
+            live_price = float(snap.latest_trade.price)
+        elif snap.minute_bar and snap.minute_bar.close:
+            live_price = float(snap.minute_bar.close)
+        bid = ask = 0.0
+        if snap.latest_quote:
+            bid = float(snap.latest_quote.bid_price or 0)
+            ask = float(snap.latest_quote.ask_price or 0)
+        intraday_vol = intraday_open = intraday_high = intraday_low = 0.0
+        if snap.daily_bar:
+            intraday_vol  = float(snap.daily_bar.volume or 0)
+            intraday_open = float(snap.daily_bar.open   or 0)
+            intraday_high = float(snap.daily_bar.high   or 0)
+            intraday_low  = float(snap.daily_bar.low    or 0)
+        return {
+            'live_price':    live_price,
+            'bid':           bid,
+            'ask':           ask,
+            'intraday_vol':  intraday_vol,
+            'intraday_open': intraday_open,
+            'intraday_high': intraday_high,
+            'intraday_low':  intraday_low,
+        }
+
     def _fetch_snapshot(self, symbol: str) -> Optional[dict]:
         """Fetch latest quote + daily bar snapshot for live price, spread, and RVOL."""
         try:
@@ -665,43 +715,7 @@ class VelocityEngine:
                 feed=ALPACA_DATA_FEED,
             )
             snaps = self.data_client.get_stock_snapshot(req)
-            snap  = snaps.get(symbol)
-            if snap is None:
-                return None
-
-            # Live price
-            live_price: float = 0.0
-            if snap.latest_trade and snap.latest_trade.price:
-                live_price = float(snap.latest_trade.price)
-            elif snap.minute_bar and snap.minute_bar.close:
-                live_price = float(snap.minute_bar.close)
-
-            # Bid / ask
-            bid = ask = 0.0
-            if snap.latest_quote:
-                bid = float(snap.latest_quote.bid_price or 0)
-                ask = float(snap.latest_quote.ask_price or 0)
-
-            # Today's accumulated volume + intraday OHLC (from the rolling daily bar)
-            intraday_vol  = 0.0
-            intraday_open = 0.0
-            intraday_high = 0.0
-            intraday_low  = 0.0
-            if snap.daily_bar:
-                intraday_vol  = float(snap.daily_bar.volume or 0)
-                intraday_open = float(snap.daily_bar.open   or 0)
-                intraday_high = float(snap.daily_bar.high   or 0)
-                intraday_low  = float(snap.daily_bar.low    or 0)
-
-            return {
-                'live_price':    live_price,
-                'bid':           bid,
-                'ask':           ask,
-                'intraday_vol':  intraday_vol,
-                'intraday_open': intraday_open,
-                'intraday_high': intraday_high,
-                'intraday_low':  intraday_low,
-            }
+            return self._parse_snapshot(snaps.get(symbol))
         except Exception as e:
             logger.debug(f"DATA: snapshot fetch failed for {symbol}: {e}")
             return None
@@ -1036,9 +1050,11 @@ class VelocityEngine:
             self.save_state()
 
     # ── Technical context ─────────────────────────────────────────────────────
-    def get_technical_context(self, symbol: str) -> Optional[dict]:
+    def get_technical_context(self, symbol: str, snap: Optional[dict] = None) -> Optional[dict]:
         """Fetch all indicator data needed for entry screening.
 
+        snap: pre-fetched snapshot dict from _batch_fetch_snapshots; if None,
+        falls back to an individual _fetch_snapshot API call.
         Returns None if data is unavailable or insufficient.
         """
         now_ny    = datetime.now(_TZ_NY)
@@ -1079,7 +1095,8 @@ class VelocityEngine:
         rsi_history = list(rsi_series.iloc[-(RSI_OVERSOLD_LOOKBACK + 2):])
 
         # Live snapshot — price, bid/ask, intraday volume, and intraday OHLC
-        snap = self._fetch_snapshot(symbol)
+        if snap is None:
+            snap = self._fetch_snapshot(symbol)
         if snap is None:
             logger.debug(f"SCAN {symbol}: snapshot unavailable, skipping")
             return None
@@ -1523,6 +1540,16 @@ class VelocityEngine:
             s = self._get_sector(book_sym)
             book_sectors[s] = book_sectors.get(s, 0) + 1
 
+        # Batch-fetch snapshots for all candidates in one API call (vs one call per symbol)
+        scan_candidates = [
+            s for s in watchlist
+            if s not in self.state
+            and s not in TICKER_BLOCKLIST
+            and s not in self._daily_scan_skip
+            and s not in self._insufficient_history_skip
+        ]
+        batch_snaps = self._batch_fetch_snapshots(scan_candidates)
+
         signals      = []
         n_portfolio  = 0
         n_blocked    = 0
@@ -1550,7 +1577,7 @@ class VelocityEngine:
                 n_history += 1
                 continue
 
-            ctx = self.get_technical_context(sym)
+            ctx = self.get_technical_context(sym, snap=batch_snaps.get(sym))
             if not ctx:
                 n_no_ctx += 1
                 continue
