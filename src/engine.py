@@ -483,6 +483,12 @@ class VelocityEngine:
             return
 
         now_ny    = datetime.now(_TZ_NY)
+        if (now_ny.hour, now_ny.minute) < EXIT_START:
+            logger.debug(
+                f"AUDIT: before {EXIT_START[0]:02d}:{EXIT_START[1]:02d} ET — "
+                "trailing stop placement deferred until opening volatility clears."
+            )
+            return
         in_market = (
             now_ny.weekday() < 5
             and (9, 30) <= (now_ny.hour, now_ny.minute) < (16, 0)
@@ -1849,21 +1855,30 @@ class VelocityEngine:
                 continue
 
             # ── Submit chandelier trailing stop ───────────────────────────────
-            stop_req = TrailingStopOrderRequest(
-                symbol=sym,
-                qty=filled_qty,
-                side=OrderSide.SELL,
-                time_in_force=TimeInForce.GTC,
-                trail_price=chandelier_dist,
-            )
-            try:
-                stop_order = self.trading_client.submit_order(stop_req)
-            except Exception as stop_err:
-                logger.error(
-                    f"ENTRY {sym}: trailing stop placement failed ({stop_err}). "
-                    "Position open WITHOUT stop — audit will retry next cycle."
+            # Deferred until EXIT_START to avoid opening-print volatility fills.
+            now_for_stop = datetime.now(_TZ_NY)
+            if (now_for_stop.hour, now_for_stop.minute) < EXIT_START:
+                logger.info(
+                    f"ENTRY {sym}: trailing stop deferred until "
+                    f"{EXIT_START[0]:02d}:{EXIT_START[1]:02d} ET — audit will place it."
                 )
                 stop_order = None
+            else:
+                stop_req = TrailingStopOrderRequest(
+                    symbol=sym,
+                    qty=filled_qty,
+                    side=OrderSide.SELL,
+                    time_in_force=TimeInForce.GTC,
+                    trail_price=chandelier_dist,
+                )
+                try:
+                    stop_order = self.trading_client.submit_order(stop_req)
+                except Exception as stop_err:
+                    logger.error(
+                        f"ENTRY {sym}: trailing stop placement failed ({stop_err}). "
+                        "Position open WITHOUT stop — audit will retry next cycle."
+                    )
+                    stop_order = None
 
             # Update state with confirmed fill details
             self.state[sym] = {
