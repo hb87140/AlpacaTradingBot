@@ -258,9 +258,10 @@ All 352+ tests should pass. If any fail, fix before proceeding.
   by a config constant.
 - Do NOT modify the break-even floor to use order modification — the software exit in
   `check_velocity_exits` is the correct, tested enforcement mechanism
-- Do NOT cancel TRAIL SELL orders inside `liquidate()` — only non-TRAIL orders are cancelled
-  before placing the market sell; the TRAIL stays active as last-resort protection if the
-  market sell is rejected
+- `liquidate()` MUST cancel ALL open orders for a symbol (including the TRAIL) before placing
+  the market sell. Alpaca holds shares "for orders" — the GTC TRAIL reserves the full qty so
+  a market SELL is rejected with `available=0` while the TRAIL is open. If the market sell
+  fails, `_audit_stop_orders` re-places the TRAIL on the next cycle via `has_unprotected`.
 - Do NOT restore the unconditional `del self.state[symbol]` in `liquidate()` — state is now
   marked `pending_exit=True` and deleted by `_sync_positions_from_alpaca` once Alpaca confirms
   the position is gone; this prevents the entry timestamp being reset (which broke hold-time

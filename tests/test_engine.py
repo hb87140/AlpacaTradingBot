@@ -914,8 +914,12 @@ class TestLiquidateGuards:
         assert 'AAPL' in engine.state
         assert not engine.state['AAPL'].get('pending_exit')
 
-    def test_non_trailing_stops_cancelled_before_sell(self):
-        """Non-trailing-stop orders are cancelled; trailing stop is preserved."""
+    def test_all_open_orders_cancelled_before_sell(self):
+        """All open orders (including trailing stop) are cancelled before the market sell.
+
+        Alpaca holds shares 'for orders' — the GTC TRAIL reserves the full position qty,
+        so a market SELL is rejected with available=0 while the TRAIL is open.
+        """
         tc = _mock_trading_client()
         engine = _make_engine(trading_client=tc)
         engine.state = {'MSFT': {'price': 50.0}}
@@ -948,10 +952,10 @@ class TestLiquidateGuards:
              patch('time.sleep'):
             engine.liquidate('MSFT')
 
-        # stale_lmt cancelled; trail NOT cancelled
+        # Both the TRAIL and the stale LMT must be cancelled before the market sell
         cancelled_ids = [c.args[0] for c in tc.cancel_order_by_id.call_args_list]
         assert 'lmt-1' in cancelled_ids
-        assert 'trail-1' not in cancelled_ids
+        assert 'trail-1' in cancelled_ids
 
 
 # ── Break-even floor math ─────────────────────────────────────────────────────
@@ -1065,8 +1069,12 @@ class TestLiquidatePositionNotFound:
         # No sell order placed; state deleted (qty=0 path)
         tc.submit_order.assert_not_called()
 
-    def test_trailing_stop_not_cancelled_in_liquidate(self):
-        """TRAIL SELL must not be cancelled — only non-trail orders are cancelled."""
+    def test_trailing_stop_cancelled_in_liquidate(self):
+        """TRAIL SELL must be cancelled before the market sell.
+
+        Alpaca's 'held_for_orders' mechanism reserves shares for open orders.
+        Without cancelling the TRAIL first, the market sell fails with available=0.
+        """
         tc = _mock_trading_client()
         engine = _make_engine(trading_client=tc)
         engine.state = {'MSFT': {'price': 50.0}}
@@ -1091,7 +1099,7 @@ class TestLiquidatePositionNotFound:
             engine.liquidate('MSFT')
 
         cancelled_ids = [c.args[0] for c in tc.cancel_order_by_id.call_args_list]
-        assert 'trail-99' not in cancelled_ids
+        assert 'trail-99' in cancelled_ids
 
 
 # ── _sync_positions pending_exit handling ─────────────────────────────────────

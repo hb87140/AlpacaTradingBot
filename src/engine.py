@@ -1314,7 +1314,10 @@ class VelocityEngine:
         - Sets pending_exit=True; state removal is deferred until _sync_positions()
           confirms the position is flat (prevents hold-time clock reset on retry).
         """
-        # Cancel only non-trailing-stop orders
+        # Cancel ALL open orders for this symbol (including the trailing stop).
+        # Alpaca holds shares "for orders" — the GTC TRAIL reserves the full position
+        # qty, so a market SELL is rejected with available=0 while the TRAIL is open.
+        # The audit's has_unprotected check re-places the TRAIL if the sell fails.
         try:
             open_orders = self.trading_client.get_orders(
                 GetOrdersRequest(status=QueryOrderStatus.OPEN)
@@ -1323,11 +1326,7 @@ class VelocityEngine:
             logger.warning(f"LIQUIDATE {symbol}: failed to fetch open orders: {e}")
             open_orders = []
 
-        cancellable = [
-            o for o in open_orders
-            if o.symbol == symbol
-            and str(o.order_type) not in ('OrderType.TRAILING_STOP', 'trailing_stop')
-        ]
+        cancellable = [o for o in open_orders if o.symbol == symbol]
         for o in cancellable:
             try:
                 self.trading_client.cancel_order_by_id(o.id)

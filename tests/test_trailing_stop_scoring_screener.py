@@ -1066,8 +1066,12 @@ class TestExitOrders:
         assert cancel_calls_before_submit and cancel_calls_before_submit[0] >= 1, \
             "Cancel must happen before submit_order"
 
-    def test_liquidate_preserves_trail_stop_order(self):
-        """TrailingStop SELL orders must NOT be cancelled by liquidate()."""
+    def test_liquidate_cancels_trail_stop_order(self):
+        """TrailingStop SELL orders MUST be cancelled by liquidate() before the market sell.
+
+        Alpaca holds shares 'for orders' — the GTC TRAIL reserves all position shares,
+        causing the market SELL to fail with available=0 unless the TRAIL is cancelled first.
+        """
         tc = _mock_trading_client()
         pos = MagicMock(); pos.qty = '5.0'
         tc.get_open_position.side_effect = None   # override the default Exception side_effect
@@ -1085,9 +1089,9 @@ class TestExitOrders:
         with patch('src.engine.time.sleep'):
             engine.liquidate('SYM')
 
-        # cancel_order_by_id should NOT be called for the trailing stop
+        # cancel_order_by_id MUST be called for the trailing stop
         cancelled_ids = [c[0][0] for c in tc.cancel_order_by_id.call_args_list]
-        assert 'trail-1' not in cancelled_ids, "Trailing stop must NOT be cancelled by liquidate()"
+        assert 'trail-1' in cancelled_ids, "Trailing stop MUST be cancelled before market sell"
 
     def test_liquidate_marks_pending_exit(self):
         """liquidate() sets pending_exit=True; deletion deferred to _sync_positions."""
