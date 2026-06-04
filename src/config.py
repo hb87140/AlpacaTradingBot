@@ -149,8 +149,8 @@ MAX_SECTOR_COUNT     = 2       # max simultaneous positions in the same sector
 # Combined candidate pool = top-gainers (by % change) UNION most-actives (by volume).
 # Gainers are sorted first — they are the primary momentum signal.
 # Most-actives supplement with high-volume movers that may not yet show large % gains.
-ALPACA_SCANNER_TOP         = int(os.getenv("ALPACA_SCANNER_TOP", "250"))         # most-actives count
-ALPACA_SCANNER_TOP_GAINERS = int(os.getenv("ALPACA_SCANNER_TOP_GAINERS", "250")) # gainers count
+ALPACA_SCANNER_TOP         = int(os.getenv("ALPACA_SCANNER_TOP", "100"))         # most-actives count (Alpaca API max: 100)
+ALPACA_SCANNER_TOP_GAINERS = int(os.getenv("ALPACA_SCANNER_TOP_GAINERS", "50"))  # gainers count (Alpaca API max: 50)
 
 # ── Loop timing ───────────────────────────────────────────────────────────────
 SCAN_INTERVAL          = 60    # seconds between cycles
