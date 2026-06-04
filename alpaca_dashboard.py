@@ -219,7 +219,7 @@ def get_state():
         "entry_slots":       _entry_slots,
         "positions":         positions,
         "total_unrealized":  round(total_unrealized, 2),
-        "pnl":               _pnl(equity),
+        "pnl":               dash_data.get("pnl") or _pnl(equity),
         "connected":         bool(dash_data.get("connected", False)),
         "market_open":       _market_open(),
         "paper_mode":        ALPACA_PAPER,

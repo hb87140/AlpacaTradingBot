@@ -85,6 +85,8 @@ def _make_engine(equity=2500.0, cash=2500.0, trading_client=None, data_client=No
     engine._insufficient_history_skip = set()
     engine._last_audit_date = None
     engine._missing_position_counts = {}
+    engine._pnl_cache               = None
+    engine._pnl_cache_ts            = None
     return engine
 
 
@@ -1142,14 +1144,24 @@ class TestExitOrders:
 
         entry_price   = 100.0
         stagnant_price = entry_price * (1 + PROFIT_MIN_THRESHOLD - 0.005)
+        tz_ny = pytz.timezone('US/Eastern')
+        _safe_now = tz_ny.localize(datetime(2024, 6, 5, 10, 30))
+        old_time  = (_safe_now - timedelta(days=14)).isoformat()
 
         engine = _make_engine(trading_client=tc)
-        engine.state = {'SLOW': self._make_state_entry(price=entry_price, days_ago=14)}
+        engine.state = {'SLOW': {
+            'price': entry_price, 'time': old_time, 'qty': 5.0,
+            'stop_loss': entry_price * 0.94, 'volume': 0, 'score': 50,
+            'peak_price': entry_price,
+        }}
 
         snap = _make_snapshot(price=stagnant_price)
         with patch.object(engine, '_fetch_snapshot', return_value=snap), \
              patch.object(engine, 'save_state'), \
-             patch('src.engine.time.sleep'):
+             patch('src.engine.time.sleep'), \
+             patch('src.engine.datetime') as mock_dt:
+            mock_dt.now.return_value = _safe_now
+            mock_dt.fromisoformat    = datetime.fromisoformat
             engine.check_velocity_exits()
 
         assert engine.state.get('SLOW', {}).get('pending_exit') is True, \
@@ -1893,9 +1905,13 @@ class TestHardStop:
         engine.state = {'POS': self._state_entry(entry, cur, tz_ny)}
 
         snap = _make_snapshot(price=cur)
+        _safe_now = tz_ny.localize(datetime(2024, 6, 5, 10, 30))
         with patch.object(engine, '_fetch_snapshot', return_value=snap), \
              patch.object(engine, 'save_state'), \
-             patch('src.engine.time.sleep'):
+             patch('src.engine.time.sleep'), \
+             patch('src.engine.datetime') as mock_dt:
+            mock_dt.now.return_value = _safe_now
+            mock_dt.fromisoformat    = datetime.fromisoformat
             engine.check_velocity_exits()
 
         assert engine.state.get('POS', {}).get('pending_exit') is True, \
@@ -2093,9 +2109,13 @@ class TestAuditStopOrders:
             'close':  [100.0] * n,
             'volume': [1_000_000] * n,
         })
+        _safe_now = pytz.timezone('US/Eastern').localize(datetime(2024, 6, 5, 10, 30))
         with patch.object(engine, '_fetch_daily_bars', return_value=df), \
              patch.object(engine, 'save_state'), \
-             patch('src.engine.time.sleep'):
+             patch('src.engine.time.sleep'), \
+             patch('src.engine.datetime') as mock_dt:
+            mock_dt.now.return_value = _safe_now
+            mock_dt.fromisoformat    = datetime.fromisoformat
             engine._audit_stop_orders()
 
         # Cancel was called for the non-trail
@@ -2125,9 +2145,13 @@ class TestAuditStopOrders:
             'close':  [100.0] * n,
             'volume': [1_000_000] * n,
         })
+        _safe_now = pytz.timezone('US/Eastern').localize(datetime(2024, 6, 5, 10, 30))
         with patch.object(engine, '_fetch_daily_bars', return_value=df), \
              patch.object(engine, 'save_state'), \
-             patch('src.engine.time.sleep'):
+             patch('src.engine.time.sleep'), \
+             patch('src.engine.datetime') as mock_dt:
+            mock_dt.now.return_value = _safe_now
+            mock_dt.fromisoformat    = datetime.fromisoformat
             engine._audit_stop_orders()
 
         assert tc.submit_order.call_count == 1
@@ -2146,8 +2170,12 @@ class TestAuditStopOrders:
         engine = _make_engine(trading_client=tc)
         engine.state = self._state_with_position('AAPL')
 
+        _safe_now = pytz.timezone('US/Eastern').localize(datetime(2024, 6, 5, 10, 30))
         with patch.object(engine, 'save_state'), \
-             patch('src.engine.time.sleep'):
+             patch('src.engine.time.sleep'), \
+             patch('src.engine.datetime') as mock_dt:
+            mock_dt.now.return_value = _safe_now
+            mock_dt.fromisoformat    = datetime.fromisoformat
             engine._audit_stop_orders()
 
         cancelled = [c[0][0] for c in tc.cancel_order_by_id.call_args_list]

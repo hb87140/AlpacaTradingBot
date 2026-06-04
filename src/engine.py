@@ -15,6 +15,7 @@ import yfinance as yf
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     GetOrdersRequest,
+    GetPortfolioHistoryRequest,
     LimitOrderRequest,
     MarketOrderRequest,
     TrailingStopOrderRequest,
@@ -166,6 +167,10 @@ class VelocityEngine:
         # Date of last stop-order audit so we only run it once per day
         self._last_audit_date: Optional[str] = None
 
+        # Portfolio P&L cache (refreshed every 30 min via Alpaca API)
+        self._pnl_cache:    Optional[dict] = None
+        self._pnl_cache_ts: Optional[datetime] = None
+
     # ── Connectivity ──────────────────────────────────────────────────────────
     def connect(self):
         """Validate Alpaca credentials and log account mode."""
@@ -219,6 +224,44 @@ class VelocityEngine:
         except Exception as e:
             logger.error(f"STATE: save failed: {e}")
 
+    # ── Portfolio P&L ─────────────────────────────────────────────────────────
+    def _fetch_portfolio_pnl(self) -> dict:
+        """Fetch P&L from Alpaca portfolio history API. Cached 30 min."""
+        now = datetime.now(_TZ_NY)
+        if (self._pnl_cache is not None and self._pnl_cache_ts is not None
+                and (now - self._pnl_cache_ts).total_seconds() < 1800):
+            return self._pnl_cache
+
+        equity = self._last_equity
+        result = {}
+        for label, period, tf in [
+            ('daily',   '1D', '1H'),
+            ('weekly',  '1W', '1D'),
+            ('monthly', '1M', '1D'),
+            ('overall', '1A', '1D'),
+        ]:
+            try:
+                h = self.trading_client.get_portfolio_history(
+                    GetPortfolioHistoryRequest(
+                        period=period, timeframe=tf,
+                        extended_hours=(tf == '1H'),
+                    )
+                )
+                base = float(h.base_value) if h.base_value else 0.0
+                if base > 0 and equity > 0:
+                    amount = round(equity - base, 2)
+                    pct    = round(amount / base * 100, 2)
+                    result[label] = {'amount': amount, 'pct': pct}
+                else:
+                    result[label] = {'amount': None, 'pct': None}
+            except Exception as e:
+                logger.debug(f"PNL: {label} fetch failed: {e}")
+                result[label] = {'amount': None, 'pct': None}
+
+        self._pnl_cache    = result
+        self._pnl_cache_ts = now
+        return result
+
     # ── Dashboard ─────────────────────────────────────────────────────────────
     def _write_dashboard_data(self, connected: bool = True):
         now_ny = datetime.now(_TZ_NY)
@@ -247,12 +290,19 @@ class VelocityEngine:
                 'pending':       d.get('pending', False),
                 'pending_exit':  d.get('pending_exit', False),
             })
+        pnl = self._fetch_portfolio_pnl() if self._equity_initialized else {
+            'daily': {'amount': None, 'pct': None},
+            'weekly': {'amount': None, 'pct': None},
+            'monthly': {'amount': None, 'pct': None},
+            'overall': {'amount': None, 'pct': None},
+        }
         data = {
             'connected':    connected,
             'equity':       self._last_equity,
             'settled_cash': self._last_settled_cash,
             'vix':          self._last_vix,
             'positions':    positions,
+            'pnl':          pnl,
             'last_scan':    self._last_scan_ts,
             'next_scan':    self._next_scan_dt,
             'alpaca_paper': ALPACA_PAPER,

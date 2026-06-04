@@ -77,6 +77,8 @@ def _make_engine(equity=2500.0, settled=2500.0, trading_client=None, data_client
     engine._insufficient_history_skip = set()
     engine._last_audit_date           = None
     engine._missing_position_counts   = {}
+    engine._pnl_cache                 = None
+    engine._pnl_cache_ts              = None
     return engine
 
 
@@ -277,11 +279,16 @@ class TestVelocityExit:
 
     def test_stagnant_position_older_than_hold_bars_triggers_exit(self):
         engine = _make_engine()
-        engine.state = {'AAPL': {'price': 100.0, 'time': self._old_time(14)}}
+        _safe_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))
+        old_time  = (_safe_now - timedelta(days=14)).isoformat()
+        engine.state = {'AAPL': {'price': 100.0, 'time': old_time}}
 
         with patch.object(engine, '_fetch_snapshot', return_value=_make_snapshot(101.0)), \
              patch.object(engine, 'liquidate') as mock_liq, \
-             patch.object(engine, 'save_state'):
+             patch.object(engine, 'save_state'), \
+             patch('src.engine.datetime') as mock_dt:
+            mock_dt.now.return_value = _safe_now
+            mock_dt.fromisoformat    = datetime.fromisoformat
             engine.check_velocity_exits()
 
         mock_liq.assert_called_once_with('AAPL')
@@ -319,15 +326,20 @@ class TestVelocityExit:
 
     def test_falls_back_to_current_price_when_snapshot_unavailable(self):
         engine = _make_engine()
+        _safe_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))
+        old_time  = (_safe_now - timedelta(days=14)).isoformat()
         engine.state = {'AAPL': {
             'price': 100.0,
-            'time': self._old_time(14),
+            'time': old_time,
             'current_price': 100.5,  # stored from previous cycle
         }}
 
         with patch.object(engine, '_fetch_snapshot', return_value=None), \
              patch.object(engine, 'liquidate') as mock_liq, \
-             patch.object(engine, 'save_state'):
+             patch.object(engine, 'save_state'), \
+             patch('src.engine.datetime') as mock_dt:
+            mock_dt.now.return_value = _safe_now
+            mock_dt.fromisoformat    = datetime.fromisoformat
             engine.check_velocity_exits()
 
         mock_liq.assert_called_once_with('AAPL')
@@ -422,9 +434,13 @@ class TestBreakEvenExitEnforcement:
         cur   = entry - 0.50
 
         engine = self._make_state(entry, peak, cur)
+        _safe_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))
         with patch.object(engine, '_fetch_snapshot', return_value=_make_snapshot(cur)), \
              patch.object(engine, 'liquidate') as mock_liq, \
-             patch.object(engine, 'save_state'):
+             patch.object(engine, 'save_state'), \
+             patch('src.engine.datetime') as mock_dt:
+            mock_dt.now.return_value = _safe_now
+            mock_dt.fromisoformat    = datetime.fromisoformat
             engine.check_velocity_exits()
 
         mock_liq.assert_called_once_with('AAPL')
@@ -472,9 +488,13 @@ class TestBreakEvenExitEnforcement:
         cur   = entry * (1 - HARD_STOP_PCT - 0.01)
 
         engine = self._make_state(entry, peak, cur)
+        _safe_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))
         with patch.object(engine, '_fetch_snapshot', return_value=_make_snapshot(cur)), \
              patch.object(engine, 'liquidate') as mock_liq, \
-             patch.object(engine, 'save_state'):
+             patch.object(engine, 'save_state'), \
+             patch('src.engine.datetime') as mock_dt:
+            mock_dt.now.return_value = _safe_now
+            mock_dt.fromisoformat    = datetime.fromisoformat
             engine.check_velocity_exits()
 
         mock_liq.assert_called_once_with('AAPL')
@@ -1973,7 +1993,11 @@ class TestAuditRestoresStopDist:
         stop_dist=0, it must restore stop_dist and compute stop_loss correctly."""
         engine = self._make_engine_with_trail_order(trail_dist=5.0, fill_price=100.0)
 
-        engine._audit_stop_orders()
+        _safe_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))
+        with patch('src.engine.datetime') as mock_dt:
+            mock_dt.now.return_value = _safe_now
+            mock_dt.fromisoformat    = datetime.fromisoformat
+            engine._audit_stop_orders()
 
         assert engine.state['AAPL']['stop_dist'] == 5.0, (
             "stop_dist must be restored from the confirmed TRAIL's trail_price"
