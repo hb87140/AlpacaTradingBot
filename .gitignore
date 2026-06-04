@@ -23,7 +23,7 @@ backtest/.cache/
 backtest/optimizer_results*.csv
 
 # IB Gateway installer binary (321 MB — not appropriate for git history)
-scripts/
+scripts/ibgateway-standalone-linux-x64.sh
 
 # Python
 __pycache__/
@@ -118,3 +118,4 @@ Thumbs.db
 /site
 .abstra/
 .streamlit/secrets.toml
+logs/remote/
