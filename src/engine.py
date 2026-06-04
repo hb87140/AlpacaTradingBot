@@ -650,12 +650,21 @@ class VelocityEngine:
                     continue
 
                 chandelier_dist = round(atr_chandelier * CHANDELIER_MULT, 2)
+                # Alpaca rejects trail_price > 25% of stock price
+                entry_px_for_cap = float(pos_data.get('fill_price') or pos_data.get('price', 0))
+                max_trail = round(entry_px_for_cap * 0.25, 2) if entry_px_for_cap > 0 else chandelier_dist
+                trail_dist = min(chandelier_dist, max_trail)
+                if trail_dist < chandelier_dist:
+                    logger.info(
+                        f"AUDIT: {sym} — chandelier dist ${chandelier_dist:.2f} capped "
+                        f"to ${trail_dist:.2f} (Alpaca 25% limit on ${entry_px_for_cap:.2f})"
+                    )
                 stop_req = TrailingStopOrderRequest(
                     symbol=sym,
                     qty=qty,
                     side=OrderSide.SELL,
                     time_in_force=TimeInForce.GTC,
-                    trail_price=chandelier_dist,
+                    trail_price=trail_dist,
                 )
                 stop_order = self.trading_client.submit_order(stop_req)
                 time.sleep(2)
@@ -676,12 +685,12 @@ class VelocityEngine:
                     pass
 
                 entry_px = float(pos_data.get('fill_price') or pos_data.get('price', 0))
-                self.state[sym]['stop_dist'] = chandelier_dist
-                self.state[sym]['stop_loss'] = round(entry_px - chandelier_dist, 2)
+                self.state[sym]['stop_dist'] = trail_dist
+                self.state[sym]['stop_loss'] = round(entry_px - trail_dist, 2)
                 self.save_state()
                 logger.info(
                     f"AUDIT: {sym} — chandelier stop placed "
-                    f"(trail_price=${chandelier_dist:.2f} id={stop_order.id})"
+                    f"(trail_price=${trail_dist:.2f} id={stop_order.id})"
                 )
             except Exception as e:
                 logger.error(
@@ -1948,12 +1957,20 @@ class VelocityEngine:
                 )
                 stop_order = None
             else:
+                # Alpaca rejects trail_price > 25% of stock price
+                max_trail_entry = round(fill_price * 0.25, 2)
+                trail_dist_entry = min(chandelier_dist, max_trail_entry)
+                if trail_dist_entry < chandelier_dist:
+                    logger.info(
+                        f"ENTRY {sym}: chandelier dist ${chandelier_dist:.2f} capped "
+                        f"to ${trail_dist_entry:.2f} (Alpaca 25% limit on ${fill_price:.2f})"
+                    )
                 stop_req = TrailingStopOrderRequest(
                     symbol=sym,
                     qty=filled_qty,
                     side=OrderSide.SELL,
                     time_in_force=TimeInForce.GTC,
-                    trail_price=chandelier_dist,
+                    trail_price=trail_dist_entry,
                 )
                 try:
                     stop_order = self.trading_client.submit_order(stop_req)
@@ -1963,6 +1980,7 @@ class VelocityEngine:
                         "Position open WITHOUT stop — audit will retry next cycle."
                     )
                     stop_order = None
+                chandelier_dist = trail_dist_entry  # use capped value in state write
 
             # Update state with confirmed fill details
             self.state[sym] = {
