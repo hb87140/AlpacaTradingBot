@@ -1968,7 +1968,7 @@ class TestFridayClose:
         cur   = round(entry * (1 + FRIDAY_MIN_PROFIT_PCT - 0.01), 2)
         engine.state = {'FRI': self._state_entry(entry, cur, tz_ny)}
 
-        friday_after = tz_ny.localize(datetime(2024, 6, 7, FRIDAY_CLOSE_HOUR + 1, 0))
+        friday_after = tz_ny.localize(datetime(2024, 6, 7, FRIDAY_CLOSE_HOUR, 30))
         snap = _make_snapshot(price=cur)
 
         with patch.object(engine, '_fetch_snapshot', return_value=snap), \

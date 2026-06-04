@@ -58,6 +58,7 @@ FRIDAY_MIN_PROFIT_PCT = 0.00   # Friday close rule disabled — mean-reversion b
 # ── Session timing ────────────────────────────────────────────────────────────
 ENTRY_START          = (10, 5)   # first valid entry (post-open volatility settled)
 EXIT_START           = (9, 32)   # earliest software exit (avoids opening-print volatility)
+EXIT_END             = (16, 0)   # latest software exit — no market sells after close
 ENTRY_END            = (14, 0)
 VOL_MULT_FRIDAY      = 2.0       # Friday liquidity gate: 2× normal threshold
 PRE_ENTRY_SYNC_TIME  = (9, 44)   # pre-entry position re-sync + stop audit

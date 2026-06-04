@@ -409,6 +409,26 @@ class TestVelocityExit:
         mock_liq.assert_not_called()
 
 
+    def test_after_market_close_returns_empty_no_sells(self):
+        """Software exits must be suppressed after 16:00 ET — trailing stop handles it."""
+        engine = _make_engine()
+        _safe_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))
+        old_time = (_safe_now - timedelta(days=14)).isoformat()
+        engine.state = {'AAPL': {'price': 100.0, 'time': old_time}}
+
+        _after_close = _TZ_NY.localize(datetime(2024, 6, 5, 17, 28))
+        with patch.object(engine, '_fetch_snapshot', return_value=_make_snapshot(94.0)), \
+             patch.object(engine, 'liquidate') as mock_liq, \
+             patch.object(engine, 'save_state'), \
+             patch('src.engine.datetime') as mock_dt:
+            mock_dt.now.return_value = _after_close
+            mock_dt.fromisoformat    = datetime.fromisoformat
+            result = engine.check_velocity_exits()
+
+        mock_liq.assert_not_called()
+        assert result == {}
+
+
 # ── Break-even floor enforcement ──────────────────────────────────────────────
 class TestBreakEvenExitEnforcement:
     """check_velocity_exits() must exit programmatically when price retraces
