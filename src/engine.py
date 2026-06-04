@@ -84,7 +84,7 @@ def _log_namer(default_name: str) -> str:
     return default_name
 
 
-logger = logging.getLogger('VelocityEngine')
+logger = logging.getLogger('BounceAlpha')
 logger.setLevel(logging.INFO)
 if not logger.handlers:
     _handler = TimedRotatingFileHandler(LOG_FILE, when='midnight', backupCount=LOG_BACKUP_COUNT)

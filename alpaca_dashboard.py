@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
-VelocityEngine Web Dashboard
-─────────────────────────────
+BounceAlpha Web Dashboard
+─────────────────────────
 Standalone FastAPI server — completely independent of the trading engine.
 
 Start:   venv/bin/python alpaca_dashboard.py
@@ -45,7 +45,7 @@ from src.config import (
 )
 
 # ── App ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="VelocityEngine Dashboard", docs_url=None, redoc_url=None)
+app = FastAPI(title="BounceAlpha Dashboard", docs_url=None, redoc_url=None)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"],
@@ -266,7 +266,7 @@ _HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>⚡ Velocity Engine</title>
+<title>BounceAlpha</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
 :root {
@@ -536,7 +536,7 @@ footer a:hover{color:var(--text2);}
 <!-- ── HEADER ─────────────────────────────────────────────────── -->
 <div class="hdr">
   <div class="hdr-left">
-    <span class="logo">⚡ VELOCITY ENGINE</span>
+    <span class="logo">📈 BOUNCEALPHA</span>
     <span class="mode-badge" id="mode-badge">PAPER</span>
   </div>
   <div class="hdr-clock num" id="clock">—</div>
@@ -1185,12 +1185,12 @@ def health():
 # ── Entry point ───────────────────────────────────────────────────
 if __name__ == "__main__":
     import argparse
-    p = argparse.ArgumentParser(description="VelocityEngine Web Dashboard")
+    p = argparse.ArgumentParser(description="BounceAlpha Web Dashboard")
     p.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
     p.add_argument("--port", default=int(os.getenv("PORT", "8080")), type=int,
                    help="Port (default: $PORT env or 8080)")
     args = p.parse_args()
 
-    print("\n  ⚡  VelocityEngine Dashboard")
+    print("\n  📈  BounceAlpha Dashboard")
     print(f"  Open → http://{args.host}:{args.port}\n")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
