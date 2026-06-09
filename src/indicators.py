@@ -1,6 +1,32 @@
+import numpy as np
 import pandas as pd
 
 from src.config import ADX_PERIOD
+
+
+def compute_smma(series: pd.Series, period: int) -> pd.Series:
+    """Smoothed Moving Average — less reactive than EMA; better at filtering market noise.
+
+    SMMA[first] = SMA of the first `period` bars.
+    SMMA[i]     = (SMMA[i-1] × (period − 1) + price[i]) / period
+
+    Used by the Alligator indicator (periods 5, 8, 13 with Fibonacci-sequence values).
+    """
+    arr    = series.values.astype(float)
+    result = np.full(len(arr), np.nan)
+
+    for start in range(len(arr) - period + 1):
+        window = arr[start: start + period]
+        if not np.any(np.isnan(window)):
+            result[start + period - 1] = window.mean()
+            for i in range(start + period, len(arr)):
+                if np.isnan(arr[i]):
+                    result[i] = np.nan
+                else:
+                    result[i] = (result[i - 1] * (period - 1) + arr[i]) / period
+            break
+
+    return pd.Series(result, index=series.index)
 
 
 def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
@@ -63,7 +89,10 @@ def apply_all(df: pd.DataFrame,
               slope_lookback:     int = 5,
               chandelier_period:  int = 22,
               adx_period:         int = ADX_PERIOD,
-              donchian_period:    int = 20) -> pd.DataFrame:
+              donchian_period:    int = 20,
+              alligator_fast:     int = 5,
+              alligator_med:      int = 8,
+              alligator_slow:     int = 13) -> pd.DataFrame:
     """Attach indicator columns to an OHLCV dataframe."""
     df = df.copy()
     df['MA50']         = compute_ma(df['close'], ma_fast)
@@ -77,4 +106,8 @@ def apply_all(df: pd.DataFrame,
     donch              = compute_donchian(df, donchian_period)
     df['DONCH_UPPER']  = donch['DONCH_UPPER']
     df['DONCH_LOWER']  = donch['DONCH_LOWER']
+    # Alligator indicator — three Smoothed Moving Averages (Fibonacci periods)
+    df['SMMA_FAST']    = compute_smma(df['close'], alligator_fast)
+    df['SMMA_MED']     = compute_smma(df['close'], alligator_med)
+    df['SMMA_SLOW']    = compute_smma(df['close'], alligator_slow)
     return df

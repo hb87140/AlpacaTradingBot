@@ -106,45 +106,53 @@ def _ctx(price=100.0, orb=95.0, ma50=105.0, ma200=90.0,
          adx=25.0, high200=None,
          donchian_lower=None, donchian_upper=None,
          intraday_open=None, intraday_high=None, intraday_low=None,
-         rsi_history=None):
+         rsi_history=None,
+         smma_fast=None, smma_med=None, smma_slow=None,
+         alligator_crossed=True):
     """Build a get_technical_context()-style dict with all production-rule fields."""
     h200 = high200 if high200 is not None else round(price * 1.1, 4)
-    # Donchian defaults: price 0.2% above lower band (well within 40% tolerance)
     dl = donchian_lower if donchian_lower is not None else round(price * 0.998, 4)
     du = donchian_upper if donchian_upper is not None else round(price * 1.10, 4)
     # Day-strength defaults: price 1.2% above open, in upper 86% of intraday range
     io = intraday_open if intraday_open is not None else round(price * 0.988, 4)
     ih = intraday_high if intraday_high is not None else round(price * 1.005, 4)
     il = intraday_low  if intraday_low  is not None else round(price * 0.970, 4)
-    # RSI history: contains oversold values (<35) within last 3 bars for lookback check
     rh = rsi_history if rsi_history is not None else [28.0, 30.0, 32.0, rsi_prev, rsi]
+    # Alligator defaults: 5% fast/slow separation → 30 pts; all three aligned bullish.
+    sf = smma_fast if smma_fast is not None else 105.0
+    sm = smma_med  if smma_med  is not None else 102.0
+    ss = smma_slow if smma_slow is not None else 100.0
     return {
-        'orb_high':        orb,
-        'ma50':            ma50,
-        'ma200':           ma200,
-        'rsi':             rsi,
-        'rsi_prev':        rsi_prev,
-        'rsi_history':     rh,
-        'atr':             atr,
-        'atr_chandelier':  atr_chandelier if atr_chandelier is not None else atr,
-        'sma200_slope':    sma200_slope,
-        'adx':             adx,
-        'high200':         h200,
-        'rvol':            rvol,
-        'spread_pct':      spread_pct,
-        'close':           price - 0.5,
-        'live_price':      price,
-        'volume':          5_000_000,
-        'dollar_vol_20d':  dollar_vol,
-        'avg_20d_vol':     avg_20d_vol,
-        'donchian_lower':  dl,
-        'donchian_upper':  du,
-        'intraday_open':   io,
-        'intraday_high':   ih,
-        'intraday_low':    il,
+        'orb_high':          orb,
+        'ma50':              ma50,
+        'ma200':             ma200,
+        'rsi':               rsi,
+        'rsi_prev':          rsi_prev,
+        'rsi_history':       rh,
+        'atr':               atr,
+        'atr_chandelier':    atr_chandelier if atr_chandelier is not None else atr,
+        'sma200_slope':      sma200_slope,
+        'adx':               adx,
+        'high200':           h200,
+        'rvol':              rvol,
+        'spread_pct':        spread_pct,
+        'close':             price - 0.5,
+        'live_price':        price,
+        'volume':            5_000_000,
+        'dollar_vol_20d':    dollar_vol,
+        'avg_20d_vol':       avg_20d_vol,
+        'donchian_lower':    dl,
+        'donchian_upper':    du,
+        'intraday_open':     io,
+        'intraday_high':     ih,
+        'intraday_low':      il,
+        'smma_fast':         sf,
+        'smma_med':          sm,
+        'smma_slow':         ss,
+        'alligator_crossed': alligator_crossed,
         # price_fetched_at must be well inside the 60-second freshness window
         # so run_cycle() doesn't attempt a re-price snapshot call
-        'price_fetched_at': pytz.timezone('US/Eastern').localize(datetime(2024, 6, 5, 10, 30)),
+        'price_fetched_at':  pytz.timezone('US/Eastern').localize(datetime(2024, 6, 5, 10, 30)),
     }
 
 
@@ -455,53 +463,49 @@ class TestGetInstitutionalScan:
 #      Donchian Proximity (30) · RVOL (25) · RSI Delta (25) · Liquidity (20)
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestScoringDonchianProximity:
-    """Donchian proximity component (0-30 pts):
-      proximity = (price - lower) / lower
-      donchian_score = max(0, (1 - proximity / DONCHIAN_FLOOR_TOL_PCT) * 30)
+class TestScoringAlligatorAlignment:
+    """Alligator alignment component (0-30 pts):
+      alignment_pct = (smma_fast - smma_slow) / smma_slow
+      alligator_score = min(30, alignment_pct / 0.05 * 30)
 
-      proximity=0%  (price==lower)    → 30 pts
-      proximity=20% (half of 40% tol) → 15 pts
-      proximity=40% (at ceiling)      → 0 pts
-      proximity>40% → clamped at 0
-      lower=0       → 0 pts (unavailable)
+      alignment=5%  (fast=105, slow=100) → 30 pts
+      alignment=2.5% (fast=102.5, slow=100) → 15 pts
+      alignment=0%  (fast==slow)          → 0 pts
+      alignment>5%  → capped at 30 pts
+      smma_slow=0   → 0 pts (condition guarded)
 
     Isolation: rvol=RVOL_MIN → 0; rsi_delta=0 → 0; spread=SPREAD_MAX, vol=0 → 0.
-    Total = donchian_score + 0 + 0 + 0.
+    Total = alligator_score + 0 + 0 + 0.
     """
 
-    def _donchian_score(self, price, lower):
+    def _alligator_score(self, smma_fast_val, smma_slow_val):
         from src.config import SPREAD_MAX_PCT, RVOL_MIN
         engine = _make_engine()
-        ctx = _ctx(price=price, rvol=RVOL_MIN,
+        ctx = _ctx(rvol=RVOL_MIN,
                    rsi=65.0, rsi_prev=65.0,
                    spread_pct=SPREAD_MAX_PCT, dollar_vol=0,
-                   donchian_lower=lower)
+                   smma_fast=smma_fast_val, smma_slow=smma_slow_val)
         return engine._score_candidate(ctx)
 
-    def test_at_donchian_floor_gives_30_pts(self):
-        """price==lower → proximity=0 → 30 pts."""
-        assert self._donchian_score(100.0, 100.0) == pytest.approx(30.0, abs=0.1)
+    def test_at_5pct_alignment_gives_30_pts(self):
+        """fast=105, slow=100 → 5% alignment → 30 pts (max)."""
+        assert self._alligator_score(105.0, 100.0) == pytest.approx(30.0, abs=0.1)
 
-    def test_half_tolerance_gives_15_pts(self):
-        """proximity=20% (half of 40% DONCHIAN_FLOOR_TOL_PCT) → 15 pts."""
-        assert self._donchian_score(120.0, 100.0) == pytest.approx(15.0, abs=0.1)
+    def test_at_2p5pct_alignment_gives_15_pts(self):
+        """fast=102.5, slow=100 → 2.5% alignment (half of 5%) → 15 pts."""
+        assert self._alligator_score(102.5, 100.0) == pytest.approx(15.0, abs=0.1)
 
-    def test_at_tolerance_ceiling_gives_0_pts(self):
-        """proximity=40% (DONCHIAN_FLOOR_TOL_PCT ceiling) → 0 pts."""
-        assert self._donchian_score(140.0, 100.0) == pytest.approx(0.0, abs=0.1)
+    def test_zero_alignment_gives_0_pts(self):
+        """fast==slow → 0% alignment → 0 pts."""
+        assert self._alligator_score(100.0, 100.0) == pytest.approx(0.0, abs=0.1)
 
-    def test_above_tolerance_clamped_at_zero(self):
-        """proximity>40% → 0 pts (clamped)."""
-        assert self._donchian_score(145.0, 100.0) == pytest.approx(0.0, abs=0.1)
+    def test_above_5pct_capped_at_30(self):
+        """fast=120, slow=100 → 20% alignment → capped at 30 pts."""
+        assert self._alligator_score(120.0, 100.0) == pytest.approx(30.0, abs=0.1)
 
-    def test_lower_unavailable_gives_zero(self):
-        """donchian_lower=0 → component contributes 0."""
-        from src.config import SPREAD_MAX_PCT, RVOL_MIN
-        engine = _make_engine()
-        ctx = _ctx(price=100.0, rvol=RVOL_MIN, rsi=65.0, rsi_prev=65.0,
-                   spread_pct=SPREAD_MAX_PCT, dollar_vol=0, donchian_lower=0.0)
-        assert engine._score_candidate(ctx) == pytest.approx(0.0, abs=0.1)
+    def test_slow_zero_gives_zero(self):
+        """smma_slow=0 → condition guard fires → 0 pts."""
+        assert self._alligator_score(105.0, 0.0) == pytest.approx(0.0, abs=0.1)
 
 
 class TestScoringRVOL:
@@ -515,7 +519,7 @@ class TestScoringRVOL:
       rvol>5.0 → capped at 25
       rvol<1.2 → 0 pts
 
-    Isolation: donchian_lower=0 → 0; rsi_delta=0 → 0; spread=max, vol=0 → 0.
+    Isolation: smma_fast=smma_slow → Alligator=0; rsi_delta=0 → 0; spread=max, vol=0 → 0.
     Total = 0 + rvol_score + 0 + 0 = rvol_score.
     """
 
@@ -524,7 +528,7 @@ class TestScoringRVOL:
         engine = _make_engine()
         ctx = _ctx(rsi=65.0, rsi_prev=65.0,
                    spread_pct=SPREAD_MAX_PCT, dollar_vol=0,
-                   rvol=rvol, donchian_lower=0.0)
+                   rvol=rvol, smma_fast=100.0, smma_slow=100.0)
         return engine._score_candidate(ctx)
 
     def test_rvol_at_floor_gives_zero(self):
@@ -555,7 +559,7 @@ class TestScoringRSIDelta:
       delta>10 → capped at 25
       delta<0  → 0 pts (clamped)
 
-    Isolation: donchian_lower=0 → 0; rvol=RVOL_MIN → 0; spread=max, vol=0 → 0.
+    Isolation: smma_fast=smma_slow → Alligator=0; rvol=RVOL_MIN → 0; spread=max, vol=0 → 0.
     Total = 0 + 0 + rsi_score + 0 = rsi_score.
     """
 
@@ -564,7 +568,7 @@ class TestScoringRSIDelta:
         engine = _make_engine()
         ctx = _ctx(rsi=rsi, rsi_prev=rsi_prev,
                    rvol=RVOL_MIN, spread_pct=SPREAD_MAX_PCT, dollar_vol=0,
-                   donchian_lower=0.0)
+                   smma_fast=100.0, smma_slow=100.0)
         return engine._score_candidate(ctx)
 
     def test_delta_zero_gives_zero(self):
@@ -590,7 +594,7 @@ class TestScoringLiquidity:
       spread_pts = max(0, (1 - spread/SPREAD_MAX) × 10)
       vol_pts    = min(10, (dollar_vol / SCAN_MIN_DOLLAR_VOL) × 10)
 
-    Isolation: donchian_lower=0 → 0; rvol=RVOL_MIN → 0; rsi_delta=0 → 0.
+    Isolation: smma_fast=smma_slow → Alligator=0; rvol=RVOL_MIN → 0; rsi_delta=0 → 0.
     Total = 0 + 0 + 0 + liq_score = liq_score.
     """
 
@@ -598,7 +602,7 @@ class TestScoringLiquidity:
         from src.config import RVOL_MIN
         engine = _make_engine()
         ctx = _ctx(rsi=65.0, rsi_prev=65.0,
-                   rvol=RVOL_MIN, donchian_lower=0.0,
+                   rvol=RVOL_MIN, smma_fast=100.0, smma_slow=100.0,
                    spread_pct=spread_pct, dollar_vol=dollar_vol)
         return engine._score_candidate(ctx)
 
@@ -632,31 +636,32 @@ class TestScoringLiquidity:
 
 
 class TestScoringMaxAndTotal:
-    """Integration: verify total score = Donchian + RVOL + RSI_delta + Liquidity.
+    """Integration: verify total score = Alligator + RVOL + RSI_delta + Liquidity.
 
     Maximum breakdown:
-      Donchian proximity = 30  (price == lower band)
-      RVOL               = 25  (rvol=5.0)
-      RSI delta          = 25  (delta=10)
-      Liquidity          = 20  (spread=0, vol≥SCAN_MIN_DOLLAR_VOL)
-      total              = 100
+      Alligator alignment = 30  (smma_fast=105, smma_slow=100 → 5% → 30 pts)
+      RVOL                = 25  (rvol=5.0)
+      RSI delta           = 25  (delta=17, capped at 10→25)
+      Liquidity           = 20  (spread=0, vol≥SCAN_MIN_DOLLAR_VOL)
+      total               = 100
     """
 
     def test_maximum_achievable_score_is_100(self):
         from src.config import SCAN_MIN_DOLLAR_VOL
         engine = _make_engine()
+        # smma 5% separation → 30 pts; rvol=5→25; delta=17→capped 25; liq=20. Total=100.
         ctx = _ctx(price=100.0, rvol=5.0, rsi=52.0, rsi_prev=35.0,
                    spread_pct=0.0, dollar_vol=SCAN_MIN_DOLLAR_VOL,
-                   donchian_lower=100.0)  # price==lower → proximity=0 → 30 pts
+                   smma_fast=105.0, smma_slow=100.0)
         assert engine._score_candidate(ctx) == pytest.approx(100.0, abs=0.1)
 
-    def test_no_donchian_caps_max_at_70(self):
-        """donchian_lower=0 → donchian=0; max from RVOL+RSI+liq = 25+25+20 = 70."""
+    def test_no_alligator_caps_max_at_70(self):
+        """smma_fast=smma_slow → Alligator=0; max from RVOL+RSI+liq = 25+25+20 = 70."""
         from src.config import SCAN_MIN_DOLLAR_VOL
         engine = _make_engine()
         ctx = _ctx(price=100.0, rvol=5.0, rsi=52.0, rsi_prev=35.0,
                    spread_pct=0.0, dollar_vol=SCAN_MIN_DOLLAR_VOL,
-                   donchian_lower=0.0)
+                   smma_fast=100.0, smma_slow=100.0)
         assert engine._score_candidate(ctx) == pytest.approx(70.0, abs=0.1)
 
     def test_score_never_exceeds_100(self):
@@ -664,7 +669,7 @@ class TestScoringMaxAndTotal:
         engine = _make_engine()
         ctx = _ctx(price=100.0, rvol=10.0, rsi=52.0, rsi_prev=35.0,
                    spread_pct=0.0, dollar_vol=SCAN_MIN_DOLLAR_VOL * 10,
-                   donchian_lower=100.0)
+                   smma_fast=105.0, smma_slow=100.0)
         assert engine._score_candidate(ctx) <= 100.0
 
     def test_score_is_rounded_to_2_decimals(self):
@@ -672,15 +677,16 @@ class TestScoringMaxAndTotal:
         engine = _make_engine()
         ctx = _ctx(price=100.25, rvol=5.0, rsi=52.0, rsi_prev=35.0,
                    spread_pct=0.0, dollar_vol=SCAN_MIN_DOLLAR_VOL,
-                   donchian_lower=100.0)
+                   smma_fast=105.0, smma_slow=100.0)
         score = engine._score_candidate(ctx)
         assert score == round(score, 2)
 
     def test_score_is_non_negative(self):
-        """All-zero inputs must produce score ≥ 0 (no negative components in new formula)."""
+        """All-zero/bad inputs must produce score ≥ 0 (no negative components)."""
         engine = _make_engine()
         ctx = _ctx(price=100.0, rvol=0.0, rsi=50.0, rsi_prev=55.0,
-                   spread_pct=0.01, dollar_vol=0, donchian_lower=0.0)
+                   spread_pct=0.01, dollar_vol=0,
+                   smma_fast=100.0, smma_slow=100.0)
         assert engine._score_candidate(ctx) >= 0.0
 
 
@@ -1384,18 +1390,16 @@ class TestEdgeCases:
 
     # ── Strict comparison boundaries ─────────────────────────────────────────
 
-    def test_price_above_donchian_tolerance_does_not_enter(self):
-        """Price > DONCHIAN_FLOOR_TOL_PCT above lower band fails donchian_floor. No entry."""
-        from src.config import DONCHIAN_FLOOR_TOL_PCT
+    def test_alligator_not_crossed_does_not_enter(self):
+        """alligator_crossed=False (mid-trend, not a fresh crossover) blocks entry."""
         tc = _mock_trading_client()
         engine = _make_engine(trading_client=tc)
-        # Price 0.5% above DONCHIAN_FLOOR_TOL_PCT (40%) ceiling — fails
-        lower = 100.0
-        price = lower * (1 + DONCHIAN_FLOOR_TOL_PCT + 0.005)
-        ctx = _ctx(price=price, donchian_lower=lower, rsi=52.0, rsi_prev=35.0)
+        ctx = _ctx(price=100.0, rsi=52.0, rsi_prev=35.0,
+                   smma_fast=105.0, smma_med=102.0, smma_slow=100.0,
+                   alligator_crossed=False)
         _run_entry_cycle(engine, ctx)
         assert tc.submit_order.call_count == 0, \
-            f"Price >{DONCHIAN_FLOOR_TOL_PCT*100:.1f}% above Donchian floor must not trigger entry"
+            "Entry mid-trend (alligator_crossed=False) must not be taken"
 
     def test_rsi_equal_to_prev_does_not_enter(self):
         """rsi == rsi_prev fails rsi_momentum (requires RSI_MIN_DELTA rise). No entry."""
@@ -1405,38 +1409,33 @@ class TestEdgeCases:
         _run_entry_cycle(engine, ctx)
         assert tc.submit_order.call_count == 0, "flat RSI must not trigger entry"
 
-    def test_rsi_never_oversold_in_lookback_does_not_enter(self):
-        """RSI never below RSI_OVERSOLD_THRESHOLD in lookback window fails rsi_momentum."""
-        from src.config import RSI_OVERSOLD_THRESHOLD
+    def test_rsi_below_50_does_not_enter(self):
+        """RSI < 50 fails check_rsi_trend even when delta is rising. No entry."""
         tc = _mock_trading_client()
         engine = _make_engine(trading_client=tc)
-        # All historical RSI values above the oversold threshold — never was oversold
-        # Use values all >= RSI_OVERSOLD_THRESHOLD(50) so the oversold-history check fires
-        no_oversold_history = [52.0, 55.0, 58.0, 60.0, 62.0]
-        ctx = _ctx(price=100.0, rsi=52.0, rsi_prev=49.0,
-                   rsi_history=no_oversold_history)
+        # rsi=48 < 50 → rsi_trend fails (stock not yet in bullish territory)
+        ctx = _ctx(price=100.0, rsi=48.0, rsi_prev=44.0)
         _run_entry_cycle(engine, ctx)
         assert tc.submit_order.call_count == 0, \
-            f"RSI never below {RSI_OVERSOLD_THRESHOLD} must not trigger entry"
+            "RSI < 50 must block entry even when delta is positive"
 
-    def test_price_exactly_at_donchian_tolerance_enters(self):
-        """Price exactly at DONCHIAN_FLOOR_TOL_PCT above lower band is within tolerance. Entry fires."""
-        from src.config import DONCHIAN_FLOOR_TOL_PCT
+    def test_alligator_aligned_with_fresh_crossover_enters(self):
+        """Alligator bullish alignment with fresh crossover → entry fires (2 orders)."""
         tc = _mock_trading_client()
         buy_order  = MagicMock(id='buy-id',  status='new')
         stop_order = MagicMock(id='stop-id', status='accepted')
         tc.submit_order.side_effect = [buy_order, stop_order]
-        lower = 100.0
-        price = round(lower * (1 + DONCHIAN_FLOOR_TOL_PCT), 4)  # exactly at tolerance ceiling
         filled = MagicMock(id='buy-id', status='filled',
-                           filled_avg_price=str(price), filled_qty='10.0')
+                           filled_avg_price='101.0', filled_qty='10.0')
         tc.get_order_by_id.return_value = filled
 
         engine = _make_engine(trading_client=tc)
-        ctx = _ctx(price=price, donchian_lower=lower, rsi=52.0, rsi_prev=35.0)
+        ctx = _ctx(price=101.0, rsi=52.0, rsi_prev=35.0,
+                   smma_fast=105.0, smma_med=102.0, smma_slow=100.0,
+                   alligator_crossed=True)
         _run_entry_cycle(engine, ctx)
         assert tc.submit_order.call_count >= 1, \
-            f"Price at exactly {DONCHIAN_FLOOR_TOL_PCT*100:.1f}% above floor must trigger entry"
+            "Alligator bullish alignment with fresh crossover must trigger entry"
 
     # ── Friday dollar-volume multiplier ───────────────────────────────────────
 
@@ -1820,7 +1819,7 @@ class TestRsiDeltaGate:
         tc.get_order_by_id.return_value = filled
 
         engine = _make_engine(trading_client=tc)
-        rsi_prev = 47.0   # just below threshold; rsi will be 47 + RSI_MIN_DELTA = 50.0 ≥ threshold
+        rsi_prev = 49.0   # rsi = 49 + RSI_MIN_DELTA(1.0) = 50.0 — exactly at bullish floor
         rsi      = rsi_prev + RSI_MIN_DELTA
         ctx = _ctx(price=101.0, orb=100.0, rsi=rsi, rsi_prev=rsi_prev,
                    ma50=95.0, ma200=85.0)

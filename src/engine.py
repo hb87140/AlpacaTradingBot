@@ -54,7 +54,10 @@ from src.config import (
     SCAN_MIN_PRICE,
     CONCENTRATION_WARN_PCT, CONCENTRATION_HALT_PCT,
     REPRICE_DRIFT_MAX_PCT,
-    DONCHIAN_PERIOD, RSI_OVERSOLD_LOOKBACK,
+    DONCHIAN_PERIOD,
+    ALLIGATOR_FAST, ALLIGATOR_MED, ALLIGATOR_SLOW,
+    ALLIGATOR_FAST_OFFSET, ALLIGATOR_MED_OFFSET, ALLIGATOR_SLOW_OFFSET,
+    ALLIGATOR_CROSS_LOOKBACK,
     SPY_EMA_PERIOD, SPY_REGIME_SIZE_CUT, SPY_REGIME_RVOL_MULT, SPY_FILTER_ENABLED,
 )
 from src.indicators import apply_all, compute_ma
@@ -1176,6 +1179,9 @@ class VelocityEngine:
             bars_daily, RSI_PERIOD, ATR_PERIOD, MA_FAST, MA_SLOW,
             SMA200_SLOPE_LOOKBACK, CHANDELIER_PERIOD,
             donchian_period=DONCHIAN_PERIOD,
+            alligator_fast=ALLIGATOR_FAST,
+            alligator_med=ALLIGATOR_MED,
+            alligator_slow=ALLIGATOR_SLOW,
         )
         if np.isnan(float(df['MA200'].iloc[-1])):
             logger.debug(f"SCAN {symbol}: MA200 is NaN, skipping")
@@ -1184,9 +1190,34 @@ class VelocityEngine:
         avg_20d_vol    = float(df['volume'].tail(20).mean())
         dollar_vol_20d = float((df['close'] * df['volume']).tail(20).mean())
 
-        # RSI history — last RSI_OVERSOLD_LOOKBACK+2 values for the oversold lookback rule
-        rsi_series  = df['RSI'].dropna()
-        rsi_history = list(rsi_series.iloc[-(RSI_OVERSOLD_LOOKBACK + 2):])
+        # ── Alligator SMMA values with offsets applied ────────────────────────
+        # Each SMMA line is "displaced" forward by its offset bars for chart alignment.
+        # In live trading this means comparing the value `offset` bars ago with the
+        # current price — the offset projects the historical line to the present bar.
+        def _smma_at(col: str, offset: int) -> float:
+            idx = -1 - offset
+            if len(df) > abs(idx):
+                val = float(df[col].iloc[idx])
+                return val if not np.isnan(val) else float('nan')
+            return float('nan')
+
+        smma_fast_val = _smma_at('SMMA_FAST', ALLIGATOR_FAST_OFFSET)
+        smma_med_val  = _smma_at('SMMA_MED',  ALLIGATOR_MED_OFFSET)
+        smma_slow_val = _smma_at('SMMA_SLOW',  ALLIGATOR_SLOW_OFFSET)
+
+        # Crossover detection: fast+med are currently above slow AND within
+        # ALLIGATOR_CROSS_LOOKBACK bars they were NOT (fresh bullish crossover).
+        alligator_crossed = False
+        if (not any(np.isnan(v) for v in (smma_fast_val, smma_med_val, smma_slow_val))
+                and smma_fast_val > smma_slow_val and smma_med_val > smma_slow_val):
+            for k in range(1, ALLIGATOR_CROSS_LOOKBACK + 1):
+                pf = _smma_at('SMMA_FAST', ALLIGATOR_FAST_OFFSET + k)
+                pm = _smma_at('SMMA_MED',  ALLIGATOR_MED_OFFSET  + k)
+                ps = _smma_at('SMMA_SLOW',  ALLIGATOR_SLOW_OFFSET + k)
+                if not any(np.isnan(v) for v in (pf, pm, ps)):
+                    if not (pf > ps and pm > ps):
+                        alligator_crossed = True
+                        break
 
         # Live snapshot — price, bid/ask, intraday volume, and intraday OHLC
         if snap is None:
@@ -1218,44 +1249,48 @@ class VelocityEngine:
         rvol         = (intraday_vol / avg_20d_vol / tod_frac) if avg_20d_vol > 0 else 0.0
 
         return {
-            # Donchian bands (primary entry signal)
-            'donchian_upper': float(df['DONCH_UPPER'].iloc[-1]),
-            'donchian_lower': float(df['DONCH_LOWER'].iloc[-1]),
-            # RSI with history for oversold-lookback check
-            'rsi':            float(df['RSI'].iloc[-1]),
-            'rsi_prev':       float(df['RSI'].iloc[-2]),
-            'rsi_history':    rsi_history,
-            # Retained for stop sizing and backtest alignment (not entry rules)
-            'ma50':           float(df['MA50'].iloc[-1]),
-            'ma200':          float(df['MA200'].iloc[-1]),
-            'atr':            float(df['ATR'].iloc[-1]),
-            'atr_chandelier': float(df['ATR_CHAND'].iloc[-1]),
-            'sma200_slope':   float(df['SMA200_SLOPE'].iloc[-1]),
-            'adx':            float(df['ADX'].iloc[-1]),
-            'high200':        float(df['HIGH200'].iloc[-1]),
+            # Alligator SMMA values (primary entry signal)
+            'smma_fast':         smma_fast_val,
+            'smma_med':          smma_med_val,
+            'smma_slow':         smma_slow_val,
+            'alligator_crossed': alligator_crossed,
+            # RSI for momentum filter and scoring
+            'rsi':               float(df['RSI'].iloc[-1]),
+            'rsi_prev':          float(df['RSI'].iloc[-2]),
+            # Donchian bands retained for backtest alignment (not live entry rules)
+            'donchian_upper':    float(df['DONCH_UPPER'].iloc[-1]),
+            'donchian_lower':    float(df['DONCH_LOWER'].iloc[-1]),
+            # Retained for stop sizing (not entry rules)
+            'ma50':              float(df['MA50'].iloc[-1]),
+            'ma200':             float(df['MA200'].iloc[-1]),
+            'atr':               float(df['ATR'].iloc[-1]),
+            'atr_chandelier':    float(df['ATR_CHAND'].iloc[-1]),
+            'sma200_slope':      float(df['SMA200_SLOPE'].iloc[-1]),
+            'adx':               float(df['ADX'].iloc[-1]),
+            'high200':           float(df['HIGH200'].iloc[-1]),
             # Price and liquidity
-            'close':          float(df['close'].iloc[-1]),
-            'live_price':     live_price,
-            'spread_pct':     spread_pct,
-            'rvol':           rvol,
-            'volume':         int(df['volume'].iloc[-1]),
-            'dollar_vol_20d': dollar_vol_20d,
-            'avg_20d_vol':    avg_20d_vol,
-            'bid':            bid,
-            'ask':            ask,
+            'close':             float(df['close'].iloc[-1]),
+            'live_price':        live_price,
+            'spread_pct':        spread_pct,
+            'rvol':              rvol,
+            'volume':            int(df['volume'].iloc[-1]),
+            'dollar_vol_20d':    dollar_vol_20d,
+            'avg_20d_vol':       avg_20d_vol,
+            'bid':               bid,
+            'ask':               ask,
             # Intraday OHLC for day-strength check
-            'intraday_open':  snap.get('intraday_open', 0.0),
-            'intraday_high':  snap.get('intraday_high', live_price),
-            'intraday_low':   snap.get('intraday_low',  live_price),
-            'price_fetched_at': now_ny,
-            'df_daily':       df,
+            'intraday_open':     snap.get('intraday_open', 0.0),
+            'intraday_high':     snap.get('intraday_high', live_price),
+            'intraday_low':      snap.get('intraday_low',  live_price),
+            'price_fetched_at':  now_ny,
+            'df_daily':          df,
         }
 
     # ── Scoring ───────────────────────────────────────────────────────────────
     def _score_candidate(self, ctx: dict) -> float:
-        """Delegate to src.rules.score_candidate (Donchian bounce formula).
+        """Delegate to src.rules.score_candidate (Alligator swing formula).
 
-        Scores 0-100:  Donchian Proximity (30) · RVOL (25) · RSI Accel (25) · Liquidity (20).
+        Scores 0-100:  Alligator Alignment (30) · RVOL (25) · RSI Momentum (25) · Liquidity (20).
         All weights and thresholds are in src/config.py.
         """
         return score_candidate(ctx)
@@ -1364,6 +1399,34 @@ class VelocityEngine:
                     )
                     self.liquidate(sym)
                     continue
+
+            # 5. Alligator reversal exit — re-fetch daily bars to get current SMMA state.
+            # Full confirmed reversal: both fast and medium SMMAs cross below slow.
+            # Only fires when SMMA values are available (requires fetched daily bars).
+            try:
+                cached = self._bar_cache.get(sym, {})
+                df_exit = cached.get('bars_daily')
+                if df_exit is not None and len(df_exit) >= ALLIGATOR_SLOW + ALLIGATOR_SLOW_OFFSET + 2:
+                    from src.indicators import compute_smma as _smma
+
+                    def _val_at(series, offset):
+                        idx = -1 - offset
+                        v = float(series.iloc[idx]) if len(series) > abs(idx) else float('nan')
+                        return v if not np.isnan(v) else float('nan')
+
+                    sf = _val_at(_smma(df_exit['close'], ALLIGATOR_FAST), ALLIGATOR_FAST_OFFSET)
+                    sm = _val_at(_smma(df_exit['close'], ALLIGATOR_MED),  ALLIGATOR_MED_OFFSET)
+                    ss = _val_at(_smma(df_exit['close'], ALLIGATOR_SLOW), ALLIGATOR_SLOW_OFFSET)
+                    if (not any(np.isnan(v) for v in (sf, sm, ss))
+                            and sf < ss and sm < ss):
+                        logger.info(
+                            f"ALLIGATOR EXIT: {sym} — fast ({sf:.2f}) and med ({sm:.2f}) "
+                            f"SMMAs crossed below slow ({ss:.2f}). Bearish reversal confirmed."
+                        )
+                        self.liquidate(sym)
+                        continue
+            except Exception:
+                pass  # Non-fatal: trailing stop remains the primary protection
 
             prefetched[sym] = cur
 
@@ -1613,7 +1676,7 @@ class VelocityEngine:
             return
 
         # 8. SPY regime (soft — bearish cuts size + tightens RVOL, does not block)
-        # SPY_FILTER_ENABLED=False by default: Donchian bounce improves without regime filter.
+        # SPY_FILTER_ENABLED=False by default: Alligator swing works across regime types.
         if SPY_FILTER_ENABLED:
             regime           = self._fetch_spy_trend()
             is_bull          = regime['is_bull']
@@ -1703,19 +1766,22 @@ class VelocityEngine:
                 logger.debug(f"SCAN {sym}: SKIP (day) — {reason}")
                 continue
 
-            # ── Cycle-by-cycle filter checks (all 7 Donchian bounce rules) ───
+            # ── Cycle-by-cycle filter checks (all 7 Alligator swing rules) ────
             cycle_passed, cycle_fails = check_rules(ctx, CYCLE_RULES)
 
-            price        = ctx['live_price']
-            donch_lower  = ctx.get('donchian_lower', 0.0)
-            rsi          = ctx['rsi']
-            rsi_p        = ctx['rsi_prev']
-            rvol         = ctx.get('rvol', 0.0)
-            spread_pct   = ctx.get('spread_pct', 0.0)
-            dol_vol_20d  = ctx['dollar_vol_20d']
+            price       = ctx['live_price']
+            smma_fast   = ctx.get('smma_fast', 0.0)
+            smma_slow   = ctx.get('smma_slow', 0.0)
+            rsi         = ctx['rsi']
+            rsi_p       = ctx['rsi_prev']
+            rvol        = ctx.get('rvol', 0.0)
+            spread_pct  = ctx.get('spread_pct', 0.0)
+            dol_vol_20d = ctx['dollar_vol_20d']
+            crossed     = ctx.get('alligator_crossed', False)
 
             scan_detail = (
-                f"SCAN {sym}: price=${price:.2f} DonchFloor=${donch_lower:.2f} "
+                f"SCAN {sym}: price=${price:.2f} "
+                f"SMMA(fast={smma_fast:.2f} slow={smma_slow:.2f} crossed={crossed}) "
                 f"RSI={rsi:.1f}(Δ{rsi-rsi_p:+.1f}) RVOL={rvol:.2f}x(≥{effective_rvol:.2f}) "
                 f"spread={spread_pct*100:.2f}% DolVol20d=${dol_vol_20d/1e6:.0f}M"
             )
@@ -1759,8 +1825,8 @@ class VelocityEngine:
             logger.info(scan_detail)
             logger.info(
                 f"SIGNAL {sym}: score={score:.1f}/100 | "
-                f"DonchFloor=${donch_lower:.2f} RVOL={rvol:.2f}x "
-                f"RSIδ={rsi-rsi_p:.1f} spread={spread_pct*100:.2f}%"
+                f"SMMA fast={smma_fast:.2f} slow={smma_slow:.2f} "
+                f"RVOL={rvol:.2f}x RSIδ={rsi-rsi_p:.1f} spread={spread_pct*100:.2f}%"
             )
 
         if not signals:

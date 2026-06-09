@@ -74,19 +74,31 @@ ADX_THRESHOLD = 20              # kept for backtest compatibility
 HIGH200_MIN_PCT = 0.85          # kept for backtest compatibility
 SMA200_SLOPE_LOOKBACK = 5       # kept for backtest compatibility
 
-# Donchian Channel (mean-reversion floor/ceiling)
+# Donchian Channel (kept for backtest compatibility — not used in live entry rules)
 DONCHIAN_PERIOD        = 2      # lookback for Donchian Channel bands
-DONCHIAN_FLOOR_TOL_PCT = 0.40   # price must be within 40% of lower band — aligned with backtest optimal
-BACKTEST_DONCHIAN_TOL_PCT = 0.40  # daily close data — same 40% as live; peak at sweep over 0.12-1.00
+DONCHIAN_FLOOR_TOL_PCT = 0.40   # kept for backtest
+BACKTEST_DONCHIAN_TOL_PCT = 0.40
 
-# RSI oversold lookback (bounce signal)
-RSI_OVERSOLD_THRESHOLD = 45     # RSI must have been below this threshold
-RSI_OVERSOLD_LOOKBACK  = 50     # … within the last N daily candles
-RSI_BOUNCE_MAX         = 86     # RSI at entry must not exceed this (avoid support-failure pattern)
+# RSI oversold lookback (kept for backtest compatibility — not used in live entry rules)
+RSI_OVERSOLD_THRESHOLD = 45
+RSI_OVERSOLD_LOOKBACK  = 50
+RSI_BOUNCE_MAX         = 86
 
 # Day-strength gate (confirms price is recovering, not fading)
-DAY_STRENGTH_OPEN_PCT  = 0.010  # price must be ≥ 1.0% above today's open — aligned with BACKTEST_MIN_BODY_PCT
-BACKTEST_MIN_BODY_PCT  = 0.010  # daily close must be ≥ 1.0% above open — strong recovery confirmation
+DAY_STRENGTH_OPEN_PCT  = 0.010  # price must be ≥ 1.0% above today's open
+BACKTEST_MIN_BODY_PCT  = 0.010  # daily close must be ≥ 1.0% above open (backtest)
+
+# ── Alligator Swing Strategy (Bill Williams) ──────────────────────────────────
+# Three Smoothed Moving Averages with Fibonacci periods and chart offsets.
+# Entry: both fast and medium SMMAs cross above the slow SMMA (bullish alignment).
+# Exit:  fast crosses below medium (early) OR both cross below slow (confirmed reversal).
+ALLIGATOR_FAST         = 5     # green SMMA — fastest jaw
+ALLIGATOR_MED          = 8     # red SMMA — medium jaw
+ALLIGATOR_SLOW         = 13    # blue SMMA — slowest jaw (the trend anchor)
+ALLIGATOR_FAST_OFFSET  = 3     # chart displacement: look back 3 bars for fast line
+ALLIGATOR_MED_OFFSET   = 5     # chart displacement: look back 5 bars for medium
+ALLIGATOR_SLOW_OFFSET  = 8     # chart displacement: look back 8 bars for slow
+ALLIGATOR_CROSS_LOOKBACK = 5   # crossover must have occurred within this many bars
 
 # SPY regime (soft — bearish regime cuts size + tightens RVOL, does not block)
 # Disabled for Donchian bounce: mean-reversion works better without regime filter;
@@ -97,9 +109,10 @@ SPY_REGIME_SIZE_CUT = 0.50      # reduce position bucket by 50% in bearish regim
 SPY_REGIME_RVOL_MULT = 1.33    # multiply RVOL threshold by this in bearish regime
 
 # ── Scoring weights (must sum to 100) ────────────────────────────────────────
-# Donchian Floor Proximity (30) · Time-Segmented RVOL (25)
-# RSI Delta Acceleration (25) · Spread & Dollar-Vol Liquidity (20)
-SCORE_DONCHIAN_MAX  = 30.0
+# Alligator Alignment (30) · Time-Segmented RVOL (25)
+# RSI Momentum (25) · Spread & Dollar-Vol Liquidity (20)
+SCORE_ALLIGATOR_MAX = 30.0     # SMMA spread — wider mouth = stronger trend signal
+SCORE_DONCHIAN_MAX  = SCORE_ALLIGATOR_MAX  # alias kept for backtest import compatibility
 SCORE_RVOL_MAX      = 25.0
 SCORE_RSI_DELTA_MAX = 25.0
 SCORE_LIQUIDITY_MAX = 20.0

@@ -132,10 +132,12 @@ class TestExpertFilter:
 
     def _base_ctx(self):
         return {
-            # Donchian bounce fields
-            'donchian_lower':  99.8,
-            'donchian_upper':  110.0,
-            # RSI momentum: delta=7.0 >= RSI_MIN_DELTA; history has oversold values
+            # Alligator fields: 5% fast/slow separation → 30 pts; fresh crossover
+            'smma_fast':       105.0,
+            'smma_med':        102.0,
+            'smma_slow':       100.0,
+            'alligator_crossed': True,
+            # RSI trend: delta=7.0 >= RSI_MIN_DELTA; rsi=52 >= 50
             'rsi':              52.0,   'rsi_prev':        45.0,
             'rsi_history':     [28.0, 30.0, 32.0, 35.0, 42.0],
             # Day strength: 1% above open, in upper 86% of range
@@ -154,6 +156,7 @@ class TestExpertFilter:
             'ma50':           105.0,   'ma200':          90.0,
             'adx':             25.0,   'high200':       110.0,
             'sma200_slope':     0.1,
+            'donchian_lower':  99.8,   'donchian_upper': 110.0,
             'price_fetched_at': _TZ_NY.localize(datetime(2024, 6, 5, 10, 30)),
         }
 
@@ -210,16 +213,16 @@ class TestExpertFilter:
     def test_all_conditions_met(self):
         assert self._engine_passes(self._base_ctx()) is True
 
-    def test_fails_when_donchian_lower_unavailable(self):
-        """donchian_lower=0 → floor unavailable, entry blocked."""
-        ctx = self._base_ctx(); ctx['donchian_lower'] = 0.0
+    def test_fails_when_alligator_not_crossed(self):
+        """alligator_crossed=False → no fresh crossover signal → entry blocked."""
+        ctx = self._base_ctx(); ctx['alligator_crossed'] = False
         assert self._engine_passes(ctx) is False
 
-    def test_fails_when_price_too_far_above_donchian_floor(self):
-        """Price 41% above lower band when tolerance is 40% → donchian_floor fails."""
+    def test_fails_when_smma_not_aligned(self):
+        """fast SMMA below slow SMMA → downtrend, not bullish → entry blocked."""
         ctx = self._base_ctx()
-        ctx['live_price']     = 141.0
-        ctx['donchian_lower'] = 100.0   # 41% below price, > 40% tolerance
+        ctx['smma_fast'] = 90.0   # fast < slow → fails check_alligator_bullish
+        ctx['smma_slow'] = 100.0
         assert self._engine_passes(ctx) is False
 
     def test_fails_when_rsi_not_rising(self):
@@ -232,12 +235,11 @@ class TestExpertFilter:
         ctx = self._base_ctx(); ctx['rsi'] = 37.5; ctx['rsi_prev'] = 35.0
         assert self._engine_passes(ctx) is False
 
-    def test_fails_when_rsi_never_oversold_in_lookback(self):
-        """RSI history never below RSI_OVERSOLD_THRESHOLD fails rsi_momentum."""
+    def test_fails_when_rsi_below_50(self):
+        """RSI < 50 fails check_rsi_trend — stock not in bullish territory."""
         ctx = self._base_ctx()
-        ctx['rsi_history'] = [60.0, 62.0, 64.0, 65.0, 68.0]
-        ctx['rsi']     = 68.0
-        ctx['rsi_prev'] = 65.0
+        ctx['rsi']     = 48.0
+        ctx['rsi_prev'] = 45.0   # delta=3 ≥ 1, but rsi=48 < 50 → fails
         assert self._engine_passes(ctx) is False
 
     def test_fails_when_price_in_lower_half_of_intraday_range(self):
@@ -720,7 +722,8 @@ class TestBuyOrderTif:
         fake_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))
         ctx = {
             'live_price': 100.0, 'close': 99.5,
-            'donchian_lower': 99.8, 'donchian_upper': 110.0,
+            'smma_fast': 105.0, 'smma_med': 102.0, 'smma_slow': 100.0,
+            'alligator_crossed': True,
             'rsi': 52.0, 'rsi_prev': 45.0,
             'rsi_history': [28.0, 30.0, 32.0, 35.0, 42.0],
             'intraday_open': 99.0, 'intraday_high': 100.5, 'intraday_low': 97.0,
@@ -1627,7 +1630,8 @@ class TestExitRecheckBetweenEntries:
         fake_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))
         signals_ctx = {
             'live_price': 100.0, 'close': 99.5, 'ask': 100.1,
-            'donchian_lower': 99.8, 'donchian_upper': 110.0,
+            'smma_fast': 105.0, 'smma_med': 102.0, 'smma_slow': 100.0,
+            'alligator_crossed': True,
             'rsi': 52.0, 'rsi_prev': 45.0,
             'rsi_history': [28.0, 30.0, 32.0, 35.0, 42.0],
             'intraday_open': 99.0, 'intraday_high': 100.5, 'intraday_low': 97.0,

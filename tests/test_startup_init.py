@@ -1121,18 +1121,20 @@ class TestPendingPositionSkippedOnExit:
 # ── TEST-10: 12-rule production filter blocks specific failed conditions ───────
 
 class TestTwelveRuleFilter:
-    """run_cycle() Donchian bounce filter must block entries when individual rules fail."""
+    """run_cycle() Alligator swing filter must block entries when individual rules fail."""
 
     def _make_passing_ctx(self):
-        """Minimal technical context dict that passes all Donchian bounce rules."""
+        """Minimal technical context dict that passes all Alligator swing rules."""
         from src.config import RVOL_MIN, SPREAD_MAX_PCT, SCAN_MIN_DOLLAR_VOL
         fixed_ny = datetime(2026, 5, 19, 11, 0, tzinfo=pytz.timezone('US/Eastern'))
         return {
             'live_price':      100.0,
-            # Donchian: price 0.2% above lower band (within 40% tolerance)
-            'donchian_lower':   99.8,
-            'donchian_upper':  110.0,
-            # RSI momentum: delta=7.0 >= RSI_MIN_DELTA, history has values below threshold=50
+            # Alligator: 5% fast/slow separation, fresh crossover
+            'smma_fast':       105.0,
+            'smma_med':        102.0,
+            'smma_slow':       100.0,
+            'alligator_crossed': True,
+            # RSI trend: delta=7.0 >= RSI_MIN_DELTA, rsi=52 >= 50
             'rsi':              52.0,
             'rsi_prev':         45.0,
             'rsi_history':     [28.0, 30.0, 32.0, 35.0, 42.0],
@@ -1183,18 +1185,18 @@ class TestTwelveRuleFilter:
         assert tc.submit_order.call_count > 0, \
             "Passing candidate should result in a submitted order"
 
-    def test_fails_donchian_floor_unavailable(self):
-        """donchian_lower=0 → Donchian floor unavailable → blocked."""
+    def test_fails_alligator_not_crossed(self):
+        """alligator_crossed=False → no recent crossover → mid-trend entry blocked."""
         ctx = self._make_passing_ctx()
-        ctx['donchian_lower'] = 0.0
+        ctx['alligator_crossed'] = False
         tc, _ = self._run_cycle_with_conditions(ctx)
         assert tc.submit_order.call_count == 0
 
-    def test_fails_donchian_floor_too_far(self):
-        """Price too far above lower band (>40%) → donchian_floor fails."""
+    def test_fails_when_smma_not_aligned(self):
+        """fast SMMA below slow SMMA → downtrend → entry blocked."""
         ctx = self._make_passing_ctx()
-        ctx['live_price']     = 141.0
-        ctx['donchian_lower'] = 100.0   # 41% gap exceeds 40% tolerance
+        ctx['smma_fast'] = 90.0   # fast < slow → fails check_alligator_bullish
+        ctx['smma_slow'] = 100.0
         tc, _ = self._run_cycle_with_conditions(ctx)
         assert tc.submit_order.call_count == 0
 
@@ -1214,12 +1216,11 @@ class TestTwelveRuleFilter:
         tc, _ = self._run_cycle_with_conditions(ctx)
         assert tc.submit_order.call_count == 0
 
-    def test_fails_rsi_never_oversold(self):
-        """RSI history never below RSI_OVERSOLD_THRESHOLD fails rsi_momentum."""
+    def test_fails_rsi_below_50(self):
+        """RSI < 50 fails check_rsi_trend — stock not in bullish territory."""
         ctx = self._make_passing_ctx()
-        ctx['rsi_history'] = [60.0, 62.0, 64.0, 65.0, 68.0]
-        ctx['rsi']      = 68.0
-        ctx['rsi_prev'] = 65.0
+        ctx['rsi']      = 48.0
+        ctx['rsi_prev'] = 45.0   # delta=3 >= 1, but rsi=48 < 50 → blocked
         tc, _ = self._run_cycle_with_conditions(ctx)
         assert tc.submit_order.call_count == 0
 
