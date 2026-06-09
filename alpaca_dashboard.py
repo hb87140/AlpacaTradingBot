@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
-BounceAlpha Web Dashboard
-─────────────────────────
+AlligatorAlpha Web Dashboard
+─────────────────────────────
 Standalone FastAPI server — completely independent of the trading engine.
 
 Start:   venv/bin/python alpaca_dashboard.py
@@ -30,22 +30,22 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from src.config import (
     STATE_FILE, DASHBOARD_FILE, EQUITY_HIST_FILE, LOG_FILE,
     MAX_POSITIONS_CAP, MIN_BUCKET_SIZE, BUCKET_CASH_PCT, VIX_THRESHOLD, HOLD_TRADING_BARS,
-    SCAN_MIN_PRICE, SCAN_MIN_VOLUME, SCAN_MIN_GAIN_PCT,
+    SCAN_MIN_PRICE, SCAN_MIN_VOLUME, SCAN_MIN_DOLLAR_VOL,
     SPREAD_MAX_PCT, RVOL_MIN,
     CHANDELIER_PERIOD, CHANDELIER_MULT,
     PROFIT_MIN_THRESHOLD, HARD_STOP_PCT, BREAK_EVEN_PCT,
     FRIDAY_MIN_PROFIT_PCT, MAX_DAILY_LOSS_PCT, CORR_MAX, MAX_SECTOR_COUNT,
     ENTRY_START, ENTRY_END, FRIDAY_CLOSE_HOUR,
     RSI_PERIOD, RSI_MIN_DELTA,
-    RSI_OVERSOLD_THRESHOLD, RSI_OVERSOLD_LOOKBACK, RSI_BOUNCE_MAX,
-    DONCHIAN_PERIOD, DONCHIAN_FLOOR_TOL_PCT,
+    ALLIGATOR_FAST, ALLIGATOR_MED, ALLIGATOR_SLOW, ALLIGATOR_CROSS_LOOKBACK,
     DAY_STRENGTH_OPEN_PCT,
     SCAN_MIN_SCORE,
+    SCORE_ALLIGATOR_MAX, SCORE_RVOL_MAX, SCORE_RSI_DELTA_MAX, SCORE_LIQUIDITY_MAX,
     ALPACA_PAPER,
 )
 
 # ── App ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="BounceAlpha Dashboard", docs_url=None, redoc_url=None)
+app = FastAPI(title="AlligatorAlpha Dashboard", docs_url=None, redoc_url=None)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"],
@@ -266,7 +266,7 @@ _HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BounceAlpha</title>
+<title>AlligatorAlpha</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
 :root {
@@ -536,7 +536,7 @@ footer a:hover{color:var(--text2);}
 <!-- ── HEADER ─────────────────────────────────────────────────── -->
 <div class="hdr">
   <div class="hdr-left">
-    <span class="logo">📈 BOUNCEALPHA</span>
+    <span class="logo">🐊 ALLIGATORALPHA</span>
     <span class="mode-badge" id="mode-badge">PAPER</span>
   </div>
   <div class="hdr-clock num" id="clock">—</div>
@@ -721,7 +721,7 @@ footer a:hover{color:var(--text2);}
 <!-- ── ENTRY CONDITIONS ───────────────────────────────────────────── -->
 <div class="panel">
   <div class="ptitle" style="color:var(--green)">
-    <div class="ptitle-left"><span class="ptitle-icon">✅</span> ENTRY CONDITIONS — ALL 12 MUST BE MET</div>
+    <div class="ptitle-left"><span class="ptitle-icon">✅</span> ENTRY CONDITIONS — ALL MUST BE MET</div>
     <button class="tog-btn" onclick="tog('ec-body','ec-chev','ec-lbl')">
       <span id="ec-chev" class="chev">▼</span>
       <span id="ec-lbl">SHOW</span>
@@ -747,7 +747,7 @@ footer a:hover{color:var(--text2);}
 </div>
 
 <footer>
-  VELOCITY ENGINE &nbsp;·&nbsp;
+  ALLIGATOR ENGINE &nbsp;·&nbsp;
   <a href="/api/state"      target="_blank">API JSON</a> &nbsp;·&nbsp;
   <a href="/api/logs?n=500" target="_blank">RAW LOGS</a> &nbsp;·&nbsp;
   Auto-refresh 5 s
@@ -1146,26 +1146,27 @@ setInterval(refresh, 5000);
 # Inject config-driven condition descriptions so the dashboard always reflects
 # current strategy parameters from config.py.
 _COND_JS = (
-    f'["1",  "Donchian Floor",   "en", "Live price within {DONCHIAN_FLOOR_TOL_PCT*100:.0f}% of {DONCHIAN_PERIOD}-day Donchian lower band — stock touching its recent floor, primed for a bounce"],\n'
-    f'  ["2",  "RSI Oversold",    "en", "RSI({RSI_PERIOD}) was below {RSI_OVERSOLD_THRESHOLD} within the last {RSI_OVERSOLD_LOOKBACK} daily bars — confirms a genuine oversold dip, not a gradual bleed"],\n'
-    f'  ["3",  "RSI Recovery",    "en", "RSI({RSI_PERIOD}) rising ≥ {RSI_MIN_DELTA:.0f} pt AND {RSI_OVERSOLD_THRESHOLD} ≤ RSI ≤ {RSI_BOUNCE_MAX} — momentum turn confirmed, not yet exhausted"],\n'
-    f'  ["4",  "Universe Filter", "en", "Alpaca scan: Top gainers + most actives | Price > ${SCAN_MIN_PRICE:.0f} | RVOL ≥ {RVOL_MIN:.1f}× | Vol > {SCAN_MIN_VOLUME/1e6:.0f}M shares | Spread ≤ {SPREAD_MAX_PCT*100:.1f}%"],\n'
-    f'  ["5",  "Day Strength",    "en", "Price ≥ {DAY_STRENGTH_OPEN_PCT*100:.1f}% above today\'s open AND in upper half of intraday range — buying pressure, not a dead-cat intraday fade"],\n'
-    f'  ["6",  "VIX Filter",      "en", "VIX ≤ {VIX_THRESHOLD} required — VIX > {VIX_THRESHOLD} suspends all new entries (Risk-Off regime)"],\n'
-    f'  ["7",  "Session Window",  "en", "Entries {ENTRY_START[0]:02d}:{ENTRY_START[1]:02d}–{ENTRY_END[0]:02d}:{ENTRY_END[1]:02d} ET Mon–Fri — full session, no ORB wait required"],\n'
-    f'  ["8",  "Position Limit",  "en", "Max {MAX_POSITIONS_CAP} concurrent positions — dynamic: floor(equity/${MIN_BUCKET_SIZE:.0f}), capped at {MAX_POSITIONS_CAP}. Max {MAX_SECTOR_COUNT} per sector. Settled cash constrains new entries (T+1)."],\n'
-    f'  ["9",  "Score Ranking",   "en", "All candidates scored: Donchian Proximity 30 + RVOL 25 + RSI Delta 25 + Liquidity 20 = 100 max; minimum score {SCAN_MIN_SCORE:.0f} required to enter"],\n'
-    f'  ["10", "Friday Filter",   "en", "Dollar-volume threshold doubled to 2× on Fridays — higher conviction required to enter a position that may need to hold over the weekend"],\n'
-    f'  ["11", "Chandelier Stop", "en", "Entry requires ATR({CHANDELIER_PERIOD})×{CHANDELIER_MULT:.1f} stop distance from live price. Bucket = settled cash × {BUCKET_CASH_PCT*100:.0f}% ÷ open slots. Recalculated every 60-sec cycle."]\n'
+    f'["1",  "Alligator Align",   "en", "Fast SMMA({ALLIGATOR_FAST}) > Med SMMA({ALLIGATOR_MED}) > Slow SMMA({ALLIGATOR_SLOW}) — all three lines stacked bullish (mouth open upward)"],\n'
+    f'  ["2",  "Fresh Crossover",  "en", "Bullish crossover occurred within the last {ALLIGATOR_CROSS_LOOKBACK} bars — catches the start of the move, not an exhausted tail"],\n'
+    f'  ["3",  "RSI Trend",        "en", "RSI({RSI_PERIOD}) ≥ 50 AND rising ≥ {RSI_MIN_DELTA:.0f} pt — stock in bullish territory with building momentum, not yet overextended"],\n'
+    f'  ["4",  "Scanner Universe", "en", "Alpaca scan: Top gainers + most actives | Price > ${SCAN_MIN_PRICE:.0f} | Vol > {SCAN_MIN_VOLUME/1e6:.0f}M shares | Dollar vol > ${SCAN_MIN_DOLLAR_VOL/1e6:.0f}M"],\n'
+    f'  ["5",  "Spread Filter",    "en", "Bid-ask spread ≤ {SPREAD_MAX_PCT*100:.1f}% — filters illiquid stocks where slippage would erode edge"],\n'
+    f'  ["6",  "RVOL Gate",        "en", "Intraday relative volume ≥ {RVOL_MIN:.1f}× (time-adjusted CDF normalizer) — confirms unusual buying activity above typical pace"],\n'
+    f'  ["7",  "Day Strength",     "en", "Price ≥ {DAY_STRENGTH_OPEN_PCT*100:.1f}% above today\'s open — sustained buying pressure, not a dead-cat bounce fading into close"],\n'
+    f'  ["8",  "VIX Filter",       "en", "VIX ≤ {VIX_THRESHOLD} — VIX > {VIX_THRESHOLD} suspends all new entries (Risk-Off regime, Alligator trends less reliable)"],\n'
+    f'  ["9",  "Session Window",   "en", "Entries {ENTRY_START[0]:02d}:{ENTRY_START[1]:02d}–{ENTRY_END[0]:02d}:{ENTRY_END[1]:02d} ET Mon–Fri — avoids opening volatility and late-day reversals"],\n'
+    f'  ["10", "Position Limit",   "en", "Max {MAX_POSITIONS_CAP} positions — dynamic: floor(equity/${MIN_BUCKET_SIZE:.0f}), capped at {MAX_POSITIONS_CAP}. Max {MAX_SECTOR_COUNT} per sector. Settled cash gates T+1 entries."],\n'
+    f'  ["11", "Score Gate",       "en", "Composite score ≥ {SCAN_MIN_SCORE:.0f}/100 required: Alligator Alignment {SCORE_ALLIGATOR_MAX:.0f}pts + RVOL {SCORE_RVOL_MAX:.0f}pts + RSI Momentum {SCORE_RSI_DELTA_MAX:.0f}pts + Liquidity {SCORE_LIQUIDITY_MAX:.0f}pts"]\n'
     f'];\n'
     f'const EXIT_CONDITIONS = [\n'
-    f'  ["1", "Chandelier Trail", "ex", "TRAIL SELL at ATR({CHANDELIER_PERIOD})×{CHANDELIER_MULT:.1f} from peak price — Alpaca raises the stop automatically as price climbs"],\n'
-    f'  ["2", "Velocity Exit",    "ex", "After {HOLD_TRADING_BARS} trading session(s): if profit < {PROFIT_MIN_THRESHOLD*100:.0f}%, force-liquidate via Market SELL — frees capital for better setups"],\n'
-    f'  ["3", "Hard Stop",        "ex", "{HARD_STOP_PCT*100:.0f}% drawdown from fill price triggers immediate Market SELL regardless of ATR stop distance"],\n'
-    f'  ["4", "Break-Even Floor", "ex", "Once profit ≥ {BREAK_EVEN_PCT*100:.0f}%, chandelier stop is floored at fill price — software-enforced, prevents winners from becoming losers"],\n'
-    f'  ["5", "Friday Close",     "ex", "After {FRIDAY_CLOSE_HOUR}:00 PM ET on Fridays, positions with < {FRIDAY_MIN_PROFIT_PCT*100:.0f}% profit are liquidated to eliminate weekend gap risk"],\n'
-    f'  ["6", "VIX Risk-Off",     "ex", "VIX > {VIX_THRESHOLD} blocks new entries; existing positions exit via chandelier stop, velocity exit, or hard stop as normal"],\n'
-    f'  ["7", "Daily Loss Halt",  "ex", "{MAX_DAILY_LOSS_PCT*100:.0f}% intraday equity drawdown halts all new entries for the rest of the trading day (circuit breaker)"]\n'
+    f'  ["1", "Chandelier Trail",   "ex", "TRAIL SELL at ATR({CHANDELIER_PERIOD})×{CHANDELIER_MULT:.1f} from peak price — Alpaca raises the stop automatically as price climbs; dollar distance fixed at entry"],\n'
+    f'  ["2", "Alligator Reversal", "ex", "Fast SMMA({ALLIGATOR_FAST}) crosses below Med SMMA({ALLIGATOR_MED}) (early warning) OR both cross below Slow SMMA({ALLIGATOR_SLOW}) (confirmed reversal) — trend structure broken"],\n'
+    f'  ["3", "Velocity Exit",      "ex", "After {HOLD_TRADING_BARS} trading session(s): if profit < {PROFIT_MIN_THRESHOLD*100:.0f}%, force-liquidate via Market SELL — frees capital for better setups"],\n'
+    f'  ["4", "Hard Stop",          "ex", "{HARD_STOP_PCT*100:.0f}% drawdown from fill price triggers immediate Market SELL regardless of ATR stop distance"],\n'
+    f'  ["5", "Break-Even Floor",   "ex", "Once profit ≥ {BREAK_EVEN_PCT*100:.0f}%, chandelier stop is floored at fill price — software-enforced, prevents winners from becoming losers"],\n'
+    f'  ["6", "Friday Close",       "ex", "After {FRIDAY_CLOSE_HOUR}:00 PM ET on Fridays, positions with < {FRIDAY_MIN_PROFIT_PCT*100:.0f}% profit are liquidated to eliminate weekend gap risk"],\n'
+    f'  ["7", "VIX Risk-Off",       "ex", "VIX > {VIX_THRESHOLD} blocks new entries; existing positions exit via chandelier stop, velocity exit, or hard stop as normal"],\n'
+    f'  ["8", "Daily Loss Halt",    "ex", "{MAX_DAILY_LOSS_PCT*100:.0f}% intraday equity drawdown halts all new entries for the rest of the trading day (circuit breaker)"]\n'
     f'];\n'
 )
 _HTML = _HTML.replace("  __ENTRY_EXIT_CONDITIONS_PLACEHOLDER__", _COND_JS)
@@ -1185,12 +1186,12 @@ def health():
 # ── Entry point ───────────────────────────────────────────────────
 if __name__ == "__main__":
     import argparse
-    p = argparse.ArgumentParser(description="BounceAlpha Web Dashboard")
+    p = argparse.ArgumentParser(description="AlligatorAlpha Web Dashboard")
     p.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
     p.add_argument("--port", default=int(os.getenv("PORT", "8080")), type=int,
                    help="Port (default: $PORT env or 8080)")
     args = p.parse_args()
 
-    print("\n  📈  BounceAlpha Dashboard")
+    print("\n  🐊  AlligatorAlpha Dashboard")
     print(f"  Open → http://{args.host}:{args.port}\n")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
