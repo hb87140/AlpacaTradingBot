@@ -133,7 +133,7 @@ def _fetch_alpaca_universe(trading_client: TradingClient) -> List[str]:
         for a in assets:
             if not a.tradable:
                 continue
-            if str(a.exchange) not in _VALID_EXCHANGES:
+            if a.exchange.value not in _VALID_EXCHANGES:
                 continue
             sym = a.symbol
             if len(sym) > 5:
