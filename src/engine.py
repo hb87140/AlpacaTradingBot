@@ -51,7 +51,6 @@ from src.config import (
     LIMIT_BUF_MIN_PCT, LIMIT_BUF_MAX_PCT,
     RISK_PER_TRADE_PCT,
     SCAN_MIN_SCORE,
-    SCAN_MIN_PRICE,
     CONCENTRATION_WARN_PCT, CONCENTRATION_HALT_PCT,
     REPRICE_DRIFT_MAX_PCT,
     DONCHIAN_PERIOD,
@@ -1267,10 +1266,6 @@ class VelocityEngine:
             logger.debug(f"SCAN {symbol}: live price unavailable, skipping")
             return None
 
-        if live_price < SCAN_MIN_PRICE:
-            logger.debug(f"SCAN {symbol}: price ${live_price:.2f} < minimum ${SCAN_MIN_PRICE:.2f}, skipping")
-            return None
-
         bid = snap.get('bid', 0.0)
         ask = snap.get('ask', 0.0)
         if bid > 0 and ask > bid:
@@ -1915,11 +1910,6 @@ class VelocityEngine:
                 snap2 = self._fetch_snapshot(sym)
                 if snap2 and snap2.get('live_price', 0) > 0:
                     new_price = snap2['live_price']
-                    if new_price < SCAN_MIN_PRICE:
-                        logger.warning(
-                            f"SKIP {sym}: refreshed price ${new_price:.2f} < min ${SCAN_MIN_PRICE:.2f}"
-                        )
-                        continue
                     drift = abs(new_price - ctx['live_price']) / ctx['live_price']
                     if drift > REPRICE_DRIFT_MAX_PCT:
                         logger.warning(
