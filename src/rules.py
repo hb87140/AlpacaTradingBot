@@ -56,6 +56,7 @@ from src.config import (
     SCORE_RVOL_MAX,
     SCORE_RSI_DELTA_MAX,
     SCORE_LIQUIDITY_MAX,
+    SCORE_ANALYST_MAX,
 )
 
 # Type alias
@@ -233,7 +234,7 @@ def check_rules(ctx: dict, rules: List[Rule]) -> Tuple[bool, List[Tuple[str, str
 # ── Scoring ───────────────────────────────────────────────────────────────────
 
 def score_candidate(ctx: dict) -> float:
-    """Score a candidate 0-100 using the 4-component Alligator swing formula.
+    """Score a candidate 0-100 using the Alligator swing formula.
 
     Component              Max pts  Description
     ─────────────────────  ───────  ────────────────────────────────────────────
@@ -241,6 +242,8 @@ def score_candidate(ctx: dict) -> float:
     Time-Segmented RVOL      25     Higher with stronger institutional volume
     RSI Momentum             25     Higher with faster RSI acceleration
     Spread + Dollar Vol      20     Higher with tighter spread and larger volume
+    Analyst Consensus        15     Bonus: majority analyst buy rating (capped so
+                                    total never exceeds 100)
 
     All weights are driven by config constants (SCORE_*_MAX).
     """
@@ -275,4 +278,17 @@ def score_candidate(ctx: dict) -> float:
     vol_pts    = min(half, (dol_vol / SCAN_MIN_DOLLAR_VOL) * half) if SCAN_MIN_DOLLAR_VOL > 0 else 0.0
     liq_score  = spread_pts + vol_pts
 
-    return round(alligator_score + rvol_score + rsi_score + liq_score, 2)
+    # 5. Analyst consensus bonus (SCORE_ANALYST_MAX pts — capped so total ≤ 100)
+    # Scale: 30% buy ratio → 0 pts; 70% buy ratio → full SCORE_ANALYST_MAX pts.
+    analyst_buy  = ctx.get('analyst_buy',  0)
+    analyst_hold = ctx.get('analyst_hold', 0)
+    analyst_sell = ctx.get('analyst_sell', 0)
+    total_ana    = analyst_buy + analyst_hold + analyst_sell
+    if total_ana > 0:
+        buy_ratio     = analyst_buy / total_ana
+        analyst_score = min(SCORE_ANALYST_MAX, max(0.0, (buy_ratio - 0.30) / 0.40 * SCORE_ANALYST_MAX))
+    else:
+        analyst_score = 0.0  # no data → neutral, no penalty
+
+    raw = alligator_score + rvol_score + rsi_score + liq_score + analyst_score
+    return min(100.0, round(raw, 2))

@@ -81,6 +81,7 @@ def _make_engine(equity=2500.0, cash=2500.0, trading_client=None, data_client=No
     engine._bar_cache = {}
     engine._spy_cache = {}
     engine._sector_cache = {}
+    engine._analyst_cache = {}
     engine._daily_scan_skip = {}
     engine._insufficient_history_skip = set()
     engine._last_audit_date = None
@@ -108,7 +109,8 @@ def _ctx(price=100.0, orb=95.0, ma50=105.0, ma200=90.0,
          intraday_open=None, intraday_high=None, intraday_low=None,
          rsi_history=None,
          smma_fast=None, smma_med=None, smma_slow=None,
-         alligator_crossed=True):
+         alligator_crossed=True,
+         analyst_buy=0, analyst_hold=0, analyst_sell=0):
     """Build a get_technical_context()-style dict with all production-rule fields."""
     h200 = high200 if high200 is not None else round(price * 1.1, 4)
     dl = donchian_lower if donchian_lower is not None else round(price * 0.998, 4)
@@ -150,6 +152,9 @@ def _ctx(price=100.0, orb=95.0, ma50=105.0, ma200=90.0,
         'smma_med':          sm,
         'smma_slow':         ss,
         'alligator_crossed': alligator_crossed,
+        'analyst_buy':       analyst_buy,
+        'analyst_hold':      analyst_hold,
+        'analyst_sell':      analyst_sell,
         # price_fetched_at must be well inside the 60-second freshness window
         # so run_cycle() doesn't attempt a re-price snapshot call
         'price_fetched_at':  pytz.timezone('US/Eastern').localize(datetime(2024, 6, 5, 10, 30)),
@@ -688,6 +693,91 @@ class TestScoringMaxAndTotal:
                    spread_pct=0.01, dollar_vol=0,
                    smma_fast=100.0, smma_slow=100.0)
         assert engine._score_candidate(ctx) >= 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3a. ANALYST CONSENSUS BONUS — score_candidate() component 5
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestScoringAnalyst:
+    """Analyst consensus bonus (0-SCORE_ANALYST_MAX pts):
+
+      buy_ratio = analyst_buy / (buy + hold + sell)
+      analyst_score = min(MAX, max(0, (buy_ratio - 0.30) / 0.40 * MAX))
+
+      No data (all zeros)  → 0 pts (neutral — no penalty)
+      buy_ratio = 0.30     → 0 pts (floor)
+      buy_ratio = 0.50     → 50% of max
+      buy_ratio = 0.70     → full max
+      buy_ratio > 0.70     → capped at max
+      buy_ratio < 0.30     → 0 pts (clamped)
+
+    Isolation: all other components zeroed (smma equal, rvol=min, rsi_delta=0,
+    spread=max, vol=0). Total = 0 + 0 + 0 + 0 + analyst_score.
+    """
+
+    def _analyst_score(self, buy, hold, sell):
+        from src.config import RVOL_MIN, SPREAD_MAX_PCT
+        engine = _make_engine()
+        ctx = _ctx(rsi=65.0, rsi_prev=65.0,
+                   rvol=RVOL_MIN, spread_pct=SPREAD_MAX_PCT, dollar_vol=0,
+                   smma_fast=100.0, smma_slow=100.0,
+                   analyst_buy=buy, analyst_hold=hold, analyst_sell=sell)
+        return engine._score_candidate(ctx)
+
+    def test_no_analyst_data_gives_zero(self):
+        """analyst_buy=hold=sell=0 → neutral, 0 bonus pts."""
+        assert self._analyst_score(0, 0, 0) == pytest.approx(0.0, abs=0.01)
+
+    def test_buy_ratio_at_floor_gives_zero(self):
+        """30% buys → 0 pts (threshold floor)."""
+        assert self._analyst_score(3, 7, 0) == pytest.approx(0.0, abs=0.01)
+
+    def test_buy_ratio_below_floor_gives_zero(self):
+        """20% buys < 30% floor → clamped to 0."""
+        assert self._analyst_score(2, 8, 0) == pytest.approx(0.0, abs=0.01)
+
+    def test_buy_ratio_at_full_gives_max(self):
+        """70% buys → full SCORE_ANALYST_MAX."""
+        from src.config import SCORE_ANALYST_MAX
+        assert self._analyst_score(7, 3, 0) == pytest.approx(SCORE_ANALYST_MAX, abs=0.1)
+
+    def test_buy_ratio_above_70pct_capped_at_max(self):
+        """90% buys → capped at SCORE_ANALYST_MAX."""
+        from src.config import SCORE_ANALYST_MAX
+        assert self._analyst_score(9, 1, 0) == pytest.approx(SCORE_ANALYST_MAX, abs=0.1)
+
+    def test_buy_ratio_at_50pct_gives_half(self):
+        """50% buys → midpoint between 30% and 70% → half of SCORE_ANALYST_MAX."""
+        from src.config import SCORE_ANALYST_MAX
+        assert self._analyst_score(5, 5, 0) == pytest.approx(SCORE_ANALYST_MAX / 2, abs=0.1)
+
+    def test_analyst_bonus_cannot_push_score_above_100(self):
+        """Even with max analyst bonus, score is capped at 100."""
+        from src.config import SCAN_MIN_DOLLAR_VOL
+        engine = _make_engine()
+        # All technical components maxed (30+25+25+20=100) plus full analyst bonus
+        ctx = _ctx(price=100.0, rvol=5.0, rsi=52.0, rsi_prev=35.0,
+                   spread_pct=0.0, dollar_vol=SCAN_MIN_DOLLAR_VOL,
+                   smma_fast=105.0, smma_slow=100.0,
+                   analyst_buy=9, analyst_hold=1, analyst_sell=0)
+        assert engine._score_candidate(ctx) == pytest.approx(100.0, abs=0.01)
+
+    def test_analyst_bonus_lifts_otherwise_weak_score(self):
+        """Strong analyst consensus lifts a candidate whose technical score alone is borderline."""
+        from src.config import SCORE_ANALYST_MAX, RVOL_MIN, SPREAD_MAX_PCT
+        engine = _make_engine()
+        # Alligator=0, RVOL=0, RSI=0, Liq=0 → base score = 0
+        base_ctx = _ctx(rsi=65.0, rsi_prev=65.0,
+                        rvol=RVOL_MIN, spread_pct=SPREAD_MAX_PCT, dollar_vol=0,
+                        smma_fast=100.0, smma_slow=100.0,
+                        analyst_buy=0, analyst_hold=0, analyst_sell=0)
+        # With strong buys → score = analyst_score
+        boosted_ctx = _ctx(rsi=65.0, rsi_prev=65.0,
+                           rvol=RVOL_MIN, spread_pct=SPREAD_MAX_PCT, dollar_vol=0,
+                           smma_fast=100.0, smma_slow=100.0,
+                           analyst_buy=7, analyst_hold=3, analyst_sell=0)
+        assert engine._score_candidate(boosted_ctx) > engine._score_candidate(base_ctx)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

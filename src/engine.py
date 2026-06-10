@@ -156,9 +156,10 @@ class VelocityEngine:
         self._day_start_date:   Optional[str]   = None
 
         # Caches — all keyed by symbol
-        self._bar_cache:   Dict[str, dict] = {}   # daily bars, date-scoped
-        self._spy_cache:   dict            = {}   # SPY trend, date-scoped
-        self._sector_cache: Dict[str, str] = {}   # stable, never invalidated
+        self._bar_cache:    Dict[str, dict] = {}   # daily bars, date-scoped
+        self._spy_cache:    dict            = {}   # SPY trend, date-scoped
+        self._sector_cache: Dict[str, str]  = {}   # stable, never invalidated
+        self._analyst_cache: Dict[str, dict] = {}  # analyst ratings, session-scoped
 
         # Per-day skip lists to avoid re-running expensive lookups each cycle
         self._daily_scan_skip:          Dict[str, str] = {}
@@ -889,6 +890,30 @@ class VelocityEngine:
         self._sector_cache[symbol] = sector
         return sector
 
+    def _get_analyst_ratings(self, symbol: str) -> dict:
+        """Return analyst buy/hold/sell counts via yfinance, cached for the session.
+
+        strongBuy+buy → analyst_buy; hold → analyst_hold; sell+strongSell → analyst_sell.
+        Returns zeros on any error so scoring degrades gracefully.
+        """
+        if symbol in self._analyst_cache:
+            return self._analyst_cache[symbol]
+        try:
+            summ = yf.Ticker(symbol).recommendations_summary
+            if summ is not None and not summ.empty:
+                row  = summ.iloc[0]
+                buy  = int(row.get('strongBuy', 0)) + int(row.get('buy', 0))
+                hold = int(row.get('hold', 0))
+                sell = int(row.get('sell', 0)) + int(row.get('strongSell', 0))
+            else:
+                buy, hold, sell = 0, 0, 0
+        except Exception as exc:
+            logger.debug(f"ANALYST {symbol}: ratings unavailable ({exc})")
+            buy, hold, sell = 0, 0, 0
+        result = {'analyst_buy': buy, 'analyst_hold': hold, 'analyst_sell': sell}
+        self._analyst_cache[symbol] = result
+        return result
+
     # ── Correlation check ─────────────────────────────────────────────────────
     def _compute_book_correlation(self, sym: str, df_daily: pd.DataFrame) -> float:
         """Maximum pairwise return correlation between sym and any open position."""
@@ -1141,6 +1166,10 @@ class VelocityEngine:
                         effective_stop = max(effective_stop, ep)
                     self.state[sym]['stop_loss'] = effective_stop
 
+                # Lazy-load analyst ratings for positions re-synced after restart
+                if 'analyst_buy' not in self.state[sym]:
+                    self.state[sym].update(self._get_analyst_ratings(sym))
+
                 changed = True
 
         if changed:
@@ -1248,12 +1277,17 @@ class VelocityEngine:
         tod_frac     = _tod_frac(elapsed_min)
         rvol         = (intraday_vol / avg_20d_vol / tod_frac) if avg_20d_vol > 0 else 0.0
 
+        ratings = self._get_analyst_ratings(symbol)
         return {
             # Alligator SMMA values (primary entry signal)
             'smma_fast':         smma_fast_val,
             'smma_med':          smma_med_val,
             'smma_slow':         smma_slow_val,
             'alligator_crossed': alligator_crossed,
+            # Analyst consensus (yfinance recommendations_summary — session-cached)
+            'analyst_buy':       ratings['analyst_buy'],
+            'analyst_hold':      ratings['analyst_hold'],
+            'analyst_sell':      ratings['analyst_sell'],
             # RSI for momentum filter and scoring
             'rsi':               float(df['RSI'].iloc[-1]),
             'rsi_prev':          float(df['RSI'].iloc[-2]),
@@ -1959,6 +1993,9 @@ class VelocityEngine:
                 'peak_price': limit_price,
                 'volume':   ctx.get('volume', 0),
                 'score':    score,
+                'analyst_buy':  ctx.get('analyst_buy',  0),
+                'analyst_hold': ctx.get('analyst_hold', 0),
+                'analyst_sell': ctx.get('analyst_sell', 0),
                 'pending':  True,
                 'entry_order_id': str(buy_order.id),
             }
@@ -2060,6 +2097,9 @@ class VelocityEngine:
                 'peak_price':     round(fill_price, 2),
                 'volume':         ctx.get('volume', 0),
                 'score':          score,
+                'analyst_buy':    ctx.get('analyst_buy',  0),
+                'analyst_hold':   ctx.get('analyst_hold', 0),
+                'analyst_sell':   ctx.get('analyst_sell', 0),
             }
             if stop_order:
                 self.state[sym]['stop_order_id'] = str(stop_order.id)

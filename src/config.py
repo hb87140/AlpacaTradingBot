@@ -108,14 +108,15 @@ SPY_EMA_PERIOD      = 50        # EMA period used for SPY regime check
 SPY_REGIME_SIZE_CUT = 0.50      # reduce position bucket by 50% in bearish regime
 SPY_REGIME_RVOL_MULT = 1.33    # multiply RVOL threshold by this in bearish regime
 
-# ── Scoring weights (must sum to 100) ────────────────────────────────────────
-# Alligator Alignment (30) · Time-Segmented RVOL (25)
-# RSI Momentum (25) · Spread & Dollar-Vol Liquidity (20)
+# ── Scoring weights ────────────────────────────────────────────────────────────
+# Alligator Alignment (30) · RVOL (25) · RSI Momentum (25) · Liquidity (20)
+# + Analyst Consensus (15 bonus) — total capped at 100.
 SCORE_ALLIGATOR_MAX = 30.0     # SMMA spread — wider mouth = stronger trend signal
 SCORE_DONCHIAN_MAX  = SCORE_ALLIGATOR_MAX  # alias kept for backtest import compatibility
 SCORE_RVOL_MAX      = 25.0
 SCORE_RSI_DELTA_MAX = 25.0
 SCORE_LIQUIDITY_MAX = 20.0
+SCORE_ANALYST_MAX   = 15.0     # analyst consensus — majority buy rating boosts priority
 
 # ── Historical data windows ───────────────────────────────────────────────────
 # Expressed as calendar days so Alpaca's date-based API can use them directly.

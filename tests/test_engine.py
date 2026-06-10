@@ -73,6 +73,7 @@ def _make_engine(equity=2500.0, settled=2500.0, trading_client=None, data_client
     engine._bar_cache                 = {}
     engine._spy_cache                 = {}
     engine._sector_cache              = {}
+    engine._analyst_cache             = {}
     engine._daily_scan_skip           = {}
     engine._insufficient_history_skip = set()
     engine._last_audit_date           = None

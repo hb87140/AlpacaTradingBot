@@ -40,7 +40,7 @@ from src.config import (
     ALLIGATOR_FAST, ALLIGATOR_MED, ALLIGATOR_SLOW, ALLIGATOR_CROSS_LOOKBACK,
     DAY_STRENGTH_OPEN_PCT,
     SCAN_MIN_SCORE,
-    SCORE_ALLIGATOR_MAX, SCORE_RVOL_MAX, SCORE_RSI_DELTA_MAX, SCORE_LIQUIDITY_MAX,
+    SCORE_ALLIGATOR_MAX, SCORE_RVOL_MAX, SCORE_RSI_DELTA_MAX, SCORE_LIQUIDITY_MAX, SCORE_ANALYST_MAX,
     ALPACA_PAPER,
 )
 
@@ -201,6 +201,9 @@ def get_state():
             "hold_trading_days": hold_trading_days,
             "entry_time":        entry_ts,
             "score":             d.get("score"),
+            "analyst_buy":       d.get("analyst_buy",  0),
+            "analyst_hold":      d.get("analyst_hold", 0),
+            "analyst_sell":      d.get("analyst_sell", 0),
         })
 
     _dyn_max_pos    = min(int(equity / MIN_BUCKET_SIZE), MAX_POSITIONS_CAP) if equity >= MIN_BUCKET_SIZE else 0
@@ -650,6 +653,7 @@ footer a:hover{color:var(--text2);}
         <tr>
           <th style="text-align:left">SYMBOL</th>
           <th>SCORE</th>
+          <th>ANALYSTS</th>
           <th>ENTRY</th>
           <th>CURRENT</th>
           <th>QTY</th>
@@ -662,7 +666,7 @@ footer a:hover{color:var(--text2);}
         </tr>
       </thead>
       <tbody id="tbody">
-        <tr class="empty"><td colspan="11">Waiting for data…</td></tr>
+        <tr class="empty"><td colspan="12">Waiting for data…</td></tr>
       </tbody>
     </table>
   </div>
@@ -946,7 +950,7 @@ function render(d) {
   const hbar = d.hold_trading_bars ?? 2;
 
   if (!d.positions || d.positions.length===0) {
-    tb.innerHTML='<tr class="empty"><td colspan="11">No open positions — scanning for signals</td></tr>';
+    tb.innerHTML='<tr class="empty"><td colspan="12">No open positions — scanning for signals</td></tr>';
     document.getElementById('risk-strip').style.display='none';
     document.getElementById('pos-summary').textContent='';
     return;
@@ -1003,6 +1007,19 @@ function render(d) {
     const mW = Math.min(100, Math.abs(unrP)/10*100).toFixed(0);
     const mC = unr>=0 ? 'var(--green)' : 'var(--red)';
 
+    // analyst cell
+    const ab = p.analyst_buy  ?? 0;
+    const ah = p.analyst_hold ?? 0;
+    const as_ = p.analyst_sell ?? 0;
+    const tot = ab + ah + as_;
+    const anaHtml = tot > 0
+      ? `<span class="g" style="font-weight:700">${ab}B</span>`+
+        `<span class="d"> / </span>`+
+        `<span class="y">${ah}H</span>`+
+        `<span class="d"> / </span>`+
+        `<span class="r">${as_}S</span>`
+      : `<span class="d" style="font-size:10px">—</span>`;
+
     return `<tr>
       <td><span class="sym">${p.symbol}</span></td>
       <td>
@@ -1011,6 +1028,7 @@ function render(d) {
           <span style="color:${scCol};font-weight:700">${sc}</span>
         </div>
       </td>
+      <td style="text-align:center">${anaHtml}</td>
       <td class="d">${$f(p.entry_price)}</td>
       <td>
         <div class="prc-cell">
@@ -1156,7 +1174,7 @@ _COND_JS = (
     f'  ["8",  "VIX Filter",       "en", "VIX ≤ {VIX_THRESHOLD} — VIX > {VIX_THRESHOLD} suspends all new entries (Risk-Off regime, Alligator trends less reliable)"],\n'
     f'  ["9",  "Session Window",   "en", "Entries {ENTRY_START[0]:02d}:{ENTRY_START[1]:02d}–{ENTRY_END[0]:02d}:{ENTRY_END[1]:02d} ET Mon–Fri — avoids opening volatility and late-day reversals"],\n'
     f'  ["10", "Position Limit",   "en", "Max {MAX_POSITIONS_CAP} positions — dynamic: floor(equity/${MIN_BUCKET_SIZE:.0f}), capped at {MAX_POSITIONS_CAP}. Max {MAX_SECTOR_COUNT} per sector. Settled cash gates T+1 entries."],\n'
-    f'  ["11", "Score Gate",       "en", "Composite score ≥ {SCAN_MIN_SCORE:.0f}/100 required: Alligator Alignment {SCORE_ALLIGATOR_MAX:.0f}pts + RVOL {SCORE_RVOL_MAX:.0f}pts + RSI Momentum {SCORE_RSI_DELTA_MAX:.0f}pts + Liquidity {SCORE_LIQUIDITY_MAX:.0f}pts"]\n'
+    f'  ["11", "Score Gate",       "en", "Composite score ≥ {SCAN_MIN_SCORE:.0f}/100 required: Alligator {SCORE_ALLIGATOR_MAX:.0f}pts + RVOL {SCORE_RVOL_MAX:.0f}pts + RSI {SCORE_RSI_DELTA_MAX:.0f}pts + Liquidity {SCORE_LIQUIDITY_MAX:.0f}pts + Analyst Consensus {SCORE_ANALYST_MAX:.0f}pts bonus (total capped 100)"]\n'
     f'];\n'
     f'const EXIT_CONDITIONS = [\n'
     f'  ["1", "Chandelier Trail",   "ex", "TRAIL SELL at ATR({CHANDELIER_PERIOD})×{CHANDELIER_MULT:.1f} from peak price — Alpaca raises the stop automatically as price climbs; dollar distance fixed at entry"],\n'
