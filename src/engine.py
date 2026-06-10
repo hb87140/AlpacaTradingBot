@@ -64,7 +64,7 @@ from src.indicators import apply_all, compute_ma
 from src.rules import (
     PERMANENT_DAY_RULES, CYCLE_RULES, check_rules, score_candidate,
 )
-from src.scanner import get_candidates
+from src.scanner import get_candidates, get_alligator_crossover_scan
 
 os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(LOG_DIR,  exist_ok=True)
@@ -479,6 +479,13 @@ class VelocityEngine:
         if self.state:
             self._update_position_prices()
         self._write_dashboard_data(connected=True)
+
+        # ── Alligator universe crossover scan ─────────────────────────────────
+        # Run eagerly on every restart so the cache is warm before the first
+        # entry cycle.  Takes ~2 min for the full universe; runs in the
+        # foreground here while the engine is not yet cycling.
+        logger.info("INIT: Pre-loading Alligator universe crossover scan...")
+        get_alligator_crossover_scan(self.data_client, self.trading_client)
 
         # ── Phase 2 ──────────────────────────────────────────────────────────
         self._wait_for_pre_entry_sync()
@@ -1630,6 +1637,13 @@ class VelocityEngine:
             self._daily_scan_skip.clear()
             self._insufficient_history_skip.clear()
             self._bar_cache.clear()
+            # Refresh the Alligator crossover universe for the new trading day.
+            # Runs on the first cycle after midnight ET (markets closed), so the
+            # ~2-min scan completes hours before the 09:35 entry window opens.
+            # Skip weekends — Saturday/Sunday have no new bar data and no entries.
+            if datetime.now(_TZ_NY).weekday() < 5:
+                logger.info("SCANNER: Daily crossover scan refresh (new trading day)...")
+                get_alligator_crossover_scan(self.data_client, self.trading_client)
         elif (
             self._day_start_equity is not None
             and equity < self._day_start_equity * (1 - MAX_DAILY_LOSS_PCT)
