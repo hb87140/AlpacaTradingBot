@@ -9,7 +9,7 @@ Combines four candidate sources into one pool each scan cycle:
                                different ranking than volume — catches high-frequency
                                breakout activity on stocks with moderate dollar volume.
   4. get_alligator_crossover_scan — daily pre-scan of the full Alpaca tradeable universe
-                               (up to ALLIGATOR_UNIVERSE_MAX symbols, default 2000).
+                               (all active NYSE/NASDAQ/BATS/ARCA/AMEX stocks).
                                Downloads daily bars in batches, computes offset-adjusted
                                SMMAs, and returns symbols where the bullish Alligator
                                crossover occurred within ALLIGATOR_CROSS_LOOKBACK bars.
@@ -58,7 +58,6 @@ from src.config import (
     ALLIGATOR_MED_OFFSET,
     ALLIGATOR_SLOW,
     ALLIGATOR_SLOW_OFFSET,
-    ALLIGATOR_UNIVERSE_MAX,
     SCAN_MIN_GAIN_PCT,
     SCAN_MIN_PRICE,
     TICKER_BLOCKLIST,
@@ -144,11 +143,11 @@ def _fetch_alpaca_universe(trading_client: TradingClient) -> List[str]:
 
         # Shorter symbols first as a lightweight proxy for established / liquid names
         symbols.sort(key=lambda s: (len(s), s))
-        _alpaca_universe_cache = symbols[:ALLIGATOR_UNIVERSE_MAX]
+        _alpaca_universe_cache = symbols
 
         logger.info(
             f"SCANNER: Alpaca universe built — {len(_alpaca_universe_cache)} symbols "
-            f"(from {len(assets)} raw assets, cap={ALLIGATOR_UNIVERSE_MAX})"
+            f"(from {len(assets)} raw assets)"
         )
     except Exception as e:
         logger.warning(f"SCANNER: Alpaca asset list fetch failed ({e}); universe will be empty this session")

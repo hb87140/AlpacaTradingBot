@@ -99,7 +99,6 @@ ALLIGATOR_FAST_OFFSET  = 3     # chart displacement: look back 3 bars for fast l
 ALLIGATOR_MED_OFFSET   = 5     # chart displacement: look back 5 bars for medium
 ALLIGATOR_SLOW_OFFSET  = 8     # chart displacement: look back 8 bars for slow
 ALLIGATOR_CROSS_LOOKBACK = 5   # crossover must have occurred within this many bars
-ALLIGATOR_UNIVERSE_MAX   = int(os.getenv("ALLIGATOR_UNIVERSE_MAX", "2000"))  # cap on dynamic asset universe
 
 # SPY regime (soft — bearish regime cuts size + tightens RVOL, does not block)
 # Disabled for Donchian bounce: mean-reversion works better without regime filter;
