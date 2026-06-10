@@ -232,7 +232,7 @@ class TestExpertFilter:
         assert self._engine_passes(ctx) is False
 
     def test_fails_when_rsi_delta_below_minimum(self):
-        """RSI delta 2.5 < RSI_MIN_DELTA=3.0 fails rsi_momentum."""
+        """rsi=37.5 < 50 fails check_rsi_trend (RSI not yet in bullish territory)."""
         ctx = self._base_ctx(); ctx['rsi'] = 37.5; ctx['rsi_prev'] = 35.0
         assert self._engine_passes(ctx) is False
 

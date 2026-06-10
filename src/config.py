@@ -42,7 +42,7 @@ HOLD_TRADING_BARS    = 1       # Mon-Fri trading sessions before velocity exit f
 PROFIT_MIN_THRESHOLD = 0.04    # 4% min gain to avoid velocity exit after hold period
 GAP_MAX_PCT          = 0.10    # kept for backtest compatibility
 MAX_DAILY_LOSS_PCT   = 0.03    # 3% intraday equity drawdown halts new entries
-RSI_MIN_DELTA        = 1.0     # minimum RSI point rise to confirm momentum turn
+RSI_MIN_DELTA        = 0.5     # minimum RSI point rise to confirm momentum turn
 HARD_STOP_PCT        = 0.05    # 5% drawdown from entry → forced market exit
 RISK_PER_TRADE_PCT   = 0.02    # risk 2% of equity per trade (ATR-based sizing)
 BREAK_EVEN_PCT       = 0.06    # once profit ≥ 6%, floor stop at entry
@@ -85,7 +85,7 @@ RSI_OVERSOLD_LOOKBACK  = 50
 RSI_BOUNCE_MAX         = 86
 
 # Day-strength gate (confirms price is recovering, not fading)
-DAY_STRENGTH_OPEN_PCT  = 0.010  # price must be ≥ 1.0% above today's open
+DAY_STRENGTH_OPEN_PCT  = 0.005  # price must be ≥ 0.5% above today's open
 BACKTEST_MIN_BODY_PCT  = 0.010  # daily close must be ≥ 1.0% above open (backtest)
 
 # ── Alligator Swing Strategy (Bill Williams) ──────────────────────────────────
@@ -98,7 +98,7 @@ ALLIGATOR_SLOW         = 13    # blue SMMA — slowest jaw (the trend anchor)
 ALLIGATOR_FAST_OFFSET  = 3     # chart displacement: look back 3 bars for fast line
 ALLIGATOR_MED_OFFSET   = 5     # chart displacement: look back 5 bars for medium
 ALLIGATOR_SLOW_OFFSET  = 8     # chart displacement: look back 8 bars for slow
-ALLIGATOR_CROSS_LOOKBACK = 5   # crossover must have occurred within this many bars
+ALLIGATOR_CROSS_LOOKBACK = 10  # crossover must have occurred within this many bars
 
 # SPY regime (soft — bearish regime cuts size + tightens RVOL, does not block)
 # Disabled for Donchian bounce: mean-reversion works better without regime filter;

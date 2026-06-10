@@ -1890,15 +1890,15 @@ class TestRsiDeltaGate:
     """
 
     def test_tiny_rsi_rise_blocks_entry(self):
-        """RSI delta of 0.5 (< RSI_MIN_DELTA=1.0) must not generate a signal."""
+        """RSI delta of 0.3 (< RSI_MIN_DELTA=0.5) must not generate a signal."""
         from src.config import RSI_MIN_DELTA
         tc = _mock_trading_client()
         engine = _make_engine(trading_client=tc)
-        ctx = _ctx(price=101.0, orb=100.0, rsi=55.5, rsi_prev=55.0,
+        ctx = _ctx(price=101.0, orb=100.0, rsi=55.3, rsi_prev=55.0,
                    ma50=95.0, ma200=85.0)
         _run_entry_cycle(engine, ctx)
         assert tc.submit_order.call_count == 0, \
-            f"RSI delta {55.5-55.0:.1f} < {RSI_MIN_DELTA} must block entry"
+            f"RSI delta {55.3-55.0:.1f} < {RSI_MIN_DELTA} must block entry"
         assert 'TSLA' not in engine.state
 
     def test_rsi_delta_at_minimum_allows_entry(self):
@@ -1913,7 +1913,7 @@ class TestRsiDeltaGate:
         tc.get_order_by_id.return_value = filled
 
         engine = _make_engine(trading_client=tc)
-        rsi_prev = 49.0   # rsi = 49 + RSI_MIN_DELTA(1.0) = 50.0 — exactly at bullish floor
+        rsi_prev = 55.0   # rsi = 55 + RSI_MIN_DELTA(0.5) = 55.5 — well above bullish floor
         rsi      = rsi_prev + RSI_MIN_DELTA
         ctx = _ctx(price=101.0, orb=100.0, rsi=rsi, rsi_prev=rsi_prev,
                    ma50=95.0, ma200=85.0)
