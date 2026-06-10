@@ -429,16 +429,18 @@ class TestGetInstitutionalScan:
         with patch('src.engine.get_candidates', return_value=['AAPL', 'TSLA']) as mock_scan:
             result = engine.get_institutional_scan()
         assert result == ['AAPL', 'TSLA']
-        mock_scan.assert_called_once_with(engine.data_client, engine.screener_client)
+        mock_scan.assert_called_once_with(engine.data_client, engine.screener_client, engine.trading_client)
 
     def test_passes_clients_through(self):
         dc = MagicMock()
         sc = MagicMock()
+        tc = MagicMock()
         engine = _make_engine(data_client=dc)
         engine.screener_client = sc
+        engine.trading_client  = tc
         with patch('src.engine.get_candidates', return_value=[]) as mock_scan:
             engine.get_institutional_scan()
-        mock_scan.assert_called_once_with(dc, sc)
+        mock_scan.assert_called_once_with(dc, sc, tc)
 
     def test_returns_empty_list_on_exception(self):
         engine = _make_engine()

@@ -3,27 +3,30 @@ Alpaca candidate scanner.
 
 Combines four candidate sources into one pool each scan cycle:
 
-  1. get_top_gainers        — stocks with the largest intraday % gain.
-  2. get_most_actives_vol   — stocks with the highest intraday share volume.
-  3. get_most_actives_trades— stocks with the most intraday transactions (different
-                              ranking than volume — catches high-frequency breakout
-                              activity even on stocks with moderate dollar volume).
-  4. get_alligator_crossover_scan — daily pre-scan of a curated 250-stock liquid
-                              universe; downloads daily bars in batch, computes
-                              offset-adjusted SMMAs, and returns symbols where the
-                              bullish Alligator crossover occurred within
-                              ALLIGATOR_CROSS_LOOKBACK trading days. Runs once per
-                              trading day (module-level cache) so the batch download
-                              cost is paid only at the first scan of the session.
+  1. get_top_gainers         — stocks with the largest intraday % gain (Alpaca max 50).
+  2. get_most_actives_vol    — stocks with the highest intraday share volume (max 100).
+  3. get_most_actives_trades — stocks with the most intraday transactions (max 100);
+                               different ranking than volume — catches high-frequency
+                               breakout activity on stocks with moderate dollar volume.
+  4. get_alligator_crossover_scan — daily pre-scan of the full Alpaca tradeable universe
+                               (up to ALLIGATOR_UNIVERSE_MAX symbols, default 2000).
+                               Downloads daily bars in batches, computes offset-adjusted
+                               SMMAs, and returns symbols where the bullish Alligator
+                               crossover occurred within ALLIGATOR_CROSS_LOOKBACK bars.
+                               The universe is fetched from Alpaca's assets API once per
+                               process lifetime (cached); the crossover scan runs once
+                               per trading day (date-keyed cache). Zero extra API cost
+                               on subsequent scan cycles within the same session.
 
-Sources 1-3 surface intraday momentum candidates that may or may not have active
-Alligator crossovers. Source 4 ensures that liquid stocks whose Alligator signal
-fired on a quiet day (below the gainers/actives threshold) are never missed.
+Sources 1-3 surface intraday momentum candidates. Source 4 ensures that stocks whose
+Alligator signal fired on a quiet day (below the gainers/actives threshold) are never
+missed, regardless of their daily rank.
 
 Early filters applied at scan time:
   • Price floor   — gainers endpoint returns price; sub-$10 stocks discarded.
   • Blocklist     — ETFs, leveraged/inverse products removed from all sources.
   • Non-stocks    — warrants, rights, and other non-equity instruments removed.
+  • Exchange      — universe limited to NYSE / NASDAQ / BATS / ARCA / AMEX.
   • Min % gain    — gainers below SCAN_MIN_GAIN_PCT discarded.
 """
 
@@ -32,7 +35,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date, datetime, timedelta, timezone
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -42,18 +45,20 @@ from alpaca.data.historical.screener import ScreenerClient
 from alpaca.data.requests import MarketMoversRequest, MostActivesRequest, StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.data.enums import MarketType, MostActivesBy
+from alpaca.trading.client import TradingClient
 
 from src.config import (
     ALPACA_DATA_FEED,
     ALPACA_SCANNER_TOP,
     ALPACA_SCANNER_TOP_GAINERS,
+    ALLIGATOR_CROSS_LOOKBACK,
     ALLIGATOR_FAST,
     ALLIGATOR_FAST_OFFSET,
     ALLIGATOR_MED,
     ALLIGATOR_MED_OFFSET,
     ALLIGATOR_SLOW,
     ALLIGATOR_SLOW_OFFSET,
-    ALLIGATOR_CROSS_LOOKBACK,
+    ALLIGATOR_UNIVERSE_MAX,
     SCAN_MIN_GAIN_PCT,
     SCAN_MIN_PRICE,
     TICKER_BLOCKLIST,
@@ -69,6 +74,9 @@ _NON_STOCK_RE = re.compile(
     r'|WS$|WD$|WT$'  # warrant-series / warrant-deed suffixes
     r'|RT$|RW$'      # rights suffixes
 )
+
+# Exchanges considered legitimate for the Alligator universe.
+_VALID_EXCHANGES = {'NYSE', 'NASDAQ', 'BATS', 'ARCA', 'AMEX'}
 
 
 def _is_non_stock(sym: str) -> bool:
@@ -86,75 +94,67 @@ def _keep(sym: str) -> bool:
     return sym not in TICKER_BLOCKLIST and not _is_non_stock(sym)
 
 
-# ── Curated liquid universe ────────────────────────────────────────────────────
-# Mid-to-large cap NASDAQ and NYSE stocks across all GICS sectors.
-# These are always scanned for Alligator crossovers each trading day regardless
-# of whether they appear in the intraday gainers or actives lists.
-# The Alligator crossover often fires on a modest-volume day (0.5-1.5% move)
-# before the stock appears in momentum screeners — this universe catches those setups.
-# Update quarterly when major index compositions change.
-_LIQUID_UNIVERSE: List[str] = [
-    # ── Technology ────────────────────────────────────────────────────────────
-    'AAPL', 'MSFT', 'NVDA', 'AVGO', 'ORCL', 'AMD', 'CRM', 'ADBE', 'NOW', 'INTU',
-    'QCOM', 'TXN', 'AMAT', 'MU', 'LRCX', 'KLAC', 'SNPS', 'CDNS', 'MRVL', 'FTNT',
-    'PANW', 'CRWD', 'ZS', 'DDOG', 'SNOW', 'NET', 'OKTA', 'HUBS', 'TEAM', 'MDB',
-    'INTC', 'HPQ', 'DELL', 'STX', 'WDC', 'NTAP', 'PSTG', 'SMCI', 'ARM', 'PLTR',
-    # ── Consumer Discretionary ────────────────────────────────────────────────
-    'AMZN', 'TSLA', 'HD', 'MCD', 'NKE', 'SBUX', 'BKNG', 'TJX', 'ROST', 'LULU',
-    'CMG', 'YUM', 'DHI', 'LEN', 'PHM', 'TOL', 'ABNB', 'NFLX', 'DPZ', 'WYNN',
-    'MGM', 'LVS', 'RCL', 'CCL', 'NCLH', 'EXPE', 'LYFT', 'UBER', 'DASH', 'RBLX',
-    # ── Financials ────────────────────────────────────────────────────────────
-    'JPM', 'BAC', 'WFC', 'GS', 'MS', 'BLK', 'SCHW', 'AXP', 'V', 'MA',
-    'COF', 'DFS', 'USB', 'TFC', 'PNC', 'CME', 'ICE', 'SPGI', 'MCO', 'MSCI',
-    'SQ', 'PYPL', 'COIN', 'HOOD', 'AFRM', 'SOFI', 'UPST', 'LC', 'OPEN',
-    # ── Healthcare ────────────────────────────────────────────────────────────
-    'UNH', 'LLY', 'MRK', 'ABBV', 'TMO', 'DHR', 'AMGN', 'GILD', 'REGN', 'VRTX',
-    'BIIB', 'MRNA', 'ISRG', 'DXCM', 'IDXX', 'EW', 'STE', 'HOLX', 'PODD', 'INSP',
-    'NVAX', 'RXRX', 'ROIV', 'PTGX', 'SGMO', 'BEAM', 'EDIT', 'CRSP', 'NTLA',
-    # ── Industrials ───────────────────────────────────────────────────────────
-    'CAT', 'DE', 'HON', 'GE', 'RTX', 'LMT', 'BA', 'GD', 'NOC', 'HII',
-    'UPS', 'FDX', 'CSX', 'UNP', 'NSC', 'EMR', 'ETN', 'PH', 'ROK', 'IR',
-    'LDOS', 'SAIC', 'BAH', 'CACI', 'MSA', 'RRX', 'XPO', 'CHRW', 'JBHT',
-    # ── Energy ────────────────────────────────────────────────────────────────
-    'XOM', 'CVX', 'COP', 'EOG', 'SLB', 'OXY', 'MPC', 'VLO', 'PSX', 'HES',
-    'DVN', 'FANG', 'MRO', 'APA', 'HAL', 'BKR', 'NOV', 'CTRA',
-    # ── Materials ─────────────────────────────────────────────────────────────
-    'LIN', 'APD', 'ECL', 'NEM', 'FCX', 'NUE', 'CF', 'MOS', 'ALB', 'SQM',
-    'MP', 'LTHM', 'LAC', 'SGML', 'PLL',
-    # ── Communication Services ────────────────────────────────────────────────
-    'GOOGL', 'META', 'DIS', 'CMCSA', 'TMUS', 'NFLX', 'EA', 'TTWO', 'RBLX',
-    'SNAP', 'PINS', 'MTCH', 'ZM', 'DOCU', 'TTD', 'ROKU', 'APP', 'MGNI',
-    # ── Consumer Staples ──────────────────────────────────────────────────────
-    'WMT', 'COST', 'PG', 'KO', 'PEP', 'MDLZ', 'CL', 'GIS', 'MKC', 'K',
-    # ── Utilities ─────────────────────────────────────────────────────────────
-    'NEE', 'DUK', 'SO', 'AEP', 'EXC', 'CEG',
-    # ── Real Estate ───────────────────────────────────────────────────────────
-    'PLD', 'AMT', 'EQIX', 'CCI', 'SPG', 'O', 'DLR', 'WELL', 'AVB', 'EQR',
-    # ── High-beta growth / mid-caps (Alligator works well here) ───────────────
-    'SHOP', 'SQ', 'PYPL', 'BILL', 'GTLB', 'PATH', 'AI', 'BBAI', 'SOUN', 'IREN',
-    'MSTR', 'CLSK', 'RIOT', 'MARA', 'HUT', 'CIFR', 'BTBT',
-    'ENPH', 'SEDG', 'FSLR', 'RUN', 'ARRY', 'NOVA', 'SHLS',
-    'LCID', 'RIVN', 'NKLA', 'GOEV', 'WKHS', 'XPEV', 'NIO', 'LI',
-    'ON', 'STM', 'WOLF', 'SWKS', 'QRVO', 'MPWR', 'ALGM',
-    'CELH', 'VITL', 'HIMS', 'RXST', 'PRCT', 'TMDX', 'IRTC',
-]
+# ── Dynamic Alpaca universe ────────────────────────────────────────────────────
+# Fetched once per process from Alpaca's assets API, then cached for the session.
+# New IPOs and delistings are picked up on the next process restart (daily on Render).
+_alpaca_universe_cache: Optional[List[str]] = None
 
-# Remove any universe symbols that are in the blocklist
-_LIQUID_UNIVERSE = [s for s in _LIQUID_UNIVERSE if _keep(s) and not _is_non_stock(s)]
-# Deduplicate while preserving order
-_seen_univ: set = set()
-_LIQUID_UNIVERSE_DEDUP: List[str] = []
-for _s in _LIQUID_UNIVERSE:
-    if _s not in _seen_univ:
-        _seen_univ.add(_s)
-        _LIQUID_UNIVERSE_DEDUP.append(_s)
-_LIQUID_UNIVERSE = _LIQUID_UNIVERSE_DEDUP
-
-# Day-level cache: computed once per trading day and reused every scan cycle
-_universe_cache: dict = {'date': None, 'symbols': []}
+# Day-level crossover cache: expensive bar download + SMMA computation runs
+# once per trading day; subsequent calls return the cached list instantly.
+_crossover_cache: dict = {'date': None, 'symbols': []}
 
 _UNIVERSE_BATCH_SIZE = 50   # symbols per Alpaca bars API request
-_UNIVERSE_LOOKBACK   = 60   # calendar days of bars to download (≈ 42 trading days)
+_UNIVERSE_LOOKBACK   = 60   # calendar days of bars (≈ 42 trading days — enough for SMMA warmup)
+
+
+def _fetch_alpaca_universe(trading_client: TradingClient) -> List[str]:
+    """Return the full list of active, tradeable US equity symbols from Alpaca.
+
+    Fetches once per process and caches the result.  Filtered to:
+      • active + tradable
+      • NYSE / NASDAQ / BATS / ARCA / AMEX exchanges (no OTC / crypto)
+      • symbol passes _keep() and _is_non_stock() checks
+      • symbol length ≤ 5 (eliminates most special instruments not caught above)
+    Result is capped at ALLIGATOR_UNIVERSE_MAX and sorted shortest-symbol-first
+    (a lightweight proxy for established / liquid names).
+    """
+    global _alpaca_universe_cache
+    if _alpaca_universe_cache is not None:
+        return _alpaca_universe_cache
+
+    try:
+        from alpaca.trading.requests import GetAssetsRequest
+        from alpaca.trading.enums import AssetClass, AssetStatus
+
+        req    = GetAssetsRequest(status=AssetStatus.ACTIVE, asset_class=AssetClass.US_EQUITY)
+        assets = trading_client.get_all_assets(req)
+
+        symbols: List[str] = []
+        for a in assets:
+            if not a.tradable:
+                continue
+            if str(a.exchange) not in _VALID_EXCHANGES:
+                continue
+            sym = a.symbol
+            if len(sym) > 5:
+                continue
+            if not _keep(sym) or _is_non_stock(sym):
+                continue
+            symbols.append(sym)
+
+        # Shorter symbols first as a lightweight proxy for established / liquid names
+        symbols.sort(key=lambda s: (len(s), s))
+        _alpaca_universe_cache = symbols[:ALLIGATOR_UNIVERSE_MAX]
+
+        logger.info(
+            f"SCANNER: Alpaca universe built — {len(_alpaca_universe_cache)} symbols "
+            f"(from {len(assets)} raw assets, cap={ALLIGATOR_UNIVERSE_MAX})"
+        )
+    except Exception as e:
+        logger.warning(f"SCANNER: Alpaca asset list fetch failed ({e}); universe will be empty this session")
+        _alpaca_universe_cache = []
+
+    return _alpaca_universe_cache
 
 
 def get_top_gainers(screener_client: ScreenerClient, top: int = ALPACA_SCANNER_TOP_GAINERS) -> List[str]:
@@ -193,19 +193,16 @@ def get_top_gainers(screener_client: ScreenerClient, top: int = ALPACA_SCANNER_T
 def get_most_actives_vol(screener_client: ScreenerClient, top: int = ALPACA_SCANNER_TOP) -> List[str]:
     """Return most-active stock symbols ranked by intraday share volume."""
     try:
-        request  = MostActivesRequest(top=top, by=MostActivesBy.VOLUME)
-        response = screener_client.get_most_actives(request)
-        raw      = response.most_actives
-
-        symbols  = [item.symbol for item in raw if _keep(item.symbol)]
-        logger.debug(f"SCANNER: most-actives(vol) {len(symbols)} kept from {len(raw)}")
+        response = screener_client.get_most_actives(MostActivesRequest(top=top, by=MostActivesBy.VOLUME))
+        symbols  = [item.symbol for item in response.most_actives if _keep(item.symbol)]
+        logger.debug(f"SCANNER: most-actives(vol) {len(symbols)} kept from {len(response.most_actives)}")
         return symbols
     except Exception as e:
         logger.warning(f"SCANNER: most-actives(vol) fetch failed: {e}")
         return []
 
 
-# Keep old name as alias so any code that imported it directly still works
+# Backward-compatible alias
 get_most_actives = get_most_actives_vol
 
 
@@ -213,47 +210,53 @@ def get_most_actives_trades(screener_client: ScreenerClient, top: int = ALPACA_S
     """Return most-active stock symbols ranked by intraday transaction count.
 
     Trade-count ranking surfaces stocks with many small orders — often a sign of
-    retail accumulation or early institutional positioning that precedes an Alligator
+    retail accumulation or early institutional positioning ahead of an Alligator
     crossover. Complements the volume-ranked list with different candidates.
     """
     try:
-        request  = MostActivesRequest(top=top, by=MostActivesBy.TRADES)
-        response = screener_client.get_most_actives(request)
-        raw      = response.most_actives
-
-        symbols  = [item.symbol for item in raw if _keep(item.symbol)]
-        logger.debug(f"SCANNER: most-actives(trades) {len(symbols)} kept from {len(raw)}")
+        response = screener_client.get_most_actives(MostActivesRequest(top=top, by=MostActivesBy.TRADES))
+        symbols  = [item.symbol for item in response.most_actives if _keep(item.symbol)]
+        logger.debug(f"SCANNER: most-actives(trades) {len(symbols)} kept from {len(response.most_actives)}")
         return symbols
     except Exception as e:
         logger.warning(f"SCANNER: most-actives(trades) fetch failed: {e}")
         return []
 
 
-def get_alligator_crossover_scan(data_client: StockHistoricalDataClient) -> List[str]:
+def get_alligator_crossover_scan(
+    data_client:    StockHistoricalDataClient,
+    trading_client: TradingClient,
+) -> List[str]:
     """Daily batch scan: returns universe symbols with an active Alligator crossover.
 
-    Downloads 60 calendar days of daily bars for the full liquid universe (in
-    batches of 50 to respect API request size). Computes offset-adjusted SMMAs
-    and returns symbols where the bullish crossover (fast+med crossing above slow)
-    occurred within ALLIGATOR_CROSS_LOOKBACK trading bars.
+    On the first call each trading day:
+      1. Fetch / use the cached Alpaca symbol universe (up to ALLIGATOR_UNIVERSE_MAX).
+      2. Download 60 calendar days of daily bars in batches of 50.
+      3. Compute offset-adjusted SMMAs for each symbol.
+      4. Return symbols where the bullish crossover fired within ALLIGATOR_CROSS_LOOKBACK bars.
 
-    Result is cached for the trading day — only the first call per session hits
-    the API; subsequent calls within the same day return the cached list instantly.
+    Subsequent calls the same day return the cached list with no API calls.
     """
     today_str = date.today().isoformat()
-    if _universe_cache['date'] == today_str:
-        return _universe_cache['symbols']
+    if _crossover_cache['date'] == today_str:
+        return _crossover_cache['symbols']
+
+    universe = _fetch_alpaca_universe(trading_client)
+    if not universe:
+        _crossover_cache['date']    = today_str
+        _crossover_cache['symbols'] = []
+        return []
 
     logger.info(
-        f"SCANNER: Alligator universe scan — {len(_LIQUID_UNIVERSE)} symbols "
-        f"(batches of {_UNIVERSE_BATCH_SIZE}, lookback={_UNIVERSE_LOOKBACK} days)"
+        f"SCANNER: Alligator crossover scan — {len(universe)} symbols "
+        f"({len(universe) // _UNIVERSE_BATCH_SIZE + 1} batches)"
     )
-    start = datetime.now(timezone.utc) - timedelta(days=_UNIVERSE_LOOKBACK)
+    start      = datetime.now(timezone.utc) - timedelta(days=_UNIVERSE_LOOKBACK)
     candidates: List[str] = []
-    n_batches = 0
+    n_batches  = 0
 
-    for i in range(0, len(_LIQUID_UNIVERSE), _UNIVERSE_BATCH_SIZE):
-        batch = _LIQUID_UNIVERSE[i: i + _UNIVERSE_BATCH_SIZE]
+    for i in range(0, len(universe), _UNIVERSE_BATCH_SIZE):
+        batch     = universe[i: i + _UNIVERSE_BATCH_SIZE]
         n_batches += 1
         try:
             req  = StockBarsRequest(
@@ -295,11 +298,11 @@ def get_alligator_crossover_scan(data_client: StockHistoricalDataClient) -> List
 
             if any(np.isnan(v) for v in (fast_now, med_now, slow_now)):
                 continue
-            # Both faster lines must be above the slow line right now
             if not (fast_now > slow_now and med_now > slow_now):
                 continue
 
-            # Check that within CROSS_LOOKBACK bars there was a bar where they were NOT above
+            # Crossover: within CROSS_LOOKBACK bars there must have been a bar
+            # where fast+med were NOT both above slow (i.e. the crossover is fresh)
             crossed = False
             for k in range(1, ALLIGATOR_CROSS_LOOKBACK + 1):
                 pf = _at(smma_f, ALLIGATOR_FAST_OFFSET + k)
@@ -314,35 +317,33 @@ def get_alligator_crossover_scan(data_client: StockHistoricalDataClient) -> List
                 candidates.append(sym)
 
     logger.info(
-        f"SCANNER: Alligator universe scan complete — "
-        f"{len(candidates)} crossover candidates from {len(_LIQUID_UNIVERSE)} symbols "
-        f"({n_batches} batches)"
+        f"SCANNER: Alligator crossover scan complete — "
+        f"{len(candidates)} crossover candidates from {len(universe)} symbols"
     )
-    _universe_cache['date']    = today_str
-    _universe_cache['symbols'] = candidates
+    _crossover_cache['date']    = today_str
+    _crossover_cache['symbols'] = candidates
     return candidates
 
 
 def get_candidates(
-    data_client: StockHistoricalDataClient,
+    data_client:    StockHistoricalDataClient,
     screener_client: ScreenerClient,
+    trading_client: Optional[TradingClient] = None,
 ) -> List[str]:
     """Return the combined candidate pool from all four sources, deduplicated.
 
     Priority order (higher-conviction sources first):
-      1. Top gainers    — strongest intraday % movers (primary momentum signal)
+      1. Top gainers             — strongest intraday % movers
       2. Most-actives by volume  — highest dollar-flow stocks
       3. Most-actives by trades  — most transactions (breakout accumulation signal)
-      4. Alligator universe scan — liquid stocks with active SMMA crossovers
+      4. Alligator universe scan — all liquid stocks with active SMMA crossovers
 
     Deduplication preserves order so higher-priority sources are evaluated first.
-    The engine's full technical context (SMMA computation, live snapshot, 12 rules)
-    is only applied to symbols that pass the cheap scanner-level pre-filters.
     """
     gainers  = get_top_gainers(screener_client)
     act_vol  = get_most_actives_vol(screener_client)
     act_trds = get_most_actives_trades(screener_client)
-    universe = get_alligator_crossover_scan(data_client)
+    universe = get_alligator_crossover_scan(data_client, trading_client) if trading_client else []
 
     seen:   set       = set()
     result: List[str] = []

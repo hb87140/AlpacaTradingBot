@@ -1568,8 +1568,8 @@ class VelocityEngine:
 
     # ── Scanner + entry cycle ─────────────────────────────────────────────────
     def get_institutional_scan(self) -> List[str]:
-        """Fetch candidates: top-gainers (primary) merged with most-actives (supplementary)."""
-        return get_candidates(self.data_client, self.screener_client)
+        """Fetch candidates from all four sources: gainers, actives-vol, actives-trades, universe crossover."""
+        return get_candidates(self.data_client, self.screener_client, self.trading_client)
 
     def run_cycle(self):
         # 0. Connectivity check
