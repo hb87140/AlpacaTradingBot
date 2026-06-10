@@ -280,7 +280,8 @@ class TestVelocityExit:
     def _old_time(self, days_ago=14):
         return (datetime.now(_TZ_NY) - timedelta(days=days_ago)).isoformat()
 
-    def test_stagnant_position_older_than_hold_bars_triggers_exit(self):
+    def test_stagnant_position_older_than_hold_bars_not_exited(self):
+        """Alligator swing strategy holds positions until Alligator reversal — no time-based exit."""
         engine = _make_engine()
         _safe_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))
         old_time  = (_safe_now - timedelta(days=14)).isoformat()
@@ -294,7 +295,7 @@ class TestVelocityExit:
             mock_dt.fromisoformat    = datetime.fromisoformat
             engine.check_velocity_exits()
 
-        mock_liq.assert_called_once_with('AAPL')
+        mock_liq.assert_not_called()
 
     def test_profitable_position_not_exited_early(self):
         engine = _make_engine()
@@ -328,13 +329,14 @@ class TestVelocityExit:
         mock_liq.assert_not_called()
 
     def test_falls_back_to_current_price_when_snapshot_unavailable(self):
+        """Stored current_price is used when live snapshot unavailable — position not exited if healthy."""
         engine = _make_engine()
         _safe_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))
         old_time  = (_safe_now - timedelta(days=14)).isoformat()
         engine.state = {'AAPL': {
             'price': 100.0,
             'time': old_time,
-            'current_price': 100.5,  # stored from previous cycle
+            'current_price': 100.5,  # stored from previous cycle — 0.5% up, no hard stop
         }}
 
         with patch.object(engine, '_fetch_snapshot', return_value=None), \
@@ -345,7 +347,7 @@ class TestVelocityExit:
             mock_dt.fromisoformat    = datetime.fromisoformat
             engine.check_velocity_exits()
 
-        mock_liq.assert_called_once_with('AAPL')
+        mock_liq.assert_not_called()
 
     def test_missing_time_field_skips_velocity_check_without_crash(self):
         engine = _make_engine()

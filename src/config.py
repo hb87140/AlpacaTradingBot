@@ -38,8 +38,8 @@ CHANDELIER_MULT   = 2.5    # ATR multiplier — stop = peak − ATR(14) × 2.5
 
 # ── Risk rules ────────────────────────────────────────────────────────────────
 VIX_THRESHOLD        = 35
-HOLD_TRADING_BARS    = 1       # Mon-Fri trading sessions before velocity exit fires
-PROFIT_MIN_THRESHOLD = 0.04    # 4% min gain to avoid velocity exit after hold period
+HOLD_TRADING_BARS    = 1       # backtest only — live engine uses Alligator reversal exit
+PROFIT_MIN_THRESHOLD = 0.04    # backtest only — live engine uses Alligator reversal exit
 GAP_MAX_PCT          = 0.10    # kept for backtest compatibility
 MAX_DAILY_LOSS_PCT   = 0.03    # 3% intraday equity drawdown halts new entries
 RSI_MIN_DELTA        = 0.5     # minimum RSI point rise to confirm momentum turn
@@ -52,8 +52,8 @@ CONCENTRATION_WARN_PCT = 0.85  # deployed ≥ 85% of equity → warn, no new ent
 CONCENTRATION_HALT_PCT = 0.95  # deployed ≥ 95% of equity → halt all order activity
 REPRICE_DRIFT_MAX_PCT  = 0.02  # skip entry if price moved >2% since scan snapshot
 MIN_TREND_SEP        = 0.03    # kept for backtest compatibility
-FRIDAY_CLOSE_HOUR    = 15      # ET hour after which Friday positions are evaluated
-FRIDAY_MIN_PROFIT_PCT = 0.00   # Friday close rule disabled — mean-reversion bounces benefit from weekend hold
+FRIDAY_CLOSE_HOUR    = 15      # ET hour after which new entries are blocked (entry guard, not a forced-close)
+FRIDAY_MIN_PROFIT_PCT = 0.00   # backtest only — live engine does not force-close on Fridays
 
 # ── Session timing ────────────────────────────────────────────────────────────
 ENTRY_START          = (9, 35)   # first valid entry (5 min after open)

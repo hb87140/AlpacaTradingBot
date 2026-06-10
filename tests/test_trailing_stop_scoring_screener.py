@@ -1233,17 +1233,12 @@ class TestExitOrders:
 
     # ── check_velocity_exits() ───────────────────────────────────────────────
 
-    def test_velocity_exit_triggers_when_stagnant_after_hold_bars(self):
-        """Position older than HOLD_TRADING_BARS with profit below threshold → sell placed."""
-        from src.config import PROFIT_MIN_THRESHOLD
+    def test_stagnant_position_held_until_alligator_reversal(self):
+        """Alligator swing: a position with small profit after many days is NOT exited —
+        only Alligator reversal, hard stop, or break-even retrace trigger a sell."""
         tc = _mock_trading_client()
-        pos = MagicMock(); pos.qty = '5.0'
-        tc.get_open_position.side_effect = None   # override the default Exception side_effect
-        tc.get_open_position.return_value = pos
-        tc.get_orders.return_value = []
-
-        entry_price   = 100.0
-        stagnant_price = entry_price * (1 + PROFIT_MIN_THRESHOLD - 0.005)
+        entry_price    = 100.0
+        stagnant_price = 101.0   # 1% profit — would have fired old velocity exit
         tz_ny = pytz.timezone('US/Eastern')
         _safe_now = tz_ny.localize(datetime(2024, 6, 5, 10, 30))
         old_time  = (_safe_now - timedelta(days=14)).isoformat()
@@ -1258,15 +1253,13 @@ class TestExitOrders:
         snap = _make_snapshot(price=stagnant_price)
         with patch.object(engine, '_fetch_snapshot', return_value=snap), \
              patch.object(engine, 'save_state'), \
-             patch('src.engine.time.sleep'), \
              patch('src.engine.datetime') as mock_dt:
             mock_dt.now.return_value = _safe_now
             mock_dt.fromisoformat    = datetime.fromisoformat
             engine.check_velocity_exits()
 
-        assert engine.state.get('SLOW', {}).get('pending_exit') is True, \
-            "Stagnant position must be marked pending_exit=True after sell order placed"
-        assert tc.submit_order.called, "Market sell must be issued"
+        assert 'SLOW' in engine.state, "Stagnant position must be held until Alligator reversal"
+        assert not tc.submit_order.called, "No sell must be placed without Alligator reversal signal"
 
     def test_velocity_exit_does_not_trigger_when_profitable(self):
         """Position older than HOLD_TRADING_BARS but profit ≥ threshold → kept."""
@@ -2046,19 +2039,15 @@ class TestFridayClose:
                 'stop_loss': price * 0.90, 'volume': 0, 'score': 60,
                 'time': datetime.now(tz_ny).isoformat(), 'peak_price': price}
 
-    def test_friday_close_triggers_below_profit_threshold(self):
-        """On Friday after close hour, profit < threshold must place a sell order."""
-        from src.config import FRIDAY_CLOSE_HOUR, FRIDAY_MIN_PROFIT_PCT
+    def test_friday_losing_position_held_for_alligator_reversal(self):
+        """Alligator swing: a losing position on Friday afternoon is NOT force-closed —
+        the chandelier GTC stop provides weekend coverage; Alligator reversal is the exit."""
+        from src.config import FRIDAY_CLOSE_HOUR
         tc = _mock_trading_client()
-        pos = MagicMock(); pos.qty = '5.0'
-        tc.get_open_position.side_effect = None   # override the default Exception side_effect
-        tc.get_open_position.return_value = pos
-        tc.get_orders.return_value = []
-
         engine = _make_engine(trading_client=tc)
         tz_ny = pytz.timezone('US/Eastern')
         entry = 100.0
-        cur   = round(entry * (1 + FRIDAY_MIN_PROFIT_PCT - 0.01), 2)
+        cur   = 99.0   # -1% — would have fired old Friday close rule
         engine.state = {'FRI': self._state_entry(entry, cur, tz_ny)}
 
         friday_after = tz_ny.localize(datetime(2024, 6, 7, FRIDAY_CLOSE_HOUR, 30))
@@ -2066,14 +2055,13 @@ class TestFridayClose:
 
         with patch.object(engine, '_fetch_snapshot', return_value=snap), \
              patch.object(engine, 'save_state'), \
-             patch('src.engine.time.sleep'), \
              patch('src.engine.datetime') as mock_dt:
             mock_dt.now.return_value  = friday_after
             mock_dt.fromisoformat     = datetime.fromisoformat
             engine.check_velocity_exits()
 
-        assert engine.state.get('FRI', {}).get('pending_exit') is True, \
-            "Friday close must mark position pending_exit=True after sell order placed"
+        assert 'FRI' in engine.state, "Losing position must be held on Friday — Alligator/stop handles exit"
+        assert not tc.submit_order.called, "No forced close on Friday — trailing stop is the weekend guard"
 
     def test_friday_close_does_not_trigger_above_threshold(self):
         """Profit above FRIDAY_MIN_PROFIT_PCT on Friday must keep position open."""

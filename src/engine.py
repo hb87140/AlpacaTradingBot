@@ -30,7 +30,7 @@ from src.config import (
     BASE_DIR, STATE_FILE, DASHBOARD_FILE, EQUITY_HIST_FILE, LOG_DIR, LOG_FILE,
     ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_PAPER, ALPACA_DATA_FEED,
     MAX_POSITIONS_CAP, MIN_BUCKET_SIZE, BUCKET_CASH_PCT,
-    VIX_THRESHOLD, HOLD_TRADING_BARS, PROFIT_MIN_THRESHOLD,
+    VIX_THRESHOLD,
     ENTRY_START, ENTRY_END, EXIT_START, EXIT_END, VOL_MULT_FRIDAY, PRE_ENTRY_SYNC_TIME,
     RSI_PERIOD, ATR_PERIOD, MA_FAST, MA_SLOW,
     DAILY_HISTORY_DAYS,
@@ -44,7 +44,6 @@ from src.config import (
     HARD_STOP_PCT,
     BREAK_EVEN_PCT,
     FRIDAY_CLOSE_HOUR,
-    FRIDAY_MIN_PROFIT_PCT,
     MIN_CANDLES, RVOL_MIN, SPREAD_MAX_PCT,
     CORR_MAX, CORR_LOOKBACK, MAX_SECTOR_COUNT, SMA200_SLOPE_LOOKBACK,
     CHANDELIER_PERIOD, CHANDELIER_MULT,
@@ -1328,7 +1327,12 @@ class VelocityEngine:
 
     # ── Exit management ───────────────────────────────────────────────────────
     def check_velocity_exits(self) -> Dict[str, float]:
-        """Manage all forced exits: hard stop, break-even, Friday close, velocity exit.
+        """Manage all software-enforced exits: hard stop, break-even, Alligator reversal.
+
+        Friday forced-close and velocity (time-based) exits are intentionally absent:
+        Alligator swing trades need days-to-weeks to mature; the Alligator reversal
+        signal (both fast+med SMMA crossing below slow) is the correct time-to-exit
+        signal, and the chandelier GTC trailing stop covers overnight/weekend gaps.
 
         Returns {symbol: current_price} for positions surviving this cycle.
         """
@@ -1345,7 +1349,6 @@ class VelocityEngine:
                 f"software exits suppressed after market close; GTC trailing stop is active."
             )
             return {}
-        is_friday_close = (now_et.weekday() == 4 and now_et.hour >= FRIDAY_CLOSE_HOUR)
         prefetched: Dict[str, float] = {}
 
         for sym in list(self.state.keys()):
@@ -1399,39 +1402,7 @@ class VelocityEngine:
                 self.liquidate(sym)
                 continue
 
-            # 3. Friday afternoon close
-            if is_friday_close:
-                friday_profit = (cur - entry_price) / entry_price
-                if friday_profit < FRIDAY_MIN_PROFIT_PCT:
-                    logger.warning(
-                        f"FRIDAY CLOSE: {sym} profit={friday_profit*100:.1f}% < "
-                        f"{FRIDAY_MIN_PROFIT_PCT*100:.0f}% — closing to avoid weekend risk."
-                    )
-                    self.liquidate(sym)
-                    continue
-
-            # 4. Velocity exit — held too long without adequate profit
-            raw_time = data.get('time', '')
-            if not raw_time:
-                continue
-            try:
-                entry_dt = datetime.fromisoformat(raw_time)
-            except (ValueError, TypeError):
-                continue
-            if entry_dt.tzinfo is None:
-                entry_dt = _TZ_NY.localize(entry_dt)
-
-            if _count_trading_days(entry_dt, now_et) >= HOLD_TRADING_BARS:
-                profit = (cur - entry_price) / entry_price
-                if profit < PROFIT_MIN_THRESHOLD:
-                    logger.info(
-                        f"VELOCITY EXIT: {sym} held {HOLD_TRADING_BARS}+ bars "
-                        f"with only {profit*100:.1f}% profit. Freeing capital for T+1."
-                    )
-                    self.liquidate(sym)
-                    continue
-
-            # 5. Alligator reversal exit — re-fetch daily bars to get current SMMA state.
+            # 3. Alligator reversal exit — re-fetch daily bars to get current SMMA state.
             # Full confirmed reversal: both fast and medium SMMAs cross below slow.
             # Only fires when SMMA values are available (requires fetched daily bars).
             try:
