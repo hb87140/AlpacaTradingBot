@@ -221,6 +221,7 @@ def _run_multi_signal_cycle(engine, ctx_map, equity=2500.0, cash=2500.0):
     def _sector_for(sym):
         return 'OtherSector' if sym in held_syms else 'Technology'
 
+    _no_analyst = {'analyst_buy': 0, 'analyst_hold': 0, 'analyst_sell': 0}
     with patch.object(engine, '_ensure_connected', return_value=True), \
          patch.object(engine, '_sync_positions'), \
          patch.object(engine, '_get_account_values', return_value=(equity, cash)), \
@@ -234,6 +235,7 @@ def _run_multi_signal_cycle(engine, ctx_map, equity=2500.0, cash=2500.0):
          patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
          patch.object(engine, '_fetch_vix', return_value=20.0), \
          patch.object(engine, '_get_sector', side_effect=_sector_for), \
+         patch.object(engine, '_get_analyst_ratings', return_value=_no_analyst), \
          patch('src.engine.time.sleep'), \
          patch('src.engine.datetime') as mock_dt:
         mock_dt.now.return_value = fake_now

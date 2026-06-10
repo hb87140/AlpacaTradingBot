@@ -1277,17 +1277,12 @@ class VelocityEngine:
         tod_frac     = _tod_frac(elapsed_min)
         rvol         = (intraday_vol / avg_20d_vol / tod_frac) if avg_20d_vol > 0 else 0.0
 
-        ratings = self._get_analyst_ratings(symbol)
         return {
             # Alligator SMMA values (primary entry signal)
             'smma_fast':         smma_fast_val,
             'smma_med':          smma_med_val,
             'smma_slow':         smma_slow_val,
             'alligator_crossed': alligator_crossed,
-            # Analyst consensus (yfinance recommendations_summary — session-cached)
-            'analyst_buy':       ratings['analyst_buy'],
-            'analyst_hold':      ratings['analyst_hold'],
-            'analyst_sell':      ratings['analyst_sell'],
             # RSI for momentum filter and scoring
             'rsi':               float(df['RSI'].iloc[-1]),
             'rsi_prev':          float(df['RSI'].iloc[-2]),
@@ -1848,6 +1843,11 @@ class VelocityEngine:
                     f"{book_sectors[sector]}/{MAX_SECTOR_COUNT} positions"
                 )
                 continue
+
+            # Analyst ratings — fetched only for symbols passing all rules (session-cached).
+            # Injecting here (not in get_technical_context) avoids a yfinance call for every
+            # scan candidate; only the handful that reach scoring actually hit the API.
+            ctx.update(self._get_analyst_ratings(sym))
 
             score = self._score_candidate(ctx)
             if score < SCAN_MIN_SCORE:

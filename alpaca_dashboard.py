@@ -233,6 +233,8 @@ def get_state():
         "next_scan":         dash_data.get("next_scan"),
         "last_updated":      dash_data.get("last_updated"),
         "blocked_today":     dash_data.get("blocked_today", []),
+        "entry_start":       list(ENTRY_START),
+        "entry_end":         list(ENTRY_END),
     })
 
 
@@ -931,16 +933,21 @@ function render(d) {
   sb.textContent = d.bucket_size>0 ? $f(d.bucket_size) : '—';
   sb.className   = 'sval num c';
 
-  // Entry window
-  const ny    = new Date(new Date().toLocaleString('en-US',{timeZone:'America/New_York'}));
-  const h     = ny.getHours(), mn = ny.getMinutes();
-  const isWkd = ny.getDay()===0||ny.getDay()===6;
-  const inWin = d.market_open && (h>10||(h===10&&mn>=0)) && (h<15||(h===15&&mn<=30));
+  // Entry window — times driven by ENTRY_START / ENTRY_END from /api/state
+  const ny      = new Date(new Date().toLocaleString('en-US',{timeZone:'America/New_York'}));
+  const h       = ny.getHours(), mn = ny.getMinutes();
+  const isWkd   = ny.getDay()===0||ny.getDay()===6;
+  const [sh,sm] = d.entry_start || [10,5];
+  const [eh,em] = d.entry_end   || [14,0];
+  const fmt2    = n => String(n).padStart(2,'0');
+  const afterStart = h > sh || (h === sh && mn >= sm);
+  const beforeEnd  = h < eh || (h === eh && mn <= em);
+  const inWin      = d.market_open && afterStart && beforeEnd;
   const swin  = document.getElementById('s-window');
-  if (isWkd)        { swin.textContent='WEEKEND';        swin.className='sval num y'; }
-  else if (!d.market_open) { swin.textContent='CLOSED';  swin.className='sval num y'; }
-  else if (inWin)   { swin.textContent='ACTIVE 10:00–15:30'; swin.className='sval num g'; }
-  else              { swin.textContent='OUTSIDE WINDOW'; swin.className='sval num d'; }
+  if (isWkd)             { swin.textContent='WEEKEND';        swin.className='sval num y'; }
+  else if (!d.market_open) { swin.textContent='CLOSED';       swin.className='sval num y'; }
+  else if (inWin)        { swin.textContent=`ACTIVE ${fmt2(sh)}:${fmt2(sm)}–${fmt2(eh)}:${fmt2(em)}`; swin.className='sval num g'; }
+  else                   { swin.textContent='OUTSIDE WINDOW'; swin.className='sval num d'; }
 
   document.getElementById('s-lscan').textContent = d.last_scan||'—';
   if (d.next_scan) { nextMs=new Date(d.next_scan).getTime(); countdown(); }
