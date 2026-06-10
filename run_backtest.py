@@ -1,15 +1,16 @@
 #!/usr/bin/env python
 """
-CLI entry-point for the Velocity Strategy forward backtester.
+CLI entry-point for the Alligator Swing Strategy forward backtester.
 
-Defaults to 2025-01-01 → today (out-of-sample relative to the
-2023-2024 development period).
+Defaults to 2021-01-01 → today (multi-year out-of-sample run).
 
 Key design decisions:
-  • RVOL threshold 1.2× (daily close; not intraday 2.5×)
+  • Entry: Bill Williams Alligator SMMA crossover (periods 5/8/13, offsets 3/5/8)
+  • RVOL threshold 1.2× (daily close proxy; live uses intraday 2.5×)
   • ATR-based position sizing (2% equity risk per trade)
-  • Break-even stop floor at 4% profit
-  • Trading-bar hold count (not calendar days)
+  • Break-even stop floor at 6% profit
+  • Exit: Chandelier trail + hard stop + break-even + Alligator reversal
+    (no velocity time-exit, no forced Friday close)
   • 0.1% entry slippage; commission configurable via --commission-per-order
     (default $0.00 — Alpaca is commission-free)
   • Data caching to backtest/.cache/ (use --no-cache to force re-download)
@@ -17,10 +18,10 @@ Key design decisions:
 
 Usage:
     venv/bin/python run_backtest.py
-    venv/bin/python run_backtest.py --start 2025-01-01 --end 2026-05-01
+    venv/bin/python run_backtest.py --start 2021-01-01 --end 2026-06-01
     venv/bin/python run_backtest.py --capital 1400
-    venv/bin/python run_backtest.py --no-spy-filter
-    venv/bin/python run_backtest.py --rvol 1.2 --hold-bars 7
+    venv/bin/python run_backtest.py --spy-filter
+    venv/bin/python run_backtest.py --rvol 1.2 --chandelier-mult 2.5
     venv/bin/python run_backtest.py --trades
     venv/bin/python run_backtest.py --no-cache        # force fresh download
 """
@@ -36,19 +37,18 @@ from backtest.strategy import VelocityBacktest
 from src.config import (
     BACKTEST_SCAN_COUNT, BACKTEST_INITIAL_CAPITAL, BACKTEST_COMMISSION_PER_ORDER,
     BACKTEST_RVOL_MIN, BREAK_EVEN_PCT, SCAN_MIN_SCORE,
-    CHANDELIER_MULT, CHANDELIER_PERIOD, PROFIT_MIN_THRESHOLD,
-    BACKTEST_HOLD_BARS, BACKTEST_SLIPPAGE, BACKTEST_EXIT_SLIPPAGE,
-    MAX_POSITIONS_CAP, MIN_BUCKET_SIZE, FRIDAY_MIN_PROFIT_PCT, DONCHIAN_PERIOD,
-    BACKTEST_DONCHIAN_TOL_PCT, RSI_OVERSOLD_THRESHOLD, RSI_BOUNCE_MAX,
-    RSI_MIN_DELTA, RSI_OVERSOLD_LOOKBACK,
+    CHANDELIER_MULT, CHANDELIER_PERIOD,
+    BACKTEST_SLIPPAGE, BACKTEST_EXIT_SLIPPAGE,
+    MAX_POSITIONS_CAP, MIN_BUCKET_SIZE,
+    RSI_MIN_DELTA,
     RISK_PER_TRADE_PCT, HARD_STOP_PCT,
-    SCAN_MIN_DOLLAR_VOL, BACKTEST_MIN_BODY_PCT,
+    SCAN_MIN_DOLLAR_VOL,
     SCAN_MIN_PRICE, SCAN_MIN_VOLUME,
 )
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Velocity Strategy Forward Backtester")
+    p = argparse.ArgumentParser(description="Alligator Swing Strategy Forward Backtester")
     break_even_default = f"{BREAK_EVEN_PCT:.0%}".replace("%", "%%")
     p.add_argument("--start",           default="2021-01-01",        help="Start date YYYY-MM-DD")
     p.add_argument("--end",             default=date.today().isoformat(), help="End date YYYY-MM-DD (default: today)")
@@ -62,44 +62,26 @@ def parse_args():
                    help="Top-N daily scanner picks; 0 means all scanner-passed stocks (default: all)")
     p.add_argument("--commission-per-order", default=BACKTEST_COMMISSION_PER_ORDER, type=float,
                    help=f"Backtest commission assumption per order (default: ${BACKTEST_COMMISSION_PER_ORDER:.2f}; Alpaca is commission-free)")
-    p.add_argument("--hold-bars",       default=BACKTEST_HOLD_BARS,   type=int,
-                   help=f"Trading bars before velocity-exit check (default: {BACKTEST_HOLD_BARS} = matches live HOLD_TRADING_BARS)")
     p.add_argument("--rvol",            default=BACKTEST_RVOL_MIN,    type=float,
                    help=f"Daily RVOL threshold (default: {BACKTEST_RVOL_MIN}×)")
     p.add_argument("--min-score",       default=SCAN_MIN_SCORE,       type=float,
                    help=f"Minimum composite score gate 0-100 (default: {SCAN_MIN_SCORE:.0f})")
     p.add_argument("--break-even-pct",  default=BREAK_EVEN_PCT,       type=float,
                    help=f"Break-even stop activation threshold (default: {break_even_default})")
-    p.add_argument("--profit-min",        default=PROFIT_MIN_THRESHOLD, type=float,
-                   help=f"Velocity exit: min profit threshold (default: {PROFIT_MIN_THRESHOLD*100:.0f}%%)")
-    p.add_argument("--friday-min-profit", default=FRIDAY_MIN_PROFIT_PCT, type=float,
-                   help=f"Friday close: exit if profit < this pct (default: {FRIDAY_MIN_PROFIT_PCT*100:.0f}%%); set 0 to disable")
     p.add_argument("--chandelier-mult",    default=CHANDELIER_MULT,    type=float,
                    help=f"Chandelier ATR multiplier (default: {CHANDELIER_MULT})")
     p.add_argument("--chandelier-period", default=CHANDELIER_PERIOD,  type=int,
                    help=f"Chandelier ATR lookback period (default: {CHANDELIER_PERIOD})")
-    p.add_argument("--donchian-period",  default=DONCHIAN_PERIOD,          type=int,
-                   help=f"Donchian channel lookback period (default: {DONCHIAN_PERIOD})")
-    p.add_argument("--donchian-tol",     default=BACKTEST_DONCHIAN_TOL_PCT, type=float,
-                   help=f"Donchian floor tolerance (default: {BACKTEST_DONCHIAN_TOL_PCT*100:.0f}%%)")
-    p.add_argument("--rsi-oversold",     default=RSI_OVERSOLD_THRESHOLD,   type=float,
-                   help=f"RSI oversold threshold (default: {RSI_OVERSOLD_THRESHOLD})")
-    p.add_argument("--rsi-bounce-max",   default=RSI_BOUNCE_MAX,           type=float,
-                   help=f"RSI bounce max at entry (default: {RSI_BOUNCE_MAX})")
     p.add_argument("--rsi-min-delta",    default=RSI_MIN_DELTA,            type=float,
                    help=f"Minimum RSI point rise for momentum confirmation (default: {RSI_MIN_DELTA})")
-    p.add_argument("--rsi-lookback",     default=RSI_OVERSOLD_LOOKBACK,    type=int,
-                   help=f"Days to look back for RSI oversold condition (default: {RSI_OVERSOLD_LOOKBACK})")
     p.add_argument("--risk-per-trade",   default=RISK_PER_TRADE_PCT,       type=float,
                    help=f"Equity fraction risked per trade (default: {RISK_PER_TRADE_PCT:.0%})")
     p.add_argument("--hard-stop-pct",    default=HARD_STOP_PCT,            type=float,
                    help=f"Hard stop loss from entry (default: {HARD_STOP_PCT:.0%})")
     p.add_argument("--spy-filter",       action="store_true",
-                   help="Enable SPY regime filter (default: OFF — Donchian bounce improves without it)")
+                   help="Enable SPY regime filter (default: OFF)")
     p.add_argument("--min-dollar-vol",  default=SCAN_MIN_DOLLAR_VOL, type=float,
                    help=f"Minimum 20-day avg dollar volume (default: ${SCAN_MIN_DOLLAR_VOL/1e6:.0f}M)")
-    p.add_argument("--min-body-pct",    default=BACKTEST_MIN_BODY_PCT, type=float,
-                   help=f"Day-strength: min candle body pct close/open-1 (default: {BACKTEST_MIN_BODY_PCT:.1%}; 0=disable)")
     p.add_argument("--min-price",       default=SCAN_MIN_PRICE, type=float,
                    help=f"Minimum stock price filter (default: ${SCAN_MIN_PRICE:.0f})")
     p.add_argument("--min-volume",      default=SCAN_MIN_VOLUME, type=float,
@@ -113,40 +95,30 @@ def parse_args():
     p.add_argument("--sweep",           default="",
                    metavar="PARAM=V1,V2,...",
                    help="In-process sweep: load data once, simulate for each value. "
-                        "PARAM is the CLI flag name without '--' (e.g. rsi-bounce-max=80,82,84). "
-                        "Parameters that change indicator columns (donchian-period, chandelier-period) "
+                        "PARAM is the CLI flag name without '--' (e.g. chandelier-mult=2.0,2.5,3.0). "
+                        "Parameters that change indicator columns (chandelier-period) "
                         "require full recomputation and cannot be swept this way.")
     return p.parse_args()
 
 
 # Maps CLI flag name → (instance_attr, type, needs_indicator_recompute)
 _SWEEP_PARAM_MAP = {
-    "rsi-bounce-max":   ("_rsi_bounce_max",          float, False),
-    "min-body-pct":     ("_min_body_pct",             float, False),
-    "rsi-oversold":     ("_rsi_oversold_threshold",   float, False),
-    "rsi-lookback":     ("_rsi_oversold_lookback",    int,   False),  # triggers _apply_rsi_lookback
     "rsi-min-delta":    ("_rsi_min_delta",            float, False),
-    "donchian-tol":     ("_donchian_tol_pct",         float, False),
     "chandelier-mult":  ("_chandelier_mult",          float, False),
     "hard-stop-pct":    ("_hard_stop_pct",            float, False),
-    "profit-min":       ("_profit_min_threshold",     float, False),
-    "hold-bars":        ("hold_bars",                 int,   False),
     "break-even-pct":   ("_break_even_pct",           float, False),
     "min-dollar-vol":   ("_min_dollar_vol",           float, False),
     "rvol":             ("_rvol_min",                 float, False),
     "min-score":        ("_min_score",                float, False),
-    "min-price":         ("_min_price",                float, False),
-    "friday-min-profit": ("_friday_min_profit",        float, False),
-    # These change indicator columns — expensive; sweep externally if needed.
-    "donchian-period":  ("_donchian_period",          int,   True),
+    "min-price":        ("_min_price",                float, False),
+    # Changes indicator columns — expensive.
     "chandelier-period":("_chandelier_period",        int,   True),
 }
 
-# Parameters that only affect exit logic — the daily scan result is identical
-# across all values, so precomputed scans can be reused for a 10-20x speedup.
+# Parameters that only affect exit logic — daily scan result is identical
+# across all values, so precomputed scans can be reused for a speedup.
 _EXIT_ONLY_PARAMS = frozenset([
-    "hard-stop-pct", "profit-min", "hold-bars", "break-even-pct",
-    "chandelier-mult", "friday-min-profit",
+    "hard-stop-pct", "break-even-pct", "chandelier-mult",
 ])
 
 
@@ -159,24 +131,15 @@ def _build_backtest(args) -> "VelocityBacktest":
         min_bucket_size    = args.bucket_size,
         scan_count         = args.scan_count,
         commission_per_order = args.commission_per_order,
-        hold_bars          = args.hold_bars,
         rvol_min           = args.rvol,
         min_score          = args.min_score,
         break_even_pct     = args.break_even_pct,
-        profit_min_threshold = args.profit_min,
-        friday_min_profit  = args.friday_min_profit,
         chandelier_mult    = args.chandelier_mult,
         chandelier_period  = args.chandelier_period,
-        donchian_period    = args.donchian_period,
-        donchian_tol_pct   = args.donchian_tol,
-        rsi_oversold_threshold = args.rsi_oversold,
-        rsi_bounce_max     = args.rsi_bounce_max,
         rsi_min_delta      = args.rsi_min_delta,
-        rsi_oversold_lookback = args.rsi_lookback,
         risk_per_trade_pct = args.risk_per_trade,
         hard_stop_pct      = args.hard_stop_pct,
         min_dollar_vol     = args.min_dollar_vol,
-        min_body_pct       = args.min_body_pct,
         min_price          = args.min_price,
         min_volume         = args.min_volume,
         use_spy_filter     = args.spy_filter,
@@ -192,22 +155,20 @@ def main():
         _run_sweep(args)
         return
 
-    print("\nVELOCITY STRATEGY — FORWARD BACKTEST")
+    print("\nALLIGATOR SWING STRATEGY — FORWARD BACKTEST")
     print(f"{'─' * 50}")
     print(f"  Period        : {args.start} → {args.end}")
     print(f"  Capital       : ${args.capital:,.2f}")
     _init_slots      = min(int(args.capital / MIN_BUCKET_SIZE), MAX_POSITIONS_CAP) if args.capital >= MIN_BUCKET_SIZE else 0
     _init_bucket_str = f"${args.capital / _init_slots:,.2f}" if _init_slots > 0 else "N/A"
     print(f"  Max pos       : {MAX_POSITIONS_CAP} cap  |  Dynamic max = floor(equity / ${MIN_BUCKET_SIZE:.0f}/slot)  |  Initial slots={_init_slots}, bucket≈{_init_bucket_str}")
-    print("  Entry rules   : 12-filter production screener")
+    print("  Entry rules   : Alligator crossover + RSI trend + RVOL + day-strength")
     print(f"  RVOL min      : {args.rvol:.1f}× (daily close proxy)")
     print(f"  Min score     : {args.min_score:.0f}/100 composite gate")
-    print(f"  Exit          : Chandelier (ATR{CHANDELIER_PERIOD}×{CHANDELIER_MULT}) + 7% hard stop + {args.break_even_pct:.0%} break-even")
-    print(f"  Velocity exit : profit_min {args.profit_min:.0%} after {args.hold_bars} bars")
-    print(f"  Hold bars     : {args.hold_bars} trading days before velocity check")
+    print(f"  Exit          : Chandelier (ATR{CHANDELIER_PERIOD}×{CHANDELIER_MULT}) + {args.hard_stop_pct:.0%} hard stop + {args.break_even_pct:.0%} break-even + Alligator reversal")
     print("  Position size : ATR-based (2% equity risk) capped by bucket")
     print(f"  Slippage      : {BACKTEST_SLIPPAGE:.1%} entry, {BACKTEST_EXIT_SLIPPAGE:.1%} exit (mkt orders)  |  Commission: ${args.commission_per_order*2:.2f}/round-trip")
-    print(f"  SPY filter    : {'ON (EMA50 soft regime)' if args.spy_filter else 'OFF (mean-reversion default)'}")
+    print(f"  SPY filter    : {'ON (EMA50 soft regime)' if args.spy_filter else 'OFF'}")
     print(f"  VIX filter    : {'ON (VIX > 35 blocks entries)' if args.vix_filter else 'OFF'}")
     print(f"  Cache         : {'OFF (forced re-download)' if args.no_cache else 'ON (backtest/.cache/)'}")
     print()
@@ -221,12 +182,7 @@ def main():
 
 
 def _run_sweep(args) -> None:
-    """In-process parameter sweep: load indicator cache once, simulate for each value.
-
-    Usage:
-        run_backtest.py --start 2021-01-01 --end 2026-05-31 \\
-            --sweep rsi-bounce-max=80,82,84,86,90,95,100
-    """
+    """In-process parameter sweep: load indicator cache once, simulate for each value."""
     try:
         param_str, values_str = args.sweep.split("=", 1)
     except ValueError:
@@ -244,31 +200,25 @@ def _run_sweep(args) -> None:
     if needs_recompute:
         print(f"WARNING: {param_str} changes indicator columns — each value triggers full indicator recomputation.", file=sys.stderr)
 
-    # Load indicator cache ONCE — the expensive part (all values share this).
     bt = _build_backtest(args)
     print(f"Loading data for sweep: {param_str} ∈ {values} …", flush=True)
     bt.load_data()
     print(f"  Data loaded: {len(bt._data):,} symbols. Starting sweep …\n", flush=True)
 
-    # For exit-only params the daily scan is identical across all values.
-    # Precompute it once; each simulation skips O(n_symbols × n_days) scan.
     precomputed = None
     if param_str in _EXIT_ONLY_PARAMS:
-        print("  Precomputing scan candidates (exit-only param — scan results are constant) …",
-              flush=True)
+        print("  Precomputing scan candidates (exit-only param) …", flush=True)
         precomputed = bt._precompute_scans_enriched()
-        print(f"  Precomputed {len(precomputed):,} trading days. Starting sweep …\n", flush=True)
+        print(f"  Precomputed {len(precomputed):,} trading days.\n", flush=True)
 
     for val in values:
         setattr(bt, attr, val)
-        if param_str == "rsi-lookback":
-            bt._apply_rsi_lookback()
-        elif needs_recompute:
+        if needs_recompute:
             bt._apply_indicators({s: df[bt._RAW_COLS] for s, df in bt._data.items()})
             bt._save_ind_cache()
         result = bt.run_with_flags({}, precomputed_scans=precomputed)
         sharpe = result.metrics.get("sharpe_ratio", 0.0)
-        print(f"  {param_str}={val}:   Sharpe Ratio      : {sharpe:.2f}", flush=True)
+        print(f"  {param_str}={val}:   Sharpe={sharpe:.2f}", flush=True)
 
 
 if __name__ == "__main__":
