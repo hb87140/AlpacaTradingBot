@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from src.config import (
     STATE_FILE, DASHBOARD_FILE, EQUITY_HIST_FILE, LOG_FILE,
     MAX_POSITIONS_CAP, MIN_BUCKET_SIZE, BUCKET_CASH_PCT, VIX_THRESHOLD, HOLD_TRADING_BARS,
-    SCAN_MIN_PRICE, SCAN_MIN_VOLUME, SCAN_MIN_DOLLAR_VOL,
+    SCAN_MIN_VOLUME, SCAN_MIN_DOLLAR_VOL,
     SPREAD_MAX_PCT, RVOL_MIN,
     CHANDELIER_PERIOD, CHANDELIER_MULT,
     PROFIT_MIN_THRESHOLD, HARD_STOP_PCT, BREAK_EVEN_PCT,
@@ -1174,7 +1174,7 @@ _COND_JS = (
     f'["1",  "Alligator Align",   "en", "Fast SMMA({ALLIGATOR_FAST}) > Med SMMA({ALLIGATOR_MED}) > Slow SMMA({ALLIGATOR_SLOW}) — all three lines stacked bullish (mouth open upward)"],\n'
     f'  ["2",  "Fresh Crossover",  "en", "Bullish crossover occurred within the last {ALLIGATOR_CROSS_LOOKBACK} bars — catches the start of the move, not an exhausted tail"],\n'
     f'  ["3",  "RSI Trend",        "en", "RSI({RSI_PERIOD}) ≥ 50 AND rising ≥ {RSI_MIN_DELTA:.0f} pt — stock in bullish territory with building momentum, not yet overextended"],\n'
-    f'  ["4",  "Scanner Universe", "en", "Alpaca scan: Top gainers + most actives | Price > ${SCAN_MIN_PRICE:.0f} | Vol > {SCAN_MIN_VOLUME/1e6:.0f}M shares | Dollar vol > ${SCAN_MIN_DOLLAR_VOL/1e6:.0f}M"],\n'
+    f'  ["4",  "Scanner Universe", "en", "Alpaca scan: Top gainers + most actives + full Alligator crossover universe | Avg vol > {SCAN_MIN_VOLUME/1e6:.0f}M shares | Avg dollar vol > ${SCAN_MIN_DOLLAR_VOL/1e6:.0f}M/day"],\n'
     f'  ["5",  "Spread Filter",    "en", "Bid-ask spread ≤ {SPREAD_MAX_PCT*100:.1f}% — filters illiquid stocks where slippage would erode edge"],\n'
     f'  ["6",  "RVOL Gate",        "en", "Intraday relative volume ≥ {RVOL_MIN:.1f}× (time-adjusted CDF normalizer) — confirms unusual buying activity above typical pace"],\n'
     f'  ["7",  "Day Strength",     "en", "Price ≥ {DAY_STRENGTH_OPEN_PCT*100:.1f}% above today\'s open — sustained buying pressure, not a dead-cat bounce fading into close"],\n'
@@ -1185,7 +1185,7 @@ _COND_JS = (
     f'];\n'
     f'const EXIT_CONDITIONS = [\n'
     f'  ["1", "Chandelier Trail",   "ex", "TRAIL SELL at ATR({CHANDELIER_PERIOD})×{CHANDELIER_MULT:.1f} from peak price — Alpaca raises the stop automatically as price climbs; dollar distance fixed at entry"],\n'
-    f'  ["2", "Alligator Reversal", "ex", "Fast SMMA({ALLIGATOR_FAST}) crosses below Med SMMA({ALLIGATOR_MED}) (early warning) OR both cross below Slow SMMA({ALLIGATOR_SLOW}) (confirmed reversal) — trend structure broken"],\n'
+    f'  ["2", "Alligator Reversal", "ex", "Fast SMMA({ALLIGATOR_FAST}) AND Med SMMA({ALLIGATOR_MED}) both cross below Slow SMMA({ALLIGATOR_SLOW}) — confirmed bearish reversal, trend structure broken"],\n'
     f'  ["3", "Velocity Exit",      "ex", "After {HOLD_TRADING_BARS} trading session(s): if profit < {PROFIT_MIN_THRESHOLD*100:.0f}%, force-liquidate via Market SELL — frees capital for better setups"],\n'
     f'  ["4", "Hard Stop",          "ex", "{HARD_STOP_PCT*100:.0f}% drawdown from fill price triggers immediate Market SELL regardless of ATR stop distance"],\n'
     f'  ["5", "Break-Even Floor",   "ex", "Once profit ≥ {BREAK_EVEN_PCT*100:.0f}%, chandelier stop is floored at fill price — software-enforced, prevents winners from becoming losers"],\n'

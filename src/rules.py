@@ -43,7 +43,6 @@ import math
 from typing import Callable, List, Tuple
 
 from src.config import (
-    SCAN_MIN_PRICE,
     SCAN_MIN_VOLUME,
     SCAN_MIN_DOLLAR_VOL,
     SPREAD_MAX_PCT,
@@ -64,13 +63,6 @@ Rule = Tuple[str, Callable[[dict], Tuple[bool, str]]]
 
 
 # ── Individual rule functions ─────────────────────────────────────────────────
-
-def check_price_floor(ctx: dict) -> Tuple[bool, str]:
-    """Price must be above the minimum universe threshold."""
-    price = ctx.get('live_price', 0.0)
-    ok = price >= SCAN_MIN_PRICE
-    return ok, f'Price ${price:.2f} < min ${SCAN_MIN_PRICE:.2f}'
-
 
 def check_spread(ctx: dict) -> Tuple[bool, str]:
     """Bid-ask spread must be within the maximum allowed threshold."""
@@ -205,7 +197,6 @@ PERMANENT_DAY_RULES: List[Rule] = [
 # Cycle-level rules: evaluated on every scan cycle.
 # Order: cheapest / most-selective checks first for fast rejection.
 CYCLE_RULES: List[Rule] = [
-    ('price_floor',       check_price_floor),
     ('spread',            check_spread),
     ('volume',            check_volume),
     ('alligator_bullish', check_alligator_bullish),
