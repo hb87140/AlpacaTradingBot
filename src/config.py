@@ -123,7 +123,7 @@ SCORE_ANALYST_MAX   = 15.0     # analyst consensus — majority buy rating boost
 DAILY_HISTORY_DAYS = 400   # enough to produce 200+ trading-day bars
 
 # ── Scanner filters ───────────────────────────────────────────────────────────
-SCAN_MIN_PRICE      = 10.0              # Universe filter: price > $10
+SCAN_MIN_PRICE      = 1.0               # Universe filter: price > $1 (excludes sub-penny stocks only)
 SCAN_MIN_VOLUME     = 1_000_000        # Universe filter: 20-day avg daily vol > 1M shares
 SCAN_MIN_GAIN_PCT   = 2.0              # minimum daily % gain (backtest coarse filter)
 SCAN_MIN_DOLLAR_VOL = 5_000_000        # 20-day avg dollar volume floor ($5M)
