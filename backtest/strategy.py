@@ -1,21 +1,21 @@
 """
-Donchian Bounce Strategy Backtester — Production-Grade Edition
+Alligator Swing Strategy Backtester — Production-Grade Edition
 ──────────────────────────────────────────────────────────────
-Mirrors the live VelocityEngine Donchian mean-reversion bounce strategy.
-Always keep in sync with src/rules.py and src/engine.py.
+Mirrors the live BounceAlpha Alligator swing trading strategy (Bill Williams).
+Always keep in sync with src/rules.py, src/engine.py, and src/indicators.py.
 
 Key design decisions:
   1. RVOL uses BACKTEST_RVOL_MIN (1.2×) == RVOL_MIN (1.2×) after parameter alignment.
      End-of-day close volume and intraday time-normalized RVOL measure different things;
-     the 1.2× threshold was optimized on daily data and applied uniformly to both systems.
+     the 1.2× threshold is applied uniformly to both systems.
   2. bars_held counts actual trading bars open (not calendar days).
-  3. Break-even floor: once profit ≥ BREAK_EVEN_PCT (4%), stop ≥ entry.
+  3. Break-even floor: once profit ≥ BREAK_EVEN_PCT (6%), stop ≥ entry.
   4. ATR-based position sizing: 2% equity risk per trade, tighter of
-     chandelier or 7% hard-stop, capped by per-bucket dollar limit.
+     chandelier or hard-stop, capped by per-bucket dollar limit.
   5. 0.1% entry slippage added to entry_price for realism.
   6. Commission configurable via BACKTEST_COMMISSION_PER_ORDER ($0.00 default).
-  7. Composite score = DonchianProximity(30) + RVOL(25) + RSIDelta(25) +
-     Liquidity(10); Liquidity uses dollar-vol half only (no spread in OHLCV).
+  7. Composite score = AlligatorAlignment(30) + RVOL(25) + RSIDelta(25) +
+     Liquidity(20); Liquidity uses dollar-vol half only (spread not in OHLCV).
      Mirrors live score_candidate() in src/rules.py.
   8. Data caching: indicator-enriched DataFrames pickled to backtest/.cache/.
   9. Filter funnel stats printed after each run.
@@ -24,25 +24,26 @@ Universe (mirrors live Alpaca combined screener):
   - Candidate pool: NASDAQ Global Select/Market + NYSE equities
   - Daily scan: rank by composite score; all scanner-passed unless --scan-count
 
-Entry rules (Donchian bounce — matches src/rules.py CYCLE_RULES):
+Entry rules (Alligator swing — matches src/rules.py CYCLE_RULES):
   1. Data sufficiency    : ≥ MIN_CANDLES (210) bars of history
-  2. Price floor         : close ≥ SCAN_MIN_PRICE ($10)
-  3. Volume              : avg 20-day share vol ≥ SCAN_MIN_VOLUME
+  2. Price floor         : close ≥ SCAN_MIN_PRICE
+  3. Volume              : avg 20-day share vol ≥ SCAN_MIN_VOLUME (2× on Fridays)
   4. Dollar volume       : avg 20-day dollar vol ≥ SCAN_MIN_DOLLAR_VOL (2× on Fridays)
-  5. Donchian floor      : close within BACKTEST_DONCHIAN_TOL_PCT (40%) of 2-day low (same as live DONCHIAN_FLOOR_TOL_PCT)
-  6. RVOL                : volume / 20d avg ≥ BACKTEST_RVOL_MIN (1.2×); tighter in bearish regime
-  7. RSI oversold        : RSI was < RSI_OVERSOLD_THRESHOLD (45) in last RSI_OVERSOLD_LOOKBACK (50) bars
-  8. RSI delta           : RSI rose ≥ RSI_MIN_DELTA (1.0 pts) vs previous bar
-  9. Spread              : not available in daily data — skipped
-  10. Day strength        : not available in daily OHLCV — skipped
+  5. Alligator aligned   : offset-adj fast SMMA > med SMMA > slow SMMA (bullish mouth open)
+  6. Alligator crossover : fresh — not-aligned bar in last ALLIGATOR_CROSS_LOOKBACK bars
+  7. RSI trend           : RSI ≥ 50 AND RSI rose ≥ RSI_MIN_DELTA vs previous bar
+  8. RVOL                : volume / 20d avg ≥ BACKTEST_RVOL_MIN (1.2×); tighter in bearish regime
+  9. Day strength        : daily approximation — close ≥ open × (1 + DAY_STRENGTH_OPEN_PCT)
+                           AND close in upper half of today's intraday range
+  10. Spread             : not available in daily data — skipped
   SPY regime             : SPY close > EMA50 → bull (soft: smaller bucket + tighter RVOL in bear)
 
-Exit rules (unchanged from momentum strategy):
+Exit rules (matches src/engine.py check_velocity_exits):
   • Chandelier trailing stop : peak_high - ATR_CHAND × CHANDELIER_MULT (dollar-distance, matches Alpaca trail_price)
-  • Hard stop                : entry × (1 - HARD_STOP_PCT) = 7%
+  • Hard stop                : entry × (1 - HARD_STOP_PCT)
   • Break-even floor         : once peak ≥ BREAK_EVEN_PCT above entry, stop ≥ entry
-  • Velocity time exit       : held ≥ hold_bars and profit < PROFIT_MIN_THRESHOLD (10%)
-  • Friday close             : profit < FRIDAY_MIN_PROFIT_PCT (3%) on Fridays
+  • Alligator reversal exit  : both fast+med SMMA cross below slow (confirmed bearish reversal);
+                               signal detected at day-end, exit filled at next-day open
 """
 
 from __future__ import annotations
@@ -62,7 +63,6 @@ import pandas as pd
 import yfinance as yf
 
 from src.config import (
-    PROFIT_MIN_THRESHOLD,
     RSI_PERIOD, ATR_PERIOD, MA_FAST, MA_SLOW,
     BACKTEST_INITIAL_CAPITAL, MAX_POSITIONS_CAP, MIN_BUCKET_SIZE, BACKTEST_SCAN_COUNT,
     SCAN_MIN_PRICE, SCAN_MIN_VOLUME, SCAN_MIN_DOLLAR_VOL,
@@ -72,13 +72,15 @@ from src.config import (
     RSI_MIN_DELTA, HARD_STOP_PCT,
     RISK_PER_TRADE_PCT, BREAK_EVEN_PCT,
     BACKTEST_COMMISSION_PER_ORDER,
-    BACKTEST_HOLD_BARS, BACKTEST_SLIPPAGE, BACKTEST_EXIT_SLIPPAGE,
-    VOL_MULT_FRIDAY, FRIDAY_MIN_PROFIT_PCT,
+    BACKTEST_SLIPPAGE, BACKTEST_EXIT_SLIPPAGE,
+    VOL_MULT_FRIDAY,
     SCAN_MIN_SCORE, BUCKET_CASH_PCT,
-    DONCHIAN_PERIOD, BACKTEST_DONCHIAN_TOL_PCT, BACKTEST_MIN_BODY_PCT,
-    RSI_OVERSOLD_THRESHOLD, RSI_OVERSOLD_LOOKBACK, RSI_BOUNCE_MAX,
     SPY_EMA_PERIOD, SPY_REGIME_SIZE_CUT, SPY_REGIME_RVOL_MULT,
-    SCORE_DONCHIAN_MAX, SCORE_RVOL_MAX, SCORE_RSI_DELTA_MAX, SCORE_LIQUIDITY_MAX,
+    SCORE_ALLIGATOR_MAX, SCORE_RVOL_MAX, SCORE_RSI_DELTA_MAX, SCORE_LIQUIDITY_MAX,
+    ALLIGATOR_FAST, ALLIGATOR_MED, ALLIGATOR_SLOW,
+    ALLIGATOR_FAST_OFFSET, ALLIGATOR_MED_OFFSET, ALLIGATOR_SLOW_OFFSET,
+    ALLIGATOR_CROSS_LOOKBACK, DAY_STRENGTH_OPEN_PCT,
+    FRIDAY_CLOSE_HOUR,
 )
 from src.indicators import apply_all
 
@@ -91,18 +93,22 @@ _DEFAULT_ROUND_TRIP_COST = BACKTEST_COMMISSION_PER_ORDER * 2
 
 # Columns required to be non-NaN before calling _entry_signal
 _REQUIRED_ENTRY_COLS = [
-    'DONCH_LOWER', 'RSI', 'ATR_CHAND', 'RSI_MIN_LOOKBACK',
+    'SMMA_FAST_ALIGNED', 'SMMA_MED_ALIGNED', 'SMMA_SLOW_ALIGNED',
+    'ALLIGATOR_CROSSED', 'RSI', 'RSI_PREV', 'ATR_CHAND',
 ]
 # Columns snapshotted into the pre-computed candidate dicts
 _PRECOMPUTE_COLS = (
-    'close', 'open', 'DONCH_LOWER', 'RSI', 'RSI_PREV', 'RSI_MIN_LOOKBACK',
+    'close', 'open', 'high', 'low',
+    'SMMA_FAST_ALIGNED', 'SMMA_MED_ALIGNED', 'SMMA_SLOW_ALIGNED',
+    'ALLIGATOR_CROSSED', 'RSI', 'RSI_PREV',
     'ATR', 'ATR_CHAND', 'avg_vol_20', 'avg_dollar_vol_20',
 )
-# Minimal column set stored in the indicator cache (excludes RSI_MIN_LOOKBACK which
-# is always recomputed, and unused columns like MA50/MA200/ADX/HIGH200/DONCH_HIGH).
+# Minimal column set stored in the indicator cache (excludes computed-on-demand columns).
 _IND_CACHE_COLS = frozenset([
     'open', 'high', 'low', 'close', 'volume',
-    'RSI', 'RSI_PREV', 'ATR', 'ATR_CHAND', 'DONCH_LOWER',
+    'RSI', 'RSI_PREV', 'ATR', 'ATR_CHAND',
+    'SMMA_FAST_ALIGNED', 'SMMA_MED_ALIGNED', 'SMMA_SLOW_ALIGNED',
+    'ALLIGATOR_CROSSED',
     'avg_vol_20', 'avg_dollar_vol_20',
 ])
 
@@ -163,7 +169,6 @@ class VelocityBacktest:
     end             : backtest end date    (YYYY-MM-DD)
     capital         : starting capital in USD
     max_pos         : max simultaneous positions
-    hold_bars       : trading bars before velocity time-exit check (default 2)
     scan_count      : top-N from daily scanner considered for entry each bar; <=0 means all
     min_price       : minimum close price filter
     min_volume      : minimum daily share volume filter
@@ -171,9 +176,8 @@ class VelocityBacktest:
     use_spy_filter  : if True, apply soft SPY regime (size cut + RVOL tightening in bear market); default False
     use_vix_filter  : if True, skip new entries when VIX > VIX_THRESHOLD
     rvol_min             : daily RVOL threshold (1.2× optimal — much lower than live 2.5× intraday)
-    break_even_pct       : once profit exceeds this, floor the stop at entry (0.04 optimal)
-    profit_min_threshold : velocity exit fires if profit < this after hold_bars (0.05 optimal with cm=2.0)
-    chandelier_mult      : ATR multiplier for trailing stop (2.0 optimal — harvests gains faster)
+    break_even_pct       : once profit exceeds this, floor the stop at entry
+    chandelier_mult      : ATR multiplier for trailing stop
     use_cache            : load/save downloaded data from backtest/.cache/
     """
 
@@ -184,7 +188,6 @@ class VelocityBacktest:
         capital:        float = BACKTEST_INITIAL_CAPITAL,
         max_pos:        int   = MAX_POSITIONS_CAP,
         min_bucket_size: float = MIN_BUCKET_SIZE,
-        hold_bars:      int   = BACKTEST_HOLD_BARS,
         scan_count:     int   = BACKTEST_SCAN_COUNT,
         min_price:      float = SCAN_MIN_PRICE,
         min_volume:     float = SCAN_MIN_VOLUME,
@@ -194,20 +197,12 @@ class VelocityBacktest:
         rvol_min:             float = BACKTEST_RVOL_MIN,
         min_score:            float = SCAN_MIN_SCORE,
         break_even_pct:       float = BREAK_EVEN_PCT,
-        profit_min_threshold: float = PROFIT_MIN_THRESHOLD,
-        friday_min_profit:    float = FRIDAY_MIN_PROFIT_PCT,
         chandelier_mult:      float = CHANDELIER_MULT,
         chandelier_period:    int   = CHANDELIER_PERIOD,
-        donchian_period:      int   = DONCHIAN_PERIOD,
-        donchian_tol_pct:     float = BACKTEST_DONCHIAN_TOL_PCT,
-        rsi_oversold_threshold: float = RSI_OVERSOLD_THRESHOLD,
-        rsi_bounce_max:       float = RSI_BOUNCE_MAX,
         rsi_min_delta:        float = RSI_MIN_DELTA,
-        rsi_oversold_lookback: int  = RSI_OVERSOLD_LOOKBACK,
         commission_per_order: float = BACKTEST_COMMISSION_PER_ORDER,
         risk_per_trade_pct:   float = RISK_PER_TRADE_PCT,
         hard_stop_pct:        float = HARD_STOP_PCT,
-        min_body_pct:         float = BACKTEST_MIN_BODY_PCT,
         use_cache:            bool  = True,
     ):
         self.start                   = start
@@ -215,7 +210,6 @@ class VelocityBacktest:
         self.capital                 = capital
         self.max_pos                 = max_pos
         self._min_bucket_size        = min_bucket_size
-        self.hold_bars               = hold_bars
         self._scan_count             = scan_count
         self._min_price              = min_price
         self._min_volume             = min_volume
@@ -225,20 +219,12 @@ class VelocityBacktest:
         self._rvol_min               = rvol_min
         self._min_score              = min_score
         self._break_even_pct         = break_even_pct
-        self._profit_min_threshold   = profit_min_threshold
-        self._friday_min_profit      = friday_min_profit
         self._chandelier_mult        = chandelier_mult
         self._chandelier_period      = chandelier_period
-        self._donchian_period        = donchian_period
-        self._donchian_tol_pct       = donchian_tol_pct
-        self._rsi_oversold_threshold = rsi_oversold_threshold
-        self._rsi_bounce_max         = rsi_bounce_max
         self._rsi_min_delta          = rsi_min_delta
-        self._rsi_oversold_lookback  = rsi_oversold_lookback
         self._round_trip_cost        = max(0.0, float(commission_per_order)) * 2.0
         self._risk_per_trade_pct     = risk_per_trade_pct
         self._hard_stop_pct          = hard_stop_pct
-        self._min_body_pct           = min_body_pct
         self._use_cache              = use_cache
 
         self._data:        Dict[str, pd.DataFrame] = {}
@@ -252,13 +238,13 @@ class VelocityBacktest:
         # Filter funnel accumulators (populated during run)
         self._filter_stats: Dict = {
             'scan_days':            0,
-            'coarse_candidates':    0,   # pass price/vol/dollar-vol/trend/rvol
-            'fine_signals':         0,   # pass full _entry_signal (12-rule)
+            'coarse_candidates':    0,   # pass price/vol/dollar-vol/alligator coarse
+            'fine_signals':         0,   # pass full _entry_signal
             'entries_taken':        0,   # actually opened a position
             'entries_skipped_full': 0,   # signal fired but max_pos already full
             'spy_blocked_days':     0,   # trading days blocked by SPY filter
             'vix_blocked_days':     0,   # trading days blocked by VIX filter
-            'friday_closes':        0,   # positions closed by Friday profit gate
+            'alligator_exits':      0,   # positions closed by Alligator reversal
             'total_commissions':    0.0,
         }
 
@@ -323,12 +309,12 @@ class VelocityBacktest:
         return os.path.join(_CACHE_DIR, f"bt_raw_{h}.pkl")
 
     def _ind_cache_path(self) -> str:
-        """Level-2 cache: indicator-enriched DataFrames (no RSI_MIN_LOOKBACK).
+        """Level-2 cache: indicator-enriched DataFrames.
         Keyed by date range + indicator params that affect computed columns."""
         key = (
             f"{self._data_start}_{self.end}"
-            f"_dp{self._donchian_period}"
             f"_cp{self._chandelier_period}"
+            f"_af{ALLIGATOR_FAST}_am{ALLIGATOR_MED}_as{ALLIGATOR_SLOW}"
         )
         h   = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()[:10]
         os.makedirs(_CACHE_DIR, exist_ok=True)
@@ -340,11 +326,6 @@ class VelocityBacktest:
         h   = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()[:10]
         return os.path.join(_CACHE_DIR, f"bt_{h}.pkl")
 
-    def _apply_rsi_lookback(self) -> None:
-        """Recompute RSI_MIN_LOOKBACK for every loaded symbol. Fast rolling op."""
-        for df in self._data.values():
-            df['RSI_MIN_LOOKBACK'] = df['RSI'].shift(1).rolling(self._rsi_oversold_lookback).min()
-
     def _apply_indicators(self, raw: Dict[str, 'pd.DataFrame']) -> None:
         """Compute all indicators from raw OHLCV and populate self._data."""
         loaded = 0
@@ -353,8 +334,27 @@ class VelocityBacktest:
                 df = apply_all(
                     df, RSI_PERIOD, ATR_PERIOD, MA_FAST, MA_SLOW,
                     chandelier_period=self._chandelier_period,
-                    donchian_period=self._donchian_period
+                    alligator_fast=ALLIGATOR_FAST,
+                    alligator_med=ALLIGATOR_MED,
+                    alligator_slow=ALLIGATOR_SLOW,
                 )
+                # Offset-adjusted SMMA lines (chart displacement)
+                df['SMMA_FAST_ALIGNED'] = df['SMMA_FAST'].shift(ALLIGATOR_FAST_OFFSET)
+                df['SMMA_MED_ALIGNED']  = df['SMMA_MED'].shift(ALLIGATOR_MED_OFFSET)
+                df['SMMA_SLOW_ALIGNED'] = df['SMMA_SLOW'].shift(ALLIGATOR_SLOW_OFFSET)
+
+                # ALLIGATOR_CROSSED: currently bullish AND there was a non-bullish bar
+                # within the last ALLIGATOR_CROSS_LOOKBACK bars
+                currently_bull = (
+                    (df['SMMA_FAST_ALIGNED'] > df['SMMA_SLOW_ALIGNED']) &
+                    (df['SMMA_MED_ALIGNED']  > df['SMMA_SLOW_ALIGNED'])
+                )
+                not_bull_prev = (~currently_bull).shift(1).fillna(True)
+                df['ALLIGATOR_CROSSED'] = currently_bull & (
+                    not_bull_prev.rolling(ALLIGATOR_CROSS_LOOKBACK, min_periods=1)
+                    .max().astype(bool)
+                )
+
                 df['RSI_PREV']          = df['RSI'].shift(1)
                 df['avg_vol_20']        = df['volume'].rolling(20).mean()
                 df['avg_dollar_vol_20'] = (df['close'] * df['volume']).rolling(20).mean()
@@ -363,18 +363,16 @@ class VelocityBacktest:
             except Exception:
                 continue
         print(f"  Indicators applied: {loaded:,} symbols.")
-        self._apply_rsi_lookback()
 
     def _try_load_cache(self) -> bool:
         """Load from fastest available cache level; fall back through levels."""
-        # Level 2: indicator cache — fastest path, only RSI_MIN_LOOKBACK recomputed.
+        # Level 2: indicator cache — fastest path.
         ind_path = self._ind_cache_path()
         if os.path.exists(ind_path):
             try:
                 print(f"  Loading indicator cache from {ind_path} …")
                 self._data = joblib.load(ind_path)
-                print(f"  Loaded {len(self._data):,} symbols. Recomputing RSI_MIN_LOOKBACK …")
-                self._apply_rsi_lookback()
+                print(f"  Loaded {len(self._data):,} symbols.")
                 self._prefilter_universe()
                 return True
             except Exception as e:
@@ -411,7 +409,6 @@ class VelocityBacktest:
                 else:
                     self._data = cached.get('data', {})
                     print(f"  Loaded {len(self._data):,} symbols (legacy enriched).")
-                    self._apply_rsi_lookback()
                 return True
             except Exception as e:
                 print(f"  Legacy cache load failed ({e}), re-downloading …")
@@ -457,8 +454,7 @@ class VelocityBacktest:
     def _save_ind_cache(self) -> None:
         """Save only the columns the simulation reads (_IND_CACHE_COLS) to the
         level-2 cache using joblib (numpy-native format, much faster than pickle).
-        Excludes RSI_MIN_LOOKBACK (always recomputed) and unused columns
-        (MA50, MA200, ADX, HIGH200, DONCH_HIGH)."""
+        Excludes unused columns (MA50, MA200, ADX, HIGH200, DONCH_HIGH, DONCH_LOWER)."""
         path = self._ind_cache_path()
         try:
             snapshot = {}
@@ -570,7 +566,7 @@ class VelocityBacktest:
     # ── Daily scanner simulation ──────────────────────────────────────────────
     def _daily_scan(self, today, rvol_min: float = None) -> List[Tuple[str, float]]:
         """
-        Simulate the Alpaca combined screener for Donchian bounce candidates.
+        Simulate the Alpaca combined screener for Alligator swing candidates.
         Returns list of (symbol, rvol) tuples, sorted by composite score descending.
         Fine signal rules are applied in _entry_signal.
 
@@ -588,34 +584,35 @@ class VelocityBacktest:
 
             row = df.loc[today]
 
-            # Price and volume floor (mirrors Alpaca screener parameters)
+            # Price and volume floor
             if row['close'] < self._min_price:
                 continue
             if row['volume'] < self._min_volume:
                 continue
 
-            # Dollar-volume gate (20-day average).
+            # Dollar-volume gate (20-day average, doubled on Fridays)
             avg_dvol = row.get('avg_dollar_vol_20', row['close'] * row['volume'])
             friday_mult = VOL_MULT_FRIDAY if pd.Timestamp(today).dayofweek == 4 else 1.0
             if pd.isna(avg_dvol) or avg_dvol < self._min_dollar_vol * friday_mult:
                 continue
 
-            # Donchian lower band required and non-NaN
-            donch_lower = row.get('DONCH_LOWER', float('nan'))
-            if pd.isna(donch_lower) or donch_lower <= 0:
+            # SMMA aligned columns must be present
+            sf = row.get('SMMA_FAST_ALIGNED', float('nan'))
+            sm = row.get('SMMA_MED_ALIGNED',  float('nan'))
+            ss = row.get('SMMA_SLOW_ALIGNED', float('nan'))
+            if pd.isna(sf) or pd.isna(sm) or pd.isna(ss):
                 continue
 
-            # Coarse Donchian proximity filter: price within tolerance of lower band
-            proximity = (row['close'] - donch_lower) / donch_lower
-            if proximity > self._donchian_tol_pct:
+            # Alligator bullish alignment: fast > slow AND med > slow
+            if not (sf > ss and sm > ss):
                 continue
 
-            # RSI oversold lookback: RSI must have dipped below threshold recently
-            rsi_min_lb = row.get('RSI_MIN_LOOKBACK', float('nan'))
-            if pd.isna(rsi_min_lb) or rsi_min_lb >= self._rsi_oversold_threshold:
+            # Alligator fresh crossover within lookback
+            crossed = row.get('ALLIGATOR_CROSSED', False)
+            if not crossed:
                 continue
 
-            # RVOL filter (backtest threshold — daily close RVOL proxy)
+            # RVOL filter (daily close RVOL proxy)
             avg_vol = row.get('avg_vol_20', 0)
             if pd.isna(avg_vol) or avg_vol <= 0:
                 continue
@@ -623,28 +620,50 @@ class VelocityBacktest:
             if rvol < effective_rvol_min:
                 continue
 
+            # RSI trend: RSI ≥ 50 (momentum on side of trade)
+            rsi      = row.get('RSI', float('nan'))
+            rsi_prev = row.get('RSI_PREV', float('nan'))
+            if pd.isna(rsi) or pd.isna(rsi_prev) or float(rsi) < 50.0:
+                continue
+            rsi_delta = float(rsi) - float(rsi_prev)
+            if rsi_delta < self._rsi_min_delta:
+                continue
+
+            # Day strength (daily approximation of check_day_strength):
+            # close ≥ open × (1 + DAY_STRENGTH_OPEN_PCT) AND close in upper half of range
+            open_ = row.get('open', float('nan'))
+            high_ = row.get('high', float('nan'))
+            low_  = row.get('low',  float('nan'))
+            close_ = float(row['close'])
+            if not pd.isna(open_) and float(open_) > 0:
+                if close_ < float(open_) * (1.0 + DAY_STRENGTH_OPEN_PCT):
+                    continue
+                if not (pd.isna(high_) or pd.isna(low_)):
+                    rng = float(high_) - float(low_)
+                    if rng > 0 and (close_ - float(low_)) / rng < 0.5:
+                        continue
+
             self._filter_stats['coarse_candidates'] += 1
 
             # Composite score mirroring live score_candidate() in src/rules.py:
-            # DonchianProximity(30) + RVOL(25) + RSIDelta(25) + Liquidity(10)
-            rsi      = row.get('RSI', float('nan'))
-            rsi_prev = row.get('RSI_PREV', float('nan'))
-
-            donchian_score = max(0.0, (1.0 - proximity / self._donchian_tol_pct) * SCORE_DONCHIAN_MAX)
+            # AlligatorAlignment(30) + RVOL(25) + RSIDelta(25) + Liquidity(20)
+            # Alligator spread: (fast_aligned - slow_aligned) / slow_aligned; wider = stronger
+            alligator_spread = (sf - ss) / ss if ss > 0 else 0.0
+            alligator_score  = min(SCORE_ALLIGATOR_MAX,
+                                   alligator_spread / 0.06 * SCORE_ALLIGATOR_MAX)
 
             rvol_excess = max(0.0, rvol - effective_rvol_min)
             rvol_score  = min(SCORE_RVOL_MAX,
                               rvol_excess / max(5.0 - effective_rvol_min, 0.01) * SCORE_RVOL_MAX)
 
-            rsi_delta  = max(0.0, rsi - rsi_prev) if not (pd.isna(rsi) or pd.isna(rsi_prev)) else 0.0
-            rsi_score  = min(SCORE_RSI_DELTA_MAX, rsi_delta / 10.0 * SCORE_RSI_DELTA_MAX)
+            rsi_score = min(SCORE_RSI_DELTA_MAX, max(0.0, rsi_delta / 5.0 * SCORE_RSI_DELTA_MAX))
 
             # Liquidity: dollar-vol half only (no spread available in daily OHLCV)
-            half     = SCORE_LIQUIDITY_MAX / 2.0
-            vol_pts  = min(half, (avg_dvol / self._min_dollar_vol) * half) if self._min_dollar_vol > 0 else 0.0
+            half      = SCORE_LIQUIDITY_MAX / 2.0
+            vol_pts   = min(half, (avg_dvol / self._min_dollar_vol) * half) if self._min_dollar_vol > 0 else 0.0
             liq_score = vol_pts   # spread half unavailable in daily data
 
-            score = donchian_score + rvol_score + rsi_score + liq_score
+            score = alligator_score + rvol_score + rsi_score + liq_score
             if score < self._min_score:
                 continue
             scored.append((sym, score, rvol))
@@ -655,61 +674,51 @@ class VelocityBacktest:
 
     # ── Signal check ─────────────────────────────────────────────────────────
     @staticmethod
-    def _entry_signal(row: pd.Series, prev_rsi: float, rvol: float,
+    def _entry_signal(row: dict, prev_rsi: float, rvol: float,
                       rvol_min: float,
                       flags: dict = None,
-                      donchian_tol_pct: float = BACKTEST_DONCHIAN_TOL_PCT,
-                      rsi_oversold_threshold: float = RSI_OVERSOLD_THRESHOLD,
-                      rsi_bounce_max: float = RSI_BOUNCE_MAX,
-                      rsi_min_delta: float = RSI_MIN_DELTA,
-                      min_body_pct: float = BACKTEST_MIN_BODY_PCT) -> bool:
-        """Donchian bounce entry filter — daily-bar approximation of src/rules.py CYCLE_RULES.
+                      rsi_min_delta: float = RSI_MIN_DELTA) -> bool:
+        """Alligator swing entry filter — daily-bar approximation of src/rules.py CYCLE_RULES.
 
-        Rules checked (all mandatory):
-          1. DONCH_LOWER available and price within donchian_tol_pct of lower band
-          2. RSI oversold in lookback window (RSI_MIN_LOOKBACK < rsi_oversold_threshold)
-          3. RSI delta >= RSI_MIN_DELTA (momentum turn confirmed)
-          4. RVOL >= rvol_min (already verified in _daily_scan; re-checked for safety)
+        Rules re-checked (all mandatory — same conditions as _daily_scan but on
+        the precomputed row_data dict for the optimizer path):
+          1. Alligator bullish: fast_aligned > slow_aligned AND med_aligned > slow_aligned
+          2. Fresh crossover: ALLIGATOR_CROSSED is True
+          3. RSI >= 50 AND RSI delta >= rsi_min_delta
+          4. RVOL >= rvol_min
+          5. Day strength: close >= open * (1 + DAY_STRENGTH_OPEN_PCT) in upper half of range
         """
-        # Donchian floor proximity
-        donch_lower = row.get('DONCH_LOWER', float('nan'))
-        if pd.isna(donch_lower) or donch_lower <= 0:
+        sf = float(row.get('SMMA_FAST_ALIGNED', float('nan')))
+        sm = float(row.get('SMMA_MED_ALIGNED',  float('nan')))
+        ss = float(row.get('SMMA_SLOW_ALIGNED', float('nan')))
+        if any(pd.isna(v) for v in (sf, sm, ss)):
             return False
-        proximity = (float(row['close']) - float(donch_lower)) / float(donch_lower)
-        if proximity > donchian_tol_pct:
-            return False
-
-        # RSI oversold in recent lookback
-        rsi_min_lb = row.get('RSI_MIN_LOOKBACK', float('nan'))
-        if pd.isna(rsi_min_lb) or float(rsi_min_lb) >= rsi_oversold_threshold:
+        if not (sf > ss and sm > ss):
             return False
 
-        # RSI delta confirms momentum turn
+        if not row.get('ALLIGATOR_CROSSED', False):
+            return False
+
         rsi = row.get('RSI', float('nan'))
-        if pd.isna(rsi) or pd.isna(prev_rsi):
+        if pd.isna(rsi) or pd.isna(prev_rsi) or float(rsi) < 50.0:
             return False
         if (float(rsi) - float(prev_rsi)) < rsi_min_delta:
             return False
 
-        # RSI must have crossed above the oversold threshold (bounce confirmed, not still falling)
-        if float(rsi) < rsi_oversold_threshold:
-            return False
-
-        # RSI must not be fully recovered — avoid support-failure re-tests
-        if float(rsi) > rsi_bounce_max:
-            return False
-
-        # RVOL confirmation
         if rvol < rvol_min:
             return False
 
-        # Day-strength: meaningful green candle required (close >= min_body_pct above open)
-        # Requires genuine buying pressure, not a doji or barely-green candle.
-        # Skip when open is unavailable (fail-open: don't silently block all entries).
-        open_ = row.get('open')
-        if open_ is not None and not pd.isna(open_) and float(open_) > 0:
-            if float(row['close']) / float(open_) < 1.0 + min_body_pct:
+        open_  = row.get('open', float('nan'))
+        high_  = row.get('high', float('nan'))
+        low_   = row.get('low',  float('nan'))
+        close_ = float(row.get('close', float('nan')))
+        if not pd.isna(open_) and float(open_) > 0:
+            if close_ < float(open_) * (1.0 + DAY_STRENGTH_OPEN_PCT):
                 return False
+            if not (pd.isna(high_) or pd.isna(low_)):
+                rng = float(high_) - float(low_)
+                if rng > 0 and (close_ - float(low_)) / rng < 0.5:
+                    return False
 
         return True
 
@@ -881,14 +890,10 @@ class VelocityBacktest:
                     # not at the stop level. Using min() prevents the optimistic
                     # assumption that we always filled exactly at the stop price.
                     exit_price  = round(min(float(row['open']), effective_stop), 4)
-                elif pd.Timestamp(today).dayofweek == 4 and profit_pct < self._friday_min_profit:
-                    # Friday afternoon close: market order — apply exit slippage.
-                    exit_reason = "friday_close"
-                    exit_price  = round(float(row['close']) * (1 - BACKTEST_EXIT_SLIPPAGE), 4)
-                elif bars_held >= self.hold_bars and profit_pct < self._profit_min_threshold:
-                    # Velocity exit: market order — apply exit slippage.
-                    exit_reason = "velocity_exit"
-                    exit_price  = round(float(row['close']) * (1 - BACKTEST_EXIT_SLIPPAGE), 4)
+                elif t.__dict__.get('_alligator_exit_pending'):
+                    # Alligator reversal detected yesterday — exit at today's open.
+                    exit_reason = "alligator_reversal"
+                    exit_price  = round(float(row['open']) * (1 - BACKTEST_EXIT_SLIPPAGE), 4)
 
                 if exit_reason:
                     t.exit_date   = today.date() if hasattr(today, 'date') else today
@@ -904,10 +909,21 @@ class VelocityBacktest:
                     else:
                         settled_cash += _proceeds   # last trading day — credit immediately
                     self._filter_stats['total_commissions'] += t.round_trip_commission
-                    if exit_reason == "friday_close":
-                        self._filter_stats['friday_closes'] += 1
+                    if exit_reason == "alligator_reversal":
+                        self._filter_stats['alligator_exits'] += 1
                     trades.append(t)
                     del open_positions[sym]
+                else:
+                    # End-of-day: detect Alligator bearish reversal for next-bar exit.
+                    # Both fast+med SMMA cross below slow confirms the uptrend is broken.
+                    _sf = float(row.get('SMMA_FAST_ALIGNED', float('nan')))
+                    _sm = float(row.get('SMMA_MED_ALIGNED',  float('nan')))
+                    _ss = float(row.get('SMMA_SLOW_ALIGNED', float('nan')))
+                    if not (pd.isna(_sf) or pd.isna(_sm) or pd.isna(_ss)):
+                        if _sf < _ss and _sm < _ss:
+                            t.__dict__['_alligator_exit_pending'] = True
+                        else:
+                            t.__dict__['_alligator_exit_pending'] = False
 
             # ── Regime gates ──────────────────────────────────────────────
             skip_entries  = False
@@ -995,14 +1011,10 @@ class VelocityBacktest:
 
                     if self._entry_signal(row, prev_rsi, rvol, effective_rvol_min,
                                           flags=flags,
-                                          donchian_tol_pct=self._donchian_tol_pct,
-                                          rsi_oversold_threshold=self._rsi_oversold_threshold,
-                                          rsi_bounce_max=self._rsi_bounce_max,
-                                          rsi_min_delta=self._rsi_min_delta,
-                                          min_body_pct=self._min_body_pct):
+                                          rsi_min_delta=self._rsi_min_delta):
                         self._filter_stats['fine_signals'] += 1
 
-                        # Entry at open (Donchian bounce — not an ORB breakout strategy),
+                        # Entry at open (Alligator swing — not an ORB breakout strategy),
                         # plus BACKTEST_SLIPPAGE to simulate market impact.
                         entry_price = round(float(row['open']) * (1 + BACKTEST_SLIPPAGE), 4)
 
@@ -1150,8 +1162,8 @@ class VelocityBacktest:
         final_equity = capital + m['total_pnl']
 
         print("\n" + "=" * 65)
-        print("  VELOCITY STRATEGY — DONCHIAN BOUNCE BACKTEST REPORT")
-        print("  Donchian floor entry | Chandelier stop | Break-even floor")
+        print("  ALLIGATOR SWING BACKTEST REPORT")
+        print("  Alligator crossover entry | Chandelier stop | Break-even floor")
         print("=" * 65)
         print("  *** SURVIVORSHIP BIAS WARNING ***")
         print("  Universe = current NASDAQ/NYSE listing.  Bankrupt and")
@@ -1308,16 +1320,16 @@ class VelocityBacktest:
         if vix_d:
             print(f"  VIX-blocked days    : {vix_d:,}")
         print(f"  Coarse candidates   : {fs.get('coarse_candidates', 0):,}  "
-              f"(price/vol/donchian/rsi-oversold/rvol pass)")
+              f"(price/vol/alligator/rvol/rsi/day-strength pass)")
         print(f"  Fine signals        : {fs.get('fine_signals', 0):,}  "
-              f"(full Donchian bounce rule pass)")
+              f"(full Alligator swing rule pass)")
         print(f"  Entries taken       : {fs.get('entries_taken', 0):,}")
         skipped = fs.get('entries_skipped_full', 0)
         if skipped:
             print(f"  Skipped (pos full)  : {skipped:,}")
-        fri = fs.get('friday_closes', 0)
-        if fri:
-            print(f"  Friday closes       : {fri:,}  (profit < {FRIDAY_MIN_PROFIT_PCT*100:.0f}% at week-end)")
+        al_exits = fs.get('alligator_exits', 0)
+        if al_exits:
+            print(f"  Alligator exits     : {al_exits:,}")
         print()
 
     # ── Per-trade log ─────────────────────────────────────────────────────────

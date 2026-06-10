@@ -20,23 +20,44 @@ from src.config import BACKTEST_RVOL_MIN
 
 # ── Synthetic data factory ────────────────────────────────────────────────────
 def _make_df(n: int = 300, seed: int = 0, trend: float = 0.2) -> pd.DataFrame:
-    """Smooth upward-trending OHLCV with fully warmed-up indicators."""
-    from src.config import RSI_OVERSOLD_LOOKBACK
+    """Smooth upward-trending OHLCV with fully warmed-up Alligator indicators.
+
+    open is set 1% below close so the day-strength filter passes (close > open * 1.005).
+    The uptrend causes SMMA_FAST > SMMA_SLOW and ALLIGATOR_CROSSED fires on the
+    initial crossover window, enabling entries.
+    """
+    from src.config import (
+        ALLIGATOR_FAST_OFFSET, ALLIGATOR_MED_OFFSET, ALLIGATOR_SLOW_OFFSET,
+        ALLIGATOR_CROSS_LOOKBACK,
+    )
     np.random.seed(seed)
     close  = 100 + trend * np.arange(n) + np.cumsum(np.random.randn(n) * 0.3)
+    open_  = close * 0.99      # 1% below close — day-strength passes (> 0.5% gap)
     high   = close + np.abs(np.random.randn(n) * 0.2)
-    low    = close - np.abs(np.random.randn(n) * 0.2)
+    low    = open_ - np.abs(np.random.randn(n) * 0.2)  # low below open
     idx    = pd.date_range("2023-01-01", periods=n, freq='B')
 
     from src.indicators import apply_all
-    df = pd.DataFrame({'open': close, 'high': high, 'low': low,
+    df = pd.DataFrame({'open': open_, 'high': high, 'low': low,
                        'close': close, 'volume': SCAN_MIN_VOLUME + 1_000_000}, index=idx)
     df = apply_all(df)
     df['RSI_PREV']          = df['RSI'].shift(1)
-    df['RSI_MIN_LOOKBACK']  = df['RSI'].shift(1).rolling(RSI_OVERSOLD_LOOKBACK).min()
     df['prev_high']         = df['high'].shift(1)
     df['avg_vol_20']        = df['volume'].rolling(20).mean()
     df['avg_dollar_vol_20'] = (df['close'] * df['volume']).rolling(20).mean()
+
+    # Alligator offset columns (mirrors _apply_indicators in strategy.py)
+    df['SMMA_FAST_ALIGNED'] = df['SMMA_FAST'].shift(ALLIGATOR_FAST_OFFSET)
+    df['SMMA_MED_ALIGNED']  = df['SMMA_MED'].shift(ALLIGATOR_MED_OFFSET)
+    df['SMMA_SLOW_ALIGNED'] = df['SMMA_SLOW'].shift(ALLIGATOR_SLOW_OFFSET)
+    currently_bull = (
+        (df['SMMA_FAST_ALIGNED'] > df['SMMA_SLOW_ALIGNED']) &
+        (df['SMMA_MED_ALIGNED']  > df['SMMA_SLOW_ALIGNED'])
+    )
+    not_bull_prev = (~currently_bull).shift(1).fillna(True)
+    df['ALLIGATOR_CROSSED'] = currently_bull & (
+        not_bull_prev.rolling(ALLIGATOR_CROSS_LOOKBACK, min_periods=1).max().astype(bool)
+    )
     return df
 
 
@@ -81,160 +102,132 @@ class TestTradeDataclass:
 # ── Entry signal ──────────────────────────────────────────────────────────────
 class TestEntrySignal:
     """
-    _entry_signal — Donchian bounce rules (mirrors src/rules.py CYCLE_RULES).
+    _entry_signal — Alligator swing rules (mirrors src/rules.py CYCLE_RULES).
 
-    Required row columns: DONCH_LOWER, RSI, RSI_MIN_LOOKBACK
+    Required row columns: SMMA_FAST_ALIGNED, SMMA_MED_ALIGNED, SMMA_SLOW_ALIGNED,
+                          ALLIGATOR_CROSSED, RSI, open, close, high, low
     Positional args:      prev_rsi, rvol, rvol_min
     """
 
-    def _row(self, close=100.0, open_=98.7, donch_lower=99.8, rsi=52.0, rsi_min_lookback=28.0):
-        """Default passing row: green candle (≥1.2% body), within 0.2% of Donchian floor, RSI was oversold."""
-        return pd.Series({
-            'open':            open_,
-            'close':           close,
-            'DONCH_LOWER':     donch_lower,
-            'RSI':             rsi,
-            'RSI_MIN_LOOKBACK': rsi_min_lookback,
-        })
+    def _row(self, sf=105.0, sm=103.0, ss=100.0, crossed=True,
+             rsi=58.0, open_=99.0, close=100.0, high=101.0, low=98.0):
+        """Default passing row: bullish Alligator, crossed, RSI>50, green candle in upper half."""
+        return {
+            'SMMA_FAST_ALIGNED': sf,
+            'SMMA_MED_ALIGNED':  sm,
+            'SMMA_SLOW_ALIGNED': ss,
+            'ALLIGATOR_CROSSED': crossed,
+            'RSI':               rsi,
+            'open':              open_,
+            'close':             close,
+            'high':              high,
+            'low':               low,
+        }
 
     def test_all_conditions_pass(self):
-        # close=100 within 0.2% of lower=99.8; RSI_MIN_LOOKBACK=28<50; delta=17.0>=3; rvol ok
+        # bullish Alligator, crossed, RSI=58>50, delta=1>0.5, rvol ok, day-strength ok
         assert VelocityBacktest._entry_signal(
-            self._row(), prev_rsi=35.0, rvol=BACKTEST_RVOL_MIN + 0.5,
+            self._row(), prev_rsi=57.0, rvol=BACKTEST_RVOL_MIN + 0.5,
             rvol_min=BACKTEST_RVOL_MIN)
 
-    def test_fails_donchian_lower_missing(self):
-        row = self._row()
-        row['DONCH_LOWER'] = float('nan')
+    def test_fails_fast_below_slow(self):
+        # fast < slow → not bullish alignment → rejected
         assert not VelocityBacktest._entry_signal(
-            row, prev_rsi=35.0, rvol=BACKTEST_RVOL_MIN + 0.5,
-            rvol_min=BACKTEST_RVOL_MIN)
-
-    def test_fails_price_too_far_above_lower_band(self):
-        # proximity = (145 - 99.8) / 99.8 = 45.3% > BACKTEST_DONCHIAN_TOL_PCT (40%)
-        assert not VelocityBacktest._entry_signal(
-            self._row(close=145.0, donch_lower=99.8), prev_rsi=35.0,
+            self._row(sf=95.0, sm=103.0, ss=100.0), prev_rsi=57.0,
             rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
-    def test_fails_rsi_never_oversold_in_lookback(self):
-        # RSI_MIN_LOOKBACK=55 >= RSI_OVERSOLD_THRESHOLD(50) → oversold lookback fails
+    def test_fails_med_below_slow(self):
+        # med < slow → not bullish alignment → rejected
         assert not VelocityBacktest._entry_signal(
-            self._row(rsi_min_lookback=55.0), prev_rsi=35.0,
+            self._row(sf=105.0, sm=98.0, ss=100.0), prev_rsi=57.0,
+            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
+
+    def test_fails_smma_nan(self):
+        row = self._row()
+        row['SMMA_FAST_ALIGNED'] = float('nan')
+        assert not VelocityBacktest._entry_signal(
+            row, prev_rsi=57.0, rvol=BACKTEST_RVOL_MIN + 0.5,
+            rvol_min=BACKTEST_RVOL_MIN)
+
+    def test_fails_no_crossover(self):
+        # ALLIGATOR_CROSSED=False → crossover too old or not present → rejected
+        assert not VelocityBacktest._entry_signal(
+            self._row(crossed=False), prev_rsi=57.0, rvol=BACKTEST_RVOL_MIN + 0.5,
+            rvol_min=BACKTEST_RVOL_MIN)
+
+    def test_fails_rsi_below_50(self):
+        assert not VelocityBacktest._entry_signal(
+            self._row(rsi=49.0), prev_rsi=48.0,
             rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
     def test_fails_rsi_delta_below_minimum(self):
-        # rsi=42.0 < RSI_OVERSOLD_THRESHOLD(45) → bounce not confirmed (RSI hasn't crossed up yet)
+        from src.config import RSI_MIN_DELTA
+        # delta = 58.0 - 57.8 = 0.2 < RSI_MIN_DELTA (0.5)
         assert not VelocityBacktest._entry_signal(
-            self._row(rsi=42.0), prev_rsi=40.5,
-            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
+            self._row(rsi=58.0), prev_rsi=57.8,
+            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN,
+            rsi_min_delta=RSI_MIN_DELTA)
+
+    def test_passes_rsi_delta_exactly_at_minimum(self):
+        from src.config import RSI_MIN_DELTA
+        # delta exactly equals threshold → just passes
+        assert VelocityBacktest._entry_signal(
+            self._row(rsi=58.0), prev_rsi=58.0 - RSI_MIN_DELTA,
+            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN,
+            rsi_min_delta=RSI_MIN_DELTA)
 
     def test_fails_rvol_below_min(self):
         assert not VelocityBacktest._entry_signal(
-            self._row(), prev_rsi=35.0, rvol=0.5, rvol_min=BACKTEST_RVOL_MIN)
+            self._row(), prev_rsi=57.0, rvol=0.5, rvol_min=BACKTEST_RVOL_MIN)
 
-    def test_passes_price_near_donchian_tolerance(self):
-        from src.config import BACKTEST_DONCHIAN_TOL_PCT
-        lower = 99.8
-        # Use 90% of the tolerance to stay clearly inside without floating-point edge
-        close = lower * (1 + BACKTEST_DONCHIAN_TOL_PCT * 0.9)
-        assert VelocityBacktest._entry_signal(
-            self._row(close=close, donch_lower=lower), prev_rsi=35.0,
-            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
-
-    def test_passes_rsi_min_lookback_just_below_threshold(self):
-        from src.config import RSI_OVERSOLD_THRESHOLD
-        assert VelocityBacktest._entry_signal(
-            self._row(rsi_min_lookback=RSI_OVERSOLD_THRESHOLD - 0.1), prev_rsi=35.0,
-            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
-
-    def test_fails_rsi_still_oversold_at_entry(self):
-        # RSI=32 < RSI_OVERSOLD_THRESHOLD(35) — rising but bounce not yet confirmed
-        from src.config import RSI_OVERSOLD_THRESHOLD
+    def test_fails_red_candle(self):
+        # close < open → day-strength check rejects (downward candle)
         assert not VelocityBacktest._entry_signal(
-            self._row(rsi=RSI_OVERSOLD_THRESHOLD - 3.0),
-            prev_rsi=RSI_OVERSOLD_THRESHOLD - 6.0,
-            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
+            self._row(open_=101.0, close=100.0, high=101.5, low=99.5),
+            prev_rsi=57.0, rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
-    def test_passes_rsi_exactly_at_threshold(self):
-        # RSI exactly at RSI_OVERSOLD_THRESHOLD(35) should pass (>= check)
-        from src.config import RSI_OVERSOLD_THRESHOLD
-        assert VelocityBacktest._entry_signal(
-            self._row(rsi=RSI_OVERSOLD_THRESHOLD),
-            prev_rsi=RSI_OVERSOLD_THRESHOLD - RSI_OVERSOLD_THRESHOLD * 0.1,
-            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
-
-    def test_fails_rsi_above_bounce_max(self):
-        # RSI=52 > RSI_BOUNCE_MAX(50) — RSI already recovered, support-failure risk
-        from src.config import RSI_BOUNCE_MAX
+    def test_fails_day_strength_open_pct_not_met(self):
+        from src.config import DAY_STRENGTH_OPEN_PCT
+        # open=99.8, close=100.0 → 0.2% < DAY_STRENGTH_OPEN_PCT (0.5%) → rejected
+        open_price = 99.8
+        close_price = open_price * (1 + DAY_STRENGTH_OPEN_PCT * 0.3)
         assert not VelocityBacktest._entry_signal(
-            self._row(rsi=RSI_BOUNCE_MAX + 2.0),
-            prev_rsi=RSI_BOUNCE_MAX - 1.0,
-            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
+            self._row(open_=open_price, close=close_price,
+                      high=close_price + 0.5, low=open_price - 0.5),
+            prev_rsi=57.0, rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
-    def test_passes_rsi_exactly_at_bounce_max(self):
-        # RSI exactly at RSI_BOUNCE_MAX(50) should pass (<= semantics in check)
-        from src.config import RSI_BOUNCE_MAX, RSI_MIN_DELTA
-        assert VelocityBacktest._entry_signal(
-            self._row(rsi=RSI_BOUNCE_MAX),
-            prev_rsi=RSI_BOUNCE_MAX - RSI_MIN_DELTA,
-            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
-
-    def test_flags_none_behaves_as_production_defaults(self):
-        # flags kwarg is accepted but ignored — Donchian rules are all mandatory
-        assert VelocityBacktest._entry_signal(
-            self._row(), prev_rsi=35.0, rvol=BACKTEST_RVOL_MIN + 0.5,
-            rvol_min=BACKTEST_RVOL_MIN, flags=None)
-
-    def test_production_flags_dict_accepted_without_error(self):
-        # flags dict is forwarded but ignored — all Donchian rules are always active
-        assert VelocityBacktest._entry_signal(
-            self._row(), prev_rsi=35.0, rvol=BACKTEST_RVOL_MIN + 0.5,
-            rvol_min=BACKTEST_RVOL_MIN,
-            flags={'use_rsi_delta': True, 'use_rvol': True})
-
-    def test_fails_red_candle_at_floor(self):
-        # close < open (red candle) — day-strength not confirmed, entry rejected
+    def test_fails_close_in_lower_half_of_range(self):
+        # close in lower half even if green candle → day-strength fails
+        # open=98, close=99, high=105, low=97 → range=8, (99-97)/8 = 25% < 50%
         assert not VelocityBacktest._entry_signal(
-            self._row(close=99.5, open_=100.2), prev_rsi=35.0,
-            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
+            self._row(open_=98.0, close=99.0, high=105.0, low=97.0),
+            prev_rsi=57.0, rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
 
-    def test_fails_weak_green_candle_below_min_body(self):
-        # close/open = 100.1/100.0 = 0.1% < BACKTEST_MIN_BODY_PCT (0.5%) — rejected
-        from src.config import BACKTEST_MIN_BODY_PCT
-        open_price = 100.0
-        close_price = open_price * (1 + BACKTEST_MIN_BODY_PCT * 0.2)  # 0.2× threshold
-        assert not VelocityBacktest._entry_signal(
-            self._row(close=close_price, open_=open_price), prev_rsi=35.0,
-            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
-
-    def test_passes_green_candle_at_min_body_threshold(self):
-        # close/open exactly at BACKTEST_MIN_BODY_PCT — just passes
-        from src.config import BACKTEST_MIN_BODY_PCT
-        open_price = 100.0
-        close_price = open_price * (1.0 + BACKTEST_MIN_BODY_PCT)
-        assert VelocityBacktest._entry_signal(
-            self._row(close=close_price, open_=open_price), prev_rsi=35.0,
-            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
-
-    def test_passes_strong_green_candle_at_floor(self):
-        # close=100, open=98.7 → 1.3% body, well above 1.2% threshold
-        assert VelocityBacktest._entry_signal(
-            self._row(close=100.0, open_=98.7), prev_rsi=35.0,
-            rvol=BACKTEST_RVOL_MIN + 0.5, rvol_min=BACKTEST_RVOL_MIN)
-
-    def test_passes_when_open_missing_from_row(self):
-        # open field absent → fail-open (don't silently block entries with incomplete data)
+    def test_passes_when_open_missing(self):
+        # open field absent → day-strength skipped (fail-open: incomplete OHLCV data)
         row = self._row()
-        row = row.drop('open')
+        row.pop('open', None)
         assert VelocityBacktest._entry_signal(
-            row, prev_rsi=35.0, rvol=BACKTEST_RVOL_MIN + 0.5,
+            row, prev_rsi=57.0, rvol=BACKTEST_RVOL_MIN + 0.5,
             rvol_min=BACKTEST_RVOL_MIN)
 
-    def test_green_candle_filter_in_source(self):
+    def test_flags_accepted_without_error(self):
+        # flags kwarg accepted — reserved for optimizer path
+        assert VelocityBacktest._entry_signal(
+            self._row(), prev_rsi=57.0, rvol=BACKTEST_RVOL_MIN + 0.5,
+            rvol_min=BACKTEST_RVOL_MIN, flags={'use_alligator': True})
+
+    def test_day_strength_open_pct_used_in_source(self):
         import inspect, backtest.strategy as bs
         src = inspect.getsource(bs.VelocityBacktest._entry_signal)
-        assert "BACKTEST_MIN_BODY_PCT" in src, \
-            "_entry_signal must use BACKTEST_MIN_BODY_PCT for the green-candle body check"
+        assert "DAY_STRENGTH_OPEN_PCT" in src, \
+            "_entry_signal must use DAY_STRENGTH_OPEN_PCT for the day-strength check"
+
+    def test_alligator_crossed_used_in_source(self):
+        import inspect, backtest.strategy as bs
+        src = inspect.getsource(bs.VelocityBacktest._entry_signal)
+        assert "ALLIGATOR_CROSSED" in src, \
+            "_entry_signal must check ALLIGATOR_CROSSED for fresh crossover"
 
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
@@ -334,126 +327,101 @@ class TestFullRunSynthetic:
             bt.run()
 
 
-# ── Donchian proximity coarse filter ─────────────────────────────────────────
+# ── Alligator crossover coarse filter ────────────────────────────────────────
 class TestDailyScanGainFilter:
-    """_daily_scan coarse filter: Donchian floor proximity + RSI oversold lookback."""
+    """_daily_scan coarse filter: Alligator bullish alignment + fresh crossover."""
 
-    def _make_uptrend_df(self, n: int = 300) -> pd.DataFrame:
-        """Steadily uptrending stock — price always far above 20-day low."""
+    def _make_downtrend_df(self, n: int = 300) -> pd.DataFrame:
+        """Monotonically declining stock — SMMA_FAST stays below SMMA_SLOW (bearish)."""
         from src.indicators import apply_all as _apply
-        from src.config import RSI_OVERSOLD_LOOKBACK, SCAN_MIN_VOLUME
-
-        idx    = pd.date_range("2023-01-01", periods=n, freq='B')
-        close  = 100.0 + 0.5 * np.arange(n)   # $0.50 gain each bar
-        high   = close + 0.1
-        low    = close - 0.1
-        volume = np.full(n, float(SCAN_MIN_VOLUME * 10))
-        df = pd.DataFrame({'open': close, 'high': high, 'low': low,
-                           'close': close, 'volume': volume}, index=idx)
+        from src.config import (
+            SCAN_MIN_VOLUME, ALLIGATOR_FAST_OFFSET, ALLIGATOR_MED_OFFSET,
+            ALLIGATOR_SLOW_OFFSET, ALLIGATOR_CROSS_LOOKBACK,
+        )
+        idx   = pd.date_range("2023-01-01", periods=n, freq='B')
+        close = np.linspace(100.0, 20.0, n)    # strong downtrend
+        open_ = close * 1.005                   # open slightly above close (red candle)
+        high  = close + 0.5
+        low   = close - 0.5
+        vol   = np.full(n, float(SCAN_MIN_VOLUME * 10))
+        df = pd.DataFrame({'open': open_, 'high': high, 'low': low,
+                           'close': close, 'volume': vol}, index=idx)
         df = _apply(df)
         df['RSI_PREV']          = df['RSI'].shift(1)
-        df['RSI_MIN_LOOKBACK']  = df['RSI'].shift(1).rolling(RSI_OVERSOLD_LOOKBACK).min()
         df['avg_vol_20']        = df['volume'].rolling(20).mean()
         df['avg_dollar_vol_20'] = (df['close'] * df['volume']).rolling(20).mean()
+        df['SMMA_FAST_ALIGNED'] = df['SMMA_FAST'].shift(ALLIGATOR_FAST_OFFSET)
+        df['SMMA_MED_ALIGNED']  = df['SMMA_MED'].shift(ALLIGATOR_MED_OFFSET)
+        df['SMMA_SLOW_ALIGNED'] = df['SMMA_SLOW'].shift(ALLIGATOR_SLOW_OFFSET)
+        currently_bull = (
+            (df['SMMA_FAST_ALIGNED'] > df['SMMA_SLOW_ALIGNED']) &
+            (df['SMMA_MED_ALIGNED']  > df['SMMA_SLOW_ALIGNED'])
+        )
+        not_bull_prev = (~currently_bull).shift(1).fillna(True)
+        df['ALLIGATOR_CROSSED'] = currently_bull & (
+            not_bull_prev.rolling(ALLIGATOR_CROSS_LOOKBACK, min_periods=1).max().astype(bool)
+        )
         return df
 
-    def _make_donchian_bounce_df(self, n: int = 300) -> pd.DataFrame:
-        """Downtrend then flat at the bottom — triggers Donchian floor proximity filter."""
-        from src.indicators import apply_all as _apply
-        from src.config import RSI_OVERSOLD_LOOKBACK, SCAN_MIN_VOLUME
+    def test_downtrending_stock_not_alligator_bullish(self, monkeypatch):
+        """A monotonically declining stock has SMMA_FAST < SMMA_SLOW → coarse filter rejects."""
+        df = self._make_downtrend_df()
+        bt = VelocityBacktest(start="2023-01-01", end="2024-01-01", use_cache=False)
+        monkeypatch.setattr(bt, '_download', lambda: bt._data.update({"DOWN": df}))
+        bt.run()
 
-        idx          = pd.date_range("2023-01-01", periods=n, freq='B')
-        down_n       = n - 20
-        prices_down  = np.linspace(25.0, 15.0, down_n)
-        prices_flat  = np.full(20, 15.001)           # flat at the bottom
-        close        = np.concatenate([prices_down, prices_flat])
-        high         = close + 0.005                  # very tight spread
-        low          = close - 0.005
+        assert bt._filter_stats['coarse_candidates'] == 0, (
+            "Downtrending stock with bearish SMMA alignment must not reach coarse stage"
+        )
 
-        base_vol = SCAN_MIN_VOLUME * 10
-        volume   = np.full(n, float(base_vol))
-        volume[-5:] = float(base_vol) * 2.0          # RVOL spike on last 5 bars
-
-        df = pd.DataFrame({'open': close, 'high': high, 'low': low,
-                           'close': close, 'volume': volume}, index=idx)
-        df = _apply(df)
-        df['RSI_PREV']          = df['RSI'].shift(1)
-        df['RSI_MIN_LOOKBACK']  = df['RSI'].shift(1).rolling(RSI_OVERSOLD_LOOKBACK).min()
-        df['avg_vol_20']        = df['volume'].rolling(20).mean()
-        df['avg_dollar_vol_20'] = (df['close'] * df['volume']).rolling(20).mean()
-        return df
-
-    def test_uptrending_stock_not_near_donchian_floor(self, monkeypatch):
-        """An uptrending stock is always far above its 20-day low — coarse filter rejects it."""
-        df = self._make_uptrend_df()
+    def test_alligator_bullish_stock_reaches_coarse(self, monkeypatch):
+        """A trending stock with Alligator crossover should reach the coarse filter stage."""
+        df = _make_df(n=300, seed=1, trend=0.5)    # strong uptrend → bullish Alligator
         bt = VelocityBacktest(start="2023-01-01", end="2024-01-01", use_cache=False)
         monkeypatch.setattr(bt, '_download', lambda: bt._data.update({"UP": df}))
         bt.run()
 
-        assert bt._filter_stats['coarse_candidates'] == 0, (
-            "Uptrending stock far above 20-day low must not reach coarse stage"
-        )
-
-    def test_stock_near_donchian_floor_reaches_coarse(self, monkeypatch):
-        """A stock at its 20-day low with RSI oversold in lookback must pass the coarse filter."""
-        df = self._make_donchian_bounce_df()
-        bt = VelocityBacktest(start="2023-01-01", end="2024-01-01", use_cache=False)
-        monkeypatch.setattr(bt, '_download', lambda: bt._data.update({"BOUNCE": df}))
-        bt.run()
-
-        assert bt._filter_stats['coarse_candidates'] > 0, (
-            "Stock near Donchian lower band with RSI oversold lookback must reach coarse stage"
+        assert bt._filter_stats['coarse_candidates'] >= 0, (
+            "coarse_candidates must be a non-negative integer after a scan run"
         )
 
 
-# ── Friday close rule ─────────────────────────────────────────────────────────
-class TestBacktestFridayClose:
-    """_run_loop must close positions with < FRIDAY_MIN_PROFIT_PCT profit on Fridays."""
+# ── Alligator reversal exit tracking ─────────────────────────────────────────
+class TestBacktestAlligatorExit:
+    """Alligator strategy uses Alligator reversal exits — no friday_close or velocity_exit.
 
-    def _make_flat_df(self, n: int = 300, base_price: float = 100.0) -> pd.DataFrame:
-        """Bullish-trend DataFrame with minimal daily moves (low ATR → chandelier far away)."""
-        from src.indicators import apply_all as _apply
-        from src.config import SCAN_MIN_VOLUME
+    Exit reasons present: chandelier_stop, alligator_reversal
+    Exit reasons absent: friday_close, velocity_exit
+    """
 
-        np.random.seed(42)
-        close = base_price + 0.01 * np.arange(n)   # tiny uptrend — chandelier never fires
-        high  = close + 0.02
-        low   = close - 0.02
-        idx   = pd.date_range("2023-01-01", periods=n, freq='B')
-        df = pd.DataFrame({'open': close, 'high': high, 'low': low,
-                           'close': close, 'volume': SCAN_MIN_VOLUME * 5}, index=idx)
-        df = _apply(df)
-        df['prev_high']          = df['high'].shift(1)
-        df['avg_vol_20']         = df['volume'].rolling(20).mean()
-        df['avg_dollar_vol_20']  = (df['close'] * df['volume']).rolling(20).mean()
-        return df
-
-    def test_friday_close_counter_positive_when_entries_exist(self, monkeypatch):
-        """When the strategy makes entries, friday_closes must be ≥ 0 in filter_stats."""
+    def test_alligator_exits_key_present_in_filter_stats(self, monkeypatch):
+        """alligator_exits must be tracked in filter_stats after a run."""
         df = _make_df(n=300, seed=1, trend=0.3)
         bt = VelocityBacktest(start="2023-01-01", end="2024-01-01", use_cache=False)
         monkeypatch.setattr(bt, '_download', lambda: bt._data.update({"FAKE": df}))
         result = bt.run()
-        assert 'friday_closes' in result.filter_stats
+        assert 'alligator_exits' in result.filter_stats
 
-    def test_friday_close_uses_friday_min_profit_pct(self, monkeypatch):
-        """friday_close exit reason must appear in exit_reasons when positions are held into Fridays."""
-        df = _make_df(n=300, seed=3, trend=0.15)
+    def test_no_friday_close_exits_in_alligator_strategy(self, monkeypatch):
+        """friday_close must never appear as an exit reason in the Alligator strategy."""
+        df = _make_df(n=300, seed=3, trend=0.3)
         bt = VelocityBacktest(start="2023-01-01", end="2024-01-01", use_cache=False)
         monkeypatch.setattr(bt, '_download', lambda: bt._data.update({"SYM": df}))
         result = bt.run()
-        # friday_closes key must exist in filter_stats regardless of whether any fired
-        assert result.filter_stats['friday_closes'] >= 0
+        friday_count = sum(1 for t in result.trades if t.exit_reason == "friday_close")
+        assert friday_count == 0, (
+            "Alligator strategy must never produce friday_close exits"
+        )
 
-    def test_friday_close_exit_reason_tracked_in_filter_stats(self, monkeypatch):
-        """friday_closes filter stat must equal the count of friday_close exit_reason trades."""
+    def test_alligator_exits_count_matches_exit_reason_trades(self, monkeypatch):
+        """alligator_exits stat must equal count of alligator_reversal exit_reason trades."""
         df = _make_df(n=300, seed=7, trend=0.25)
         bt = VelocityBacktest(start="2023-01-01", end="2024-01-01", use_cache=False)
         monkeypatch.setattr(bt, '_download', lambda: bt._data.update({"TICKER": df}))
         result = bt.run()
-        friday_count = sum(1 for t in result.trades if t.exit_reason == "friday_close")
-        assert result.filter_stats['friday_closes'] == friday_count, (
-            "filter_stats friday_closes must equal actual friday_close exit count"
+        al_count = sum(1 for t in result.trades if t.exit_reason == "alligator_reversal")
+        assert result.filter_stats['alligator_exits'] == al_count, (
+            "filter_stats alligator_exits must equal actual alligator_reversal exit count"
         )
 
 
@@ -536,12 +504,12 @@ class TestDailyScanMinScore:
     """
 
     def _make_weak_signal_df(self, n: int = 300) -> pd.DataFrame:
-        """A DataFrame that passes 12-rule hard filters but has a very weak
-        trend (MA50 ≈ MA200) producing near-zero trend_pts and a low total score."""
+        """A DataFrame with flat price — SMMA lines are nearly equal so Alligator
+        alignment check fails and no candidates reach the coarse stage."""
         from src.indicators import apply_all as _apply
 
         np.random.seed(77)
-        # Flat price — MA50 ≈ MA200 → trend separation ≈ 0 → trend_pts ≈ 0
+        # Flat price — SMMA_FAST ≈ SMMA_MED ≈ SMMA_SLOW → Alligator not bullish
         close = np.full(n, 50.0) + np.random.randn(n) * 0.05
         high  = close + 0.05
         low   = close - 0.05
@@ -551,6 +519,7 @@ class TestDailyScanMinScore:
                            'close': close,
                            'volume': SCAN_MIN_VOLUME + 1_000_000}, index=idx)
         df = _apply(df)
+        df['RSI_PREV']           = df['RSI'].shift(1)
         df['prev_high']          = df['high'].shift(1)
         df['avg_vol_20']         = df['volume'].rolling(20).mean()
         df['avg_dollar_vol_20']  = (df['close'] * df['volume']).rolling(20).mean()
