@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional
 
@@ -64,7 +65,7 @@ from src.config import (
 )
 from src.indicators import compute_smma
 
-logger = logging.getLogger('VelocityEngine')
+logger = logging.getLogger('BounceAlpha')
 
 # Warrants (BASE+W), rights (BASE.RT), warrant series (BASE.WS), and other
 # non-standard instruments never qualify — filter them before hitting the API.
@@ -254,9 +255,12 @@ def get_alligator_crossover_scan(
     candidates: List[str] = []
     n_batches  = 0
 
+    n_failed = 0
     for i in range(0, len(universe), _UNIVERSE_BATCH_SIZE):
         batch     = universe[i: i + _UNIVERSE_BATCH_SIZE]
         n_batches += 1
+        if n_batches > 1:
+            time.sleep(0.2)  # avoid rate-limiting across 100+ consecutive batch requests
         try:
             req  = StockBarsRequest(
                 symbol_or_symbols=batch,
@@ -266,7 +270,8 @@ def get_alligator_crossover_scan(
             )
             bars = data_client.get_stock_bars(req)
         except Exception as e:
-            logger.debug(f"SCANNER: universe batch {n_batches} failed: {e}")
+            n_failed += 1
+            logger.warning(f"SCANNER: universe batch {n_batches} failed: {e}")
             continue
 
         for sym in batch:
@@ -317,7 +322,8 @@ def get_alligator_crossover_scan(
 
     logger.info(
         f"SCANNER: Alligator crossover scan complete — "
-        f"{len(candidates)} crossover candidates from {len(universe)} symbols"
+        f"{len(candidates)} crossover candidates from {len(universe)} symbols "
+        f"({n_batches} batches, {n_failed} failed)"
     )
     _crossover_cache['date']    = today_str
     _crossover_cache['symbols'] = candidates
