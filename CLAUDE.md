@@ -157,69 +157,72 @@ highest-false-breakout window in bear-market bounces. The backtest `_download_re
 already enforced this; the live engine was missing it. Both must remain in sync.
 Do NOT remove the slope check from either the live engine or the backtest.
 
-### Backtest Scoring Formula Aligned with Live `_score_candidate`
+### Backtest Strategy: Alligator Swing (Mirrors Live Engine)
 
-`_daily_scan` scoring uses the same structural formulas as live `_score_candidate`:
+`backtest/strategy.py` implements the **same** Alligator Swing strategy as the live engine.
+Do NOT diverge entry logic, scoring formulas, or exit rules between them.
 
-- **RVOL pts**: `min(25.0, (rvol - self._rvol_min) / (5.0 - self._rvol_min) * 25.0)` — linear
-  scale from threshold to cap of 5×. Previously used `/ self._rvol_min` (relative rate), which
-  diverged from the live formula.
-- **RSI quality pts**: `min(10.0, max(0.0, (rsi - RSI_THRESHOLD) / 20.0 * 10.0))` — continuous
-  linear scale from 55 (0 pts) to 75 (10 pts). Previously a stepwise function (10→5→0 for
-  ≤70/≤75/>75) that rewarded low RSI differently than the live engine.
-- **Trend pts (30 max)**: MA separation (0-22 pts) + ADX quality (0-8 pts). MA sep formula:
-  `min(22.0, (ma50-ma200)/ma200 / 0.06 * 22.0)`. ADX quality: `min(8.0, max(0.0, (adx-25.0)/25.0*8.0))`
-  — activates above ADX=25 (not the entry gate of 20). Same formula in both live and backtest.
+**Entry rules** (`_daily_scan` + `_entry_signal`):
+1. Price ≥ `SCAN_MIN_PRICE`, volume ≥ `SCAN_MIN_VOLUME`, dollar vol ≥ `SCAN_MIN_DOLLAR_VOL`
+2. Alligator bullish: `SMMA_FAST_ALIGNED > SMMA_SLOW_ALIGNED AND SMMA_MED_ALIGNED > SMMA_SLOW_ALIGNED`
+3. Fresh crossover: `ALLIGATOR_CROSSED = True` (non-bullish bar within `ALLIGATOR_CROSS_LOOKBACK`)
+4. RSI ≥ 50 AND RSI delta ≥ `RSI_MIN_DELTA`
+5. RVOL ≥ `BACKTEST_RVOL_MIN` (1.2× daily close proxy)
+6. Day strength: close ≥ open × (1 + `DAY_STRENGTH_OPEN_PCT`) AND close in upper half of range
 
-Do NOT revert any of these formulas independently — they must match `_score_candidate` exactly.
+**Scoring** (`_daily_scan` composite score, 0-100, gate = `SCAN_MIN_SCORE=20`):
+- Alligator alignment: `min(30, (fast_aligned - slow_aligned) / slow_aligned / 0.06 * 30)` — wider SMMA mouth = stronger trend
+- RVOL: `min(25, (rvol - rvol_min) / (5.0 - rvol_min) * 25)` — linear scale to 5× cap
+- RSI delta: `min(25, max(0, rsi_delta / 5.0 * 25))` — mirrors live `_score_candidate`
+- Liquidity: dollar-vol half (0-10); spread half unavailable in daily OHLCV
+
+**Exit rules** (mirrors `check_velocity_exits` in live engine):
+- Chandelier trailing stop: `peak_high - ATR_CHAND × CHANDELIER_MULT` (fixed dollar distance = Alpaca `trail_price`)
+- Hard stop: `entry × (1 - HARD_STOP_PCT)`
+- Break-even floor: once profit ≥ `BREAK_EVEN_PCT`, stop ≥ entry
+- Alligator reversal: both fast+med SMMA cross below slow at day-end → exit at next-day open
+- **No velocity time-exit, no forced Friday close** — these were removed in May 2026 to match the live engine
+
+**Offset-adjusted SMMA** computed in `_apply_indicators`:
+```python
+df['SMMA_FAST_ALIGNED'] = df['SMMA_FAST'].shift(ALLIGATOR_FAST_OFFSET)   # 3 bars
+df['SMMA_MED_ALIGNED']  = df['SMMA_MED'].shift(ALLIGATOR_MED_OFFSET)     # 5 bars
+df['SMMA_SLOW_ALIGNED'] = df['SMMA_SLOW'].shift(ALLIGATOR_SLOW_OFFSET)   # 8 bars
+```
+`apply_all()` already produces `SMMA_FAST/MED/SLOW`; `_apply_indicators` only adds the offsets.
 
 ### Minimum Composite Score Gate (`SCAN_MIN_SCORE`)
 
 After `_score_candidate` runs, the engine skips any candidate whose score is below
-`SCAN_MIN_SCORE = 30.0` (out of 100). This prevents low-conviction entries that pass all
-12 binary rules but score weakly on trend strength, RVOL quality, and RSI momentum. The
-gate is applied in `run_cycle` before appending to `signals`:
-
-```python
-score = self._score_candidate(ctx)
-if score < SCAN_MIN_SCORE:
-    logger.debug(f"SCAN {sym}: SKIP — score={score:.1f} < min {SCAN_MIN_SCORE:.0f}")
-    continue
-signals.append((score, sym, ctx))
-```
+`SCAN_MIN_SCORE = 20.0` (out of 100). The gate is applied in `run_cycle` before appending to
+`signals`, and in `_daily_scan` before appending to `scored`.
 
 `SCAN_MIN_SCORE` is defined in `src/config.py`. Do NOT hardcode the threshold inline.
 
 ### Backtest Constants Must Match Config (No Hardcoded Threshold Values)
 
-`_entry_signal` in `backtest/strategy.py` must reference config constants:
+`_entry_signal` in `backtest/strategy.py` must reference config constants — never hardcode
+values that exist in `src/config.py`. If threshold values change in config, both live and
+backtest filters change automatically. Hardcoding creates silent divergence.
 
-- `adx_val > ADX_THRESHOLD` (not `adx_val > 20`)
-- `h200_val * HIGH200_MIN_PCT` (not `h200_val * 0.85`)
+## Strategy Summary (Alligator Swing — 6 Intraday Rules)
+**Entry** (6 intraday cycle rules via `src/rules.py CYCLE_RULES`):
 
-These constants are imported from `src.config`. If threshold values are changed in config,
-both live and backtest filters change automatically. Hardcoding creates silent divergence.
-Do NOT hardcode numeric thresholds that have named constants in `src/config.py`.
+- Spread ≤ 0.5% bid-ask (`check_spread`)
+- Volume ≥ `SCAN_MIN_VOLUME` 20-day avg shares (`check_volume`, 2× on Fridays)
+- Alligator bullish: offset-adjusted SMMA fast > slow AND med > slow, fresh crossover within `ALLIGATOR_CROSS_LOOKBACK` bars (`check_alligator_bullish`)
+- RSI(14) ≥ 50 AND RSI rising ≥ `RSI_MIN_DELTA` pts (`check_rsi_trend`)
+- RVOL ≥ `RVOL_MIN` (1.2×) intraday (`check_rvol`)
+- Day strength: live price ≥ today's open × (1 + `DAY_STRENGTH_OPEN_PCT` 0.5%) (`check_day_strength`)
 
-## Strategy Summary (12-Rule Filter)
-**Entry** (11 stock rules + 1 market regime):
+Plus 1 permanent daily rule:
+- Dollar volume: 20-day avg ≥ `SCAN_MIN_DOLLAR_VOL` $5M (`check_dollar_vol`, 2× on Fridays)
 
-- SPY uptrend (SPY close > SMA50 > SMA200 **AND** SMA200 slope > 0 over last 5 days)
-- price > MA50 > MA200 with MA50/MA200 separation ≥ 3%
-- ADX(14) > 20 — confirms trend has real momentum
-- Close ≥ 85% of 200-day rolling high — leadership/momentum
-- RVOL ≥ 2.5× intraday (empirical U-shaped time-of-day normalizer)
-- Bid-ask spread ≤ 0.5%
-- 20-day avg dollar volume ≥ threshold (Friday: 2× threshold)
-- ORB breakout: live price > 15-min opening range high
-- Gap limit: price ≤ ORB high × 1.10 (no chasing)
-- RSI(14) > 55 AND RSI rising ≥ 1 point (acceleration, not exhaustion)
+**Exit**: Chandelier trailing stop (ATR14 × 2.5, dollar-distance = Alpaca `trail_price`) +
+5% hard stop + break-even floor at 6% profit (programmatically enforced) +
+Alligator reversal exit (both fast+med SMMA cross below slow)
 
-**Exit**: Chandelier trailing stop (ATR22 × 2.0) + 7% hard stop + break-even floor
-at 4% profit (programmatically enforced) + velocity exit (< 5% profit after 2 trading
-days) + Friday close rule
-
-**Universe**: NASDAQ Global Select + NYSE, price > $20, avg dollar vol > $100M/day
+**Universe**: NASDAQ Global Select + NYSE, price > $1, 20-day avg dollar vol > $5M
 
 ## Risk Parameters
 - 2% equity risk per trade (ATR-based position sizing)
@@ -235,7 +238,7 @@ venv/bin/python -m pytest tests/ -q              # all tests
 venv/bin/python -m pytest tests/test_engine.py   # engine only
 ```
 
-All 352+ tests should pass. If any fail, fix before proceeding.
+All 374+ tests should pass. If any fail, fix before proceeding.
 
 ## Key Files to Know
 
@@ -849,6 +852,43 @@ on every scan cycle, silently dropping the entire most-actives half of the candi
 Fix: changed `get_most_actives` function signature from `data_client: StockHistoricalDataClient`
 to `screener_client: ScreenerClient`, and the call from `data_client.get_stock_most_actives`
 to `screener_client.get_most_actives`. Updated `get_candidates` to pass `screener_client`.
+
+## Fixed Bugs (Session 30 — June 2026)
+
+### 90. Backtest Strategy Mismatched Live Engine (Donchian Bounce vs Alligator Swing)
+
+`backtest/strategy.py` implemented a **Donchian Bounce** mean-reversion strategy while the
+live engine (`src/engine.py` + `src/rules.py`) runs **Alligator Swing** (Bill Williams).
+Entry rules were completely different (proximity to 2-day low + RSI oversold lookback vs.
+SMMA crossover + day strength). Exit rules differed (velocity time-exit + Friday forced-close
+vs. Alligator reversal). Scoring used Donchian proximity component instead of Alligator SMMA
+spread. Backtest results were for the wrong strategy and cannot be compared to live performance.
+
+Fix: Full rewrite of `backtest/strategy.py`:
+- Entry: Alligator bullish alignment (offset-adj SMMA fast/med > slow), fresh crossover within
+  `ALLIGATOR_CROSS_LOOKBACK`, RSI ≥ 50 + delta ≥ `RSI_MIN_DELTA`, RVOL ≥ 1.2×,
+  day-strength (close ≥ open × 1.005 AND close in upper half of range)
+- Scoring: AlligatorAlignment(30) + RVOL(25) + RSIDelta(25) + Liquidity(20)
+- Exit: Chandelier trail + hard stop + break-even floor + Alligator reversal (both
+  fast+med SMMA cross below slow → exit next-day open); velocity time-exit and Friday
+  forced-close removed
+- Config: removed `PROFIT_MIN_THRESHOLD`, `FRIDAY_MIN_PROFIT_PCT`, `DONCHIAN_PERIOD`,
+  `BACKTEST_DONCHIAN_TOL_PCT`, `RSI_OVERSOLD_*`, `RSI_BOUNCE_MAX`; added `ALLIGATOR_*`,
+  `DAY_STRENGTH_OPEN_PCT`, `SCORE_ALLIGATOR_MAX`
+- `_apply_indicators` now adds offset-shifted SMMA aligned columns and `ALLIGATOR_CROSSED`
+  boolean after `apply_all()` (which already computes raw SMMA_FAST/MED/SLOW)
+- `_apply_rsi_lookback()` method deleted (not needed without RSI oversold lookback)
+- `run_backtest.py` updated: removed Donchian/velocity/Friday CLI args; added Alligator-
+  aligned args
+
+`tests/test_backtest.py` updated to match:
+- `_make_df`: open=close×0.99 (day-strength), add SMMA aligned + ALLIGATOR_CROSSED columns
+- `TestEntrySignal`: 16 tests for Alligator rules (was Donchian bounce)
+- `TestDailyScanGainFilter` → Alligator crossover coarse filter tests
+- `TestBacktestFridayClose` → `TestBacktestAlligatorExit`: confirm no friday_close exits,
+  alligator_exits stat correctly tracked
+
+374 tests pass.
 
 ## Survivorship Bias Warning (Backtest)
 The backtest universe is current NASDAQ/NYSE listings. Bankrupt/delisted tickers from the
