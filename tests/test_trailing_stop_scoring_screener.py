@@ -1256,7 +1256,7 @@ class TestExitOrders:
         """Profitable position below tier thresholds must not trigger any sell."""
         tc = _mock_trading_client()
         entry_price  = 100.0
-        # 1.5% profit — below ALL tier thresholds (tier 1 fires at 5%)
+        # 1.5% profit — state has no stop_dist so R-multiple tiers cannot fire
         profit_price = entry_price * 1.015
 
         engine = _make_engine(trading_client=tc)
@@ -2347,7 +2347,12 @@ class TestDashboardUnitPrice:
 # Tiered exit strategy
 # ─────────────────────────────────────────────────────────────────────────────
 class TestTieredExit:
-    """Tests for the two-tier partial profit exit (25% at 5%, 25% at 10%; 50% rides trail)."""
+    """Tests for the two-tier partial profit exit (25% at 0.75R, 25% at 1.25R; 50% rides trail).
+
+    stop_dist in _make_state = entry_price × 0.06 = $6.00 (R = $6.00).
+    Tier 1 threshold: 0.75R = $4.50  → price ≥ $104.50
+    Tier 2 threshold: 1.25R = $7.50  → price ≥ $107.50
+    """
 
     def _make_state(self, price=100.0, qty=10.0, tier_sold=0, original_qty=None):
         tz_ny = pytz.timezone('US/Eastern')
@@ -2359,44 +2364,44 @@ class TestTieredExit:
             'original_qty': original_qty if original_qty is not None else qty,
             'tier_sold':    tier_sold,
             'stop_loss':    price * 0.94,
-            'stop_dist':    price * 0.06,
+            'stop_dist':    price * 0.06,  # R = $6.00 at entry=100
             'peak_price':   price,
             'volume':       0,
             'score':        60.0,
         }
 
-    def test_tier1_fires_at_5pct_profit(self):
-        """At 5% profit, first tier (25% of original qty) is sold."""
+    def test_tier1_fires_at_0_75R_profit(self):
+        """At 0.75R ($4.50) profit, first tier (25% of original qty) is sold."""
         tc = _mock_trading_client()
         engine = _make_engine(trading_client=tc)
         engine.state = {'AAA': self._make_state(price=100.0, qty=10.0)}
-        snap = _make_snapshot(price=106.0)  # 6% profit — above 5% tier
+        snap = _make_snapshot(price=105.0)  # $5.00 profit > 0.75R=$4.50 — above tier 1
         with patch.object(engine, '_fetch_snapshot', return_value=snap), \
              patch.object(engine, 'save_state'), \
              patch.object(tc, 'get_orders', return_value=[]):
             engine.check_velocity_exits()
-        assert tc.submit_order.called, "Tier 1 sell must be submitted at 5% profit"
+        assert tc.submit_order.called, "Tier 1 sell must be submitted at 0.75R profit"
         req = tc.submit_order.call_args[0][0]
         assert isinstance(req, MarketOrderRequest)
         assert req.qty == 2  # floor(10 * 0.25) = 2 shares (rounds down from 2.5)
 
-    def test_tier1_not_fired_below_5pct(self):
-        """At 4% profit, no tier fires (below the 5% threshold)."""
+    def test_tier1_not_fired_below_0_75R(self):
+        """At $4.00 profit (< 0.75R=$4.50), no tier fires."""
         tc = _mock_trading_client()
         engine = _make_engine(trading_client=tc)
         engine.state = {'BBB': self._make_state(price=100.0, qty=10.0)}
-        snap = _make_snapshot(price=104.0)  # 4% profit
+        snap = _make_snapshot(price=104.0)  # $4.00 profit < 0.75R=$4.50
         with patch.object(engine, '_fetch_snapshot', return_value=snap), \
              patch.object(engine, 'save_state'):
             engine.check_velocity_exits()
-        assert not tc.submit_order.called, "No tier fires below 5% profit threshold"
+        assert not tc.submit_order.called, "No tier fires below 0.75R profit threshold"
 
     def test_tier2_fires_when_tier1_already_sold(self):
-        """At 10% profit with tier_sold=1, second tier fires."""
+        """At 1.25R ($7.50) profit with tier_sold=1, second tier fires."""
         tc = _mock_trading_client()
         engine = _make_engine(trading_client=tc)
         engine.state = {'CCC': self._make_state(price=100.0, qty=8.0, tier_sold=1, original_qty=10.0)}
-        snap = _make_snapshot(price=111.0)  # 11% profit — above 10% tier
+        snap = _make_snapshot(price=108.0)  # $8.00 profit > 1.25R=$7.50 — above tier 2
         with patch.object(engine, '_fetch_snapshot', return_value=snap), \
              patch.object(engine, 'save_state'), \
              patch.object(tc, 'get_orders', return_value=[]):
@@ -2410,7 +2415,7 @@ class TestTieredExit:
         tc = _mock_trading_client()
         engine = _make_engine(trading_client=tc)
         engine.state = {'DDD': self._make_state(price=100.0, qty=5.0, tier_sold=2, original_qty=10.0)}
-        snap = _make_snapshot(price=130.0)  # 30% profit — above all thresholds
+        snap = _make_snapshot(price=130.0)  # well above both R thresholds
         with patch.object(engine, '_fetch_snapshot', return_value=snap), \
              patch.object(engine, 'save_state'):
             engine.check_velocity_exits()
@@ -2424,7 +2429,7 @@ class TestTieredExit:
         tc = _mock_trading_client()
         engine = _make_engine(trading_client=tc)
         engine.state = {'EEE': self._make_state(price=100.0, qty=6.0)}
-        snap = _make_snapshot(price=106.0)  # 6% → above 5% tier 1
+        snap = _make_snapshot(price=105.0)  # $5.00 profit > 0.75R=$4.50 — above tier 1
         with patch.object(engine, '_fetch_snapshot', return_value=snap), \
              patch.object(engine, 'save_state'), \
              patch.object(tc, 'get_orders', return_value=[]):
@@ -2438,7 +2443,7 @@ class TestTieredExit:
         tc = _mock_trading_client()
         engine = _make_engine(trading_client=tc)
         engine.state = {'FFF': self._make_state(price=100.0, qty=3.0)}
-        snap = _make_snapshot(price=106.0)  # 6% profit — above 5% tier
+        snap = _make_snapshot(price=105.0)  # above 0.75R tier but qty rounds to 0
         with patch.object(engine, '_fetch_snapshot', return_value=snap), \
              patch.object(engine, 'save_state'):
             engine.check_velocity_exits()

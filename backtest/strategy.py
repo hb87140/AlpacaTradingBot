@@ -82,7 +82,7 @@ from src.config import (
     ALLIGATOR_FAST_OFFSET, ALLIGATOR_MED_OFFSET, ALLIGATOR_SLOW_OFFSET,
     ALLIGATOR_CROSS_LOOKBACK, DAY_STRENGTH_OPEN_PCT,
     FRIDAY_CLOSE_HOUR,
-    TIER_EXIT_PROFITS, TIER_EXIT_PCT,
+    TIER_EXIT_R_MULTIPLES, TIER_EXIT_PCT,
 )
 from src.indicators import apply_all
 
@@ -898,14 +898,17 @@ class VelocityBacktest:
 
                 # Tiered profit exits — mirror live engine logic.
                 # Execute all triggered tiers using today's close as exit price.
+                # Thresholds are R-multiples of the chandelier stop distance set at entry,
+                # so they scale with volatility rather than using fixed percentage targets.
                 if not exit_reason:
                     tier_sold_count = t.__dict__.get('_tier_sold', 0)
                     original_qty    = t.__dict__.get('_original_qty', t.qty)
                     _today_idx_t    = _date_to_idx.get(today, -1)
                     close_price     = float(row['close'])
-                    while tier_sold_count < len(TIER_EXIT_PROFITS):
-                        tier_threshold = TIER_EXIT_PROFITS[tier_sold_count]
-                        if (close_price - t.entry_price) / t.entry_price < tier_threshold:
+                    _chand_dist_bt  = t.__dict__.get('_chand_dist', 0)
+                    while tier_sold_count < len(TIER_EXIT_R_MULTIPLES):
+                        tier_threshold = TIER_EXIT_R_MULTIPLES[tier_sold_count]
+                        if _chand_dist_bt <= 0 or (close_price - t.entry_price) < tier_threshold * _chand_dist_bt:
                             break  # threshold not yet reached
                         tier_qty = int(original_qty * TIER_EXIT_PCT)  # floor
                         if tier_qty < 1 or tier_qty > t.qty:

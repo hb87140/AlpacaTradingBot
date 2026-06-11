@@ -110,9 +110,11 @@ SCAN_MIN_SCORE      = 50.0             # minimum composite score (0-100) before 
 
 # ── Tiered profit exits ───────────────────────────────────────────────────────
 # At each tier the engine sells TIER_EXIT_PCT of the ORIGINAL entry qty (floor).
-# Remaining shares (~40%) ride the chandelier trailing stop to maximise winners.
-TIER_EXIT_PROFITS   = (0.05, 0.10)  # 5 %, 10 % profit thresholds
-TIER_EXIT_PCT       = 0.25          # fraction of original qty to sell at each tier (25 %)
+# Thresholds are R-multiples of the initial dollar stop distance (ATR × CHANDELIER_MULT),
+# so exits scale with volatility rather than using fixed percentage targets.
+# Remaining 50 % rides the chandelier trailing stop to maximise winners.
+TIER_EXIT_R_MULTIPLES = (0.75, 1.25)  # 0.75R and 1.25R ATR-based profit thresholds
+TIER_EXIT_PCT         = 0.25          # fraction of original qty to sell at each tier (25 %)
 
 # ── Ticker blocklist ─────────────────────────────────────────────────────────
 TICKER_BLOCKLIST: set = {

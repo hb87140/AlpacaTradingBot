@@ -56,7 +56,7 @@ from src.config import (
     ALLIGATOR_FAST_OFFSET, ALLIGATOR_MED_OFFSET, ALLIGATOR_SLOW_OFFSET,
     ALLIGATOR_CROSS_LOOKBACK,
     SPY_EMA_PERIOD, SPY_REGIME_SIZE_CUT, SPY_REGIME_RVOL_MULT, SPY_FILTER_ENABLED,
-    TIER_EXIT_PROFITS, TIER_EXIT_PCT,
+    TIER_EXIT_R_MULTIPLES, TIER_EXIT_PCT,
 )
 from src.indicators import apply_all, compute_ma
 from src.rules import (
@@ -1394,8 +1394,8 @@ class VelocityEngine:
             return False
 
         logger.info(
-            f"TIER EXIT {symbol}: sold {tier_qty} shares at tier {tier_num}/3 "
-            f"({TIER_EXIT_PROFITS[tier_num - 1] * 100:.0f}% profit threshold)"
+            f"TIER EXIT {symbol}: sold {tier_qty} shares at tier {tier_num}/2 "
+            f"({TIER_EXIT_R_MULTIPLES[tier_num - 1]:.2f}R ATR threshold)"
         )
 
         # Step 3: update state — qty is reconciled by _sync_positions next cycle
@@ -1482,13 +1482,16 @@ class VelocityEngine:
                 self.liquidate(sym)
                 continue
 
-            # 3. Tiered profit exits — sell 20% at 2 %, 4 %, 6 % profit thresholds.
-            # Remaining ~40 % rides the chandelier trailing stop.
+            # 3. Tiered profit exits — sell 25% at 0.75R and 1.25R ATR multiples.
+            # R = stop_dist (chandelier ATR distance set at entry), so thresholds scale
+            # with volatility rather than using fixed percentage targets.
+            # Remaining 50% rides the chandelier trailing stop.
             tier_sold = int(data.get('tier_sold', 0))
-            if tier_sold < len(TIER_EXIT_PROFITS):
-                tier_threshold = TIER_EXIT_PROFITS[tier_sold]
-                profit_pct = (cur - entry_price) / entry_price
-                if profit_pct >= tier_threshold:
+            if tier_sold < len(TIER_EXIT_R_MULTIPLES):
+                tier_threshold = TIER_EXIT_R_MULTIPLES[tier_sold]
+                stop_dist = float(data.get('stop_dist', 0))
+                profit_pts = cur - entry_price
+                if stop_dist > 0 and profit_pts >= tier_threshold * stop_dist:
                     original_qty = float(data.get('original_qty', 0) or 0)
                     if original_qty <= 0:
                         original_qty = float(data.get('qty', 0))
@@ -1496,9 +1499,9 @@ class VelocityEngine:
                     current_qty = int(float(data.get('qty', 0)))
                     if tier_qty >= 1 and tier_qty <= current_qty:
                         logger.info(
-                            f"TIER EXIT {sym}: profit={profit_pct*100:.1f}% ≥ "
-                            f"{tier_threshold*100:.0f}% — selling {tier_qty}/{current_qty} "
-                            f"shares (tier {tier_sold+1}/3)"
+                            f"TIER EXIT {sym}: profit=${profit_pts:.2f} ≥ {tier_threshold:.2f}R "
+                            f"(R=${stop_dist:.2f}) — selling {tier_qty}/{current_qty} "
+                            f"shares (tier {tier_sold+1}/2)"
                         )
                         self._execute_tier_sell(sym, tier_qty, tier_sold + 1)
                         prefetched[sym] = cur

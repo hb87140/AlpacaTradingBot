@@ -77,7 +77,7 @@ tests/                 ← pytest suite (380+ tests)
 
 **Exit** — first condition to fire wins:
 
-1. **Tiered profit exits** — sell 25% of original qty at 5% profit, another 25% at 10% profit (floor qty).  Remaining 50% rides the chandelier trailing stop.
+1. **Tiered profit exits** — sell 25% of original qty at 0.75R profit, another 25% at 1.25R profit (R = chandelier stop distance = ATR(14) × 2.5, set at entry). Floor qty per tier. Remaining 50% rides the chandelier trailing stop. Thresholds scale with volatility — a wider stop requires a larger absolute move before locking in gains.
 2. **Chandelier trailing stop** — ATR(14) × 2.5 dollar distance; placed as Alpaca `TrailingStopOrderRequest(trail_price=...)`. GTC order, active until reversal or stop.
 3. **Hard stop** — 5% drawdown from entry (`HARD_STOP_PCT`). Software market sell.
 4. **Break-even floor** — once profit ≥ 6% (`BREAK_EVEN_PCT`), stop rises to entry; software exit fires if price retraces back to entry.
@@ -112,18 +112,27 @@ Import `MAX_POSITIONS_CAP` and `MIN_BUCKET_SIZE` from config — never `MAX_POSI
 2. **Programmatic exit** (`check_velocity_exits`): if price retraces to/below entry after
    peak hit break-even, `liquidate()` fires immediately.
 
-### Tiered Exit: Original Qty Is the Reference
+### Tiered Exit: Original Qty Is the Reference; Thresholds Are R-Multiples
 
 The 25%/25%/50% tiers are computed from **`original_qty`** (saved at fill), not from the
 current remaining qty. This prevents each tier shrinking as shares are sold. `tier_sold` in
-state tracks how many tiers (0-2) have completed. After a tier sell:
+state tracks how many tiers (0-2) have completed.
+
+Tier thresholds are **R-multiples of `stop_dist`** (the chandelier ATR distance set at entry),
+not fixed percentages. Tier 1 fires when `price - entry ≥ 0.75 × stop_dist`; Tier 2 at
+`price - entry ≥ 1.25 × stop_dist`. This makes exits scale with volatility: a volatile stock
+with a wider stop requires a larger absolute move before locking in gains. Config:
+`TIER_EXIT_R_MULTIPLES = (0.75, 1.25)`, `TIER_EXIT_PCT = 0.25`.
+
+After a tier sell:
 
 - All open orders are cancelled (Alpaca blocks sells while TRAIL holds shares).
 - `stop_order_id` is cleared from state so `_has_unprotected` fires.
 - `_audit_stop_orders` re-places the TRAIL for the reduced qty on the next cycle.
 
 Tier qty = `floor(original_qty × TIER_EXIT_PCT)`. If floor rounds to 0 (e.g. 1-share position),
-the tier is skipped — no partial sell of 0 shares.
+the tier is skipped — no partial sell of 0 shares. If `stop_dist` is 0 (not yet set), tier
+check is skipped entirely.
 
 ### Chandelier Stop: Dollar Distance (Matches Alpaca `trail_price`)
 
