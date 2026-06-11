@@ -77,7 +77,7 @@ tests/                 ← pytest suite (380+ tests)
 
 **Exit** — first condition to fire wins:
 
-1. **Tiered profit exits** — sell 20% of original qty at 2%, 4%, 6% profit (floor qty).  Remaining ~40% rides the chandelier trailing stop.
+1. **Tiered profit exits** — sell 25% of original qty at 5% profit, another 25% at 10% profit (floor qty).  Remaining 50% rides the chandelier trailing stop.
 2. **Chandelier trailing stop** — ATR(14) × 2.5 dollar distance; placed as Alpaca `TrailingStopOrderRequest(trail_price=...)`. GTC order, active until reversal or stop.
 3. **Hard stop** — 5% drawdown from entry (`HARD_STOP_PCT`). Software market sell.
 4. **Break-even floor** — once profit ≥ 6% (`BREAK_EVEN_PCT`), stop rises to entry; software exit fires if price retraces back to entry.
@@ -114,9 +114,9 @@ Import `MAX_POSITIONS_CAP` and `MIN_BUCKET_SIZE` from config — never `MAX_POSI
 
 ### Tiered Exit: Original Qty Is the Reference
 
-The 20%/20%/20%/40% tiers are computed from **`original_qty`** (saved at fill), not from the
+The 25%/25%/50% tiers are computed from **`original_qty`** (saved at fill), not from the
 current remaining qty. This prevents each tier shrinking as shares are sold. `tier_sold` in
-state tracks how many tiers (0-3) have completed. After a tier sell:
+state tracks how many tiers (0-2) have completed. After a tier sell:
 
 - All open orders are cancelled (Alpaca blocks sells while TRAIL holds shares).
 - `stop_order_id` is cleared from state so `_has_unprotected` fires.
