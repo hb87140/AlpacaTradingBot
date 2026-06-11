@@ -185,6 +185,9 @@ def get_state():
         unreal     = round((cur - ep) * qty, 2)
         unreal_pct = round((cur - ep) / ep * 100, 2) if ep else 0.0
         total_unrealized += unreal
+        peak        = float(d.get("peak_price", ep))
+        stop_dist_v = float(d.get("stop_dist", 0))
+        chand_stop  = round(peak - stop_dist_v, 2) if stop_dist_v > 0 else None
         positions.append({
             "symbol":            sym,
             "entry_price":       ep,
@@ -196,6 +199,9 @@ def get_state():
             "unrealized_pct":    unreal_pct,
             "stop_loss":         sl,
             "effective_stop":    effective_sl,
+            "peak_price":        round(peak, 4),
+            "stop_dist":         round(stop_dist_v, 4),
+            "chandelier_stop":   chand_stop,
             "volume":            vol,
             "hold_hours":        round(hold_h, 2),
             "hold_trading_days": hold_trading_days,
@@ -661,6 +667,7 @@ footer a:hover{color:var(--text2);}
           <th>COST BASIS</th>
           <th>UNREALIZED P&amp;L</th>
           <th>STOP LOSS</th>
+          <th>TRAIL STOP</th>
           <th>RISK TO STOP</th>
           <th>HOLD</th>
           <th>STATUS</th>
@@ -993,6 +1000,11 @@ function render(d) {
     const scCol = p.score!=null ? (p.score>=70?'var(--green)':p.score>=45?'var(--yellow)':'var(--red)') : 'var(--text3)';
     const scW   = p.score!=null ? p.score.toFixed(0) : 0;
 
+    // chandelier trailing stop: peak_price − stop_dist (raw ATR-based, no break-even floor)
+    const chanStop    = p.chandelier_stop != null ? p.chandelier_stop : null;
+    const chanPct     = chanStop!=null && p.current_price>0 ? (p.current_price-chanStop)/p.current_price*100 : null;
+    const peakPx      = p.peak_price ?? p.entry_price;
+
     // risk
     const riskUsd = p.stop_loss>0 ? (p.current_price-p.stop_loss)*p.qty : 0;
     const riskPct = p.stop_loss>0&&p.current_price>0 ? (p.current_price-p.stop_loss)/p.current_price*100 : 0;
@@ -1052,6 +1064,15 @@ function render(d) {
         </div>
       </td>
       <td><span class="num r" style="font-weight:700">${$f(p.stop_loss)}</span></td>
+      <td>
+        <div class="risk-cell">
+          ${chanStop!=null
+            ? `<span class="num r" style="font-weight:700">${$f(chanStop)}</span>
+               <span class="risk-dist d" style="font-size:10px">peak ${$f(peakPx)}</span>
+               <span class="risk-dist pos" style="font-size:10px">${chanPct.toFixed(2)}% away</span>`
+            : `<span class="d" style="font-size:10px">—</span>`}
+        </div>
+      </td>
       <td>
         <div class="risk-cell">
           <span class="num ${rCls}" style="font-weight:700">-${$f(riskUsd)}</span>
