@@ -454,7 +454,7 @@ class VelocityBacktest:
     def _save_ind_cache(self) -> None:
         """Save only the columns the simulation reads (_IND_CACHE_COLS) to the
         level-2 cache using joblib (numpy-native format, much faster than pickle).
-        Excludes unused columns (MA50, MA200, ADX, HIGH200, DONCH_HIGH, DONCH_LOWER)."""
+        Excludes unused columns (MA50, MA200) that are not needed for simulation."""
         path = self._ind_cache_path()
         try:
             snapshot = {}
@@ -737,7 +737,6 @@ class VelocityBacktest:
     def _prepare_optimizer_signals(self) -> None:
         """Lazily add EMA20 column to cached DataFrames for the optimizer.
 
-        ADX and HIGH200 are now computed by apply_all() and already present.
         EMA20 is an optimizer-only candidate signal (not in production apply_all).
         Subsequent calls are no-ops (column already present).
         """

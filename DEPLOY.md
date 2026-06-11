@@ -4,7 +4,8 @@ Both the trading engine and the dashboard run in a **single service** on the sam
 container — they share the filesystem, so no database or message queue is needed.
 
 The free URL you get looks like:
-- Render:  `https://velocity-trading-bot.onrender.com`
+
+- Render:  `https://alpacatradingbot-pe9m.onrender.com`
 - Railway: `https://velocity-trading-bot.up.railway.app`
 
 ---

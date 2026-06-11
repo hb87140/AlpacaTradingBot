@@ -122,13 +122,13 @@ def _run_cycle_patched(engine, fake_now, ctx=None, symbols=None,
 # ── Expert filter (entry conditions) ─────────────────────────────────────────
 class TestExpertFilter:
     """
-    Donchian bounce entry rules exercised via run_cycle(). Each test mutates
+    Alligator Swing entry rules exercised via run_cycle(). Each test mutates
     exactly one field of the baseline ctx to verify the engine blocks that
     specific failing condition.
 
-    Base ctx: price=100 (0.2% above donchian_lower=99.8), rsi=52/prev=45 (Δ=7.0),
-              rsi_history has values below oversold threshold=50, price 1% above open,
-              in upper 86% of intraday range, rvol=3.0, spread=0.2%, dol_vol=300M.
+    Base ctx: price=100, Alligator bullish (5% fast/slow spread, fresh crossover),
+              rsi=52/prev=45 (Δ=7.0), price 1% above open, in upper 86% of intraday
+              range, rvol=3.0, spread=0.2%, dol_vol=300M.
     """
 
     def _base_ctx(self):
@@ -155,9 +155,7 @@ class TestExpertFilter:
             'close':           99.5,
             'orb_high':        95.0,
             'ma50':           105.0,   'ma200':          90.0,
-            'adx':             25.0,   'high200':       110.0,
             'sma200_slope':     0.1,
-            'donchian_lower':  99.8,   'donchian_upper': 110.0,
             'price_fetched_at': _TZ_NY.localize(datetime(2024, 6, 5, 10, 30)),
         }
 
@@ -814,7 +812,6 @@ class TestDailyScanSkip:
         # dollar_vol_20d=4M < SCAN_MIN_DOLLAR_VOL=5M → PERMANENT_DAY_RULES fail
         ctx = {
             'live_price': 100.0,
-            'donchian_lower': 99.8, 'donchian_upper': 110.0,
             'rsi': 38.0, 'rsi_prev': 35.0,
             'rsi_history': [28.0, 30.0, 32.0, 35.0, 38.0],
             'intraday_open': 99.0, 'intraday_high': 100.5, 'intraday_low': 97.0,
@@ -867,7 +864,6 @@ class TestDailyScanSkip:
         # dollar_vol passes (permanent check) but rvol=0 fails (cycle check)
         ctx = {
             'live_price': 100.0,
-            'donchian_lower': 99.8, 'donchian_upper': 110.0,
             'rsi': 38.0, 'rsi_prev': 35.0,
             'rsi_history': [28.0, 30.0, 32.0, 35.0, 38.0],
             'intraday_open': 99.0, 'intraday_high': 100.5, 'intraday_low': 97.0,

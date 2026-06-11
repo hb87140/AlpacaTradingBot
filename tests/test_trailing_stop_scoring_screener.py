@@ -104,17 +104,12 @@ def _ctx(price=100.0, orb=95.0, ma50=105.0, ma200=90.0,
          sma200_slope=0.1,
          atr_chandelier=None,
          avg_20d_vol=5_000_000,
-         adx=25.0, high200=None,
-         donchian_lower=None, donchian_upper=None,
          intraday_open=None, intraday_high=None, intraday_low=None,
          rsi_history=None,
          smma_fast=None, smma_med=None, smma_slow=None,
          alligator_crossed=True,
          analyst_buy=0, analyst_hold=0, analyst_sell=0):
     """Build a get_technical_context()-style dict with all production-rule fields."""
-    h200 = high200 if high200 is not None else round(price * 1.1, 4)
-    dl = donchian_lower if donchian_lower is not None else round(price * 0.998, 4)
-    du = donchian_upper if donchian_upper is not None else round(price * 1.10, 4)
     # Day-strength defaults: price 1.2% above open, in upper 86% of intraday range
     io = intraday_open if intraday_open is not None else round(price * 0.988, 4)
     ih = intraday_high if intraday_high is not None else round(price * 1.005, 4)
@@ -134,8 +129,6 @@ def _ctx(price=100.0, orb=95.0, ma50=105.0, ma200=90.0,
         'atr':               atr,
         'atr_chandelier':    atr_chandelier if atr_chandelier is not None else atr,
         'sma200_slope':      sma200_slope,
-        'adx':               adx,
-        'high200':           h200,
         'rvol':              rvol,
         'spread_pct':        spread_pct,
         'close':             price - 0.5,
@@ -143,8 +136,6 @@ def _ctx(price=100.0, orb=95.0, ma50=105.0, ma200=90.0,
         'volume':            5_000_000,
         'dollar_vol_20d':    dollar_vol,
         'avg_20d_vol':       avg_20d_vol,
-        'donchian_lower':    dl,
-        'donchian_upper':    du,
         'intraday_open':     io,
         'intraday_high':     ih,
         'intraday_low':      il,
@@ -794,7 +785,7 @@ class TestScoringMinScore:
     # ctx where price > ma50 > ma200 (all 12 rules pass with default equity/cash)
     _ENTRY_CTX_KWARGS = dict(price=100.0, orb=95.0, ma50=97.0, ma200=85.0,
                              rsi=52.0, rsi_prev=37.0, atr=3.0,
-                             rvol=3.5, spread_pct=0.002, adx=25.0)
+                             rvol=3.5, spread_pct=0.002)
 
     def test_signal_below_min_score_not_entered(self):
         """A ctx that scores below SCAN_MIN_SCORE must not produce a BUY order."""
@@ -1262,11 +1253,10 @@ class TestExitOrders:
         assert not tc.submit_order.called, "No sell must be placed without Alligator reversal signal"
 
     def test_velocity_exit_does_not_trigger_when_profitable(self):
-        """Position older than HOLD_TRADING_BARS but profit ≥ threshold → kept."""
-        from src.config import PROFIT_MIN_THRESHOLD
+        """Profitable position held for multiple days must not be force-liquidated."""
         tc = _mock_trading_client()
         entry_price  = 100.0
-        profit_price = entry_price * (1 + PROFIT_MIN_THRESHOLD + 0.01)
+        profit_price = entry_price * 1.05  # 5% profit — clearly above any threshold
 
         engine = _make_engine(trading_client=tc)
         engine.state = {'WINNER': self._make_state_entry(price=entry_price, days_ago=14)}
@@ -2063,14 +2053,15 @@ class TestFridayClose:
         assert 'FRI' in engine.state, "Losing position must be held on Friday — Alligator/stop handles exit"
         assert not tc.submit_order.called, "No forced close on Friday — trailing stop is the weekend guard"
 
-    def test_friday_close_does_not_trigger_above_threshold(self):
-        """Profit above FRIDAY_MIN_PROFIT_PCT on Friday must keep position open."""
-        from src.config import FRIDAY_CLOSE_HOUR, FRIDAY_MIN_PROFIT_PCT
+    def test_friday_no_forced_close_after_hour(self):
+        """Positions must NOT be force-closed on Friday after FRIDAY_CLOSE_HOUR.
+        Exits are handled by the chandelier stop and Alligator reversal only."""
+        from src.config import FRIDAY_CLOSE_HOUR
         tc = _mock_trading_client()
         engine = _make_engine(trading_client=tc)
         tz_ny = pytz.timezone('US/Eastern')
         entry = 100.0
-        cur   = round(entry * (1 + FRIDAY_MIN_PROFIT_PCT + 0.01), 2)
+        cur   = round(entry * 1.01, 2)  # 1% profit — no forced close in Alligator Swing
         engine.state = {'FRI': self._state_entry(entry, cur, tz_ny)}
 
         friday_after = tz_ny.localize(datetime(2024, 6, 7, FRIDAY_CLOSE_HOUR + 1, 0))
@@ -2083,17 +2074,17 @@ class TestFridayClose:
             mock_dt.fromisoformat     = datetime.fromisoformat
             engine.check_velocity_exits()
 
-        assert 'FRI' in engine.state, "Profitable position must not be closed on Friday"
+        assert 'FRI' in engine.state, "No forced close on Friday — trailing stop is the weekend guard"
         assert not tc.submit_order.called
 
-    def test_friday_close_does_not_trigger_before_close_hour(self):
-        """Before FRIDAY_CLOSE_HOUR, Friday close rule must be inactive."""
-        from src.config import FRIDAY_CLOSE_HOUR, FRIDAY_MIN_PROFIT_PCT
+    def test_friday_no_forced_close_before_hour(self):
+        """Before FRIDAY_CLOSE_HOUR, no Friday-specific exit logic fires."""
+        from src.config import FRIDAY_CLOSE_HOUR
         tc = _mock_trading_client()
         engine = _make_engine(trading_client=tc)
         tz_ny = pytz.timezone('US/Eastern')
         entry = 100.0
-        cur   = round(entry * (1 + FRIDAY_MIN_PROFIT_PCT - 0.01), 2)
+        cur   = round(entry * 0.99, 2)  # slight loss — still no forced close
         engine.state = {'FRI': self._state_entry(entry, cur, tz_ny)}
 
         friday_morning = tz_ny.localize(datetime(2024, 6, 7, FRIDAY_CLOSE_HOUR - 2, 0))
@@ -2106,7 +2097,7 @@ class TestFridayClose:
             mock_dt.fromisoformat     = datetime.fromisoformat
             engine.check_velocity_exits()
 
-        assert 'FRI' in engine.state, "Friday close must not trigger before FRIDAY_CLOSE_HOUR"
+        assert 'FRI' in engine.state, "No exit before FRIDAY_CLOSE_HOUR"
         assert not tc.submit_order.called
 
 

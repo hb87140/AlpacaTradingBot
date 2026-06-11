@@ -52,7 +52,6 @@ from src.config import (
     SCAN_MIN_SCORE,
     CONCENTRATION_WARN_PCT, CONCENTRATION_HALT_PCT,
     REPRICE_DRIFT_MAX_PCT,
-    DONCHIAN_PERIOD,
     ALLIGATOR_FAST, ALLIGATOR_MED, ALLIGATOR_SLOW,
     ALLIGATOR_FAST_OFFSET, ALLIGATOR_MED_OFFSET, ALLIGATOR_SLOW_OFFSET,
     ALLIGATOR_CROSS_LOOKBACK,
@@ -1224,7 +1223,6 @@ class VelocityEngine:
         df = apply_all(
             bars_daily, RSI_PERIOD, ATR_PERIOD, MA_FAST, MA_SLOW,
             SMA200_SLOPE_LOOKBACK, CHANDELIER_PERIOD,
-            donchian_period=DONCHIAN_PERIOD,
             alligator_fast=ALLIGATOR_FAST,
             alligator_med=ALLIGATOR_MED,
             alligator_slow=ALLIGATOR_SLOW,
@@ -1299,17 +1297,12 @@ class VelocityEngine:
             # RSI for momentum filter and scoring
             'rsi':               float(df['RSI'].iloc[-1]),
             'rsi_prev':          float(df['RSI'].iloc[-2]),
-            # Donchian bands retained for backtest alignment (not live entry rules)
-            'donchian_upper':    float(df['DONCH_UPPER'].iloc[-1]),
-            'donchian_lower':    float(df['DONCH_LOWER'].iloc[-1]),
             # Retained for stop sizing (not entry rules)
             'ma50':              float(df['MA50'].iloc[-1]),
             'ma200':             float(df['MA200'].iloc[-1]),
             'atr':               float(df['ATR'].iloc[-1]),
             'atr_chandelier':    float(df['ATR_CHAND'].iloc[-1]),
             'sma200_slope':      float(df['SMA200_SLOPE'].iloc[-1]),
-            'adx':               float(df['ADX'].iloc[-1]),
-            'high200':           float(df['HIGH200'].iloc[-1]),
             # Price and liquidity
             'close':             float(df['close'].iloc[-1]),
             'live_price':        live_price,

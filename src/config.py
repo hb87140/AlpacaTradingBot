@@ -38,9 +38,6 @@ CHANDELIER_MULT   = 2.5    # ATR multiplier — stop = peak − ATR(14) × 2.5
 
 # ── Risk rules ────────────────────────────────────────────────────────────────
 VIX_THRESHOLD        = 35
-HOLD_TRADING_BARS    = 1       # backtest only — live engine uses Alligator reversal exit
-PROFIT_MIN_THRESHOLD = 0.04    # backtest only — live engine uses Alligator reversal exit
-GAP_MAX_PCT          = 0.10    # kept for backtest compatibility
 MAX_DAILY_LOSS_PCT   = 0.03    # 3% intraday equity drawdown halts new entries
 RSI_MIN_DELTA        = 0.5     # minimum RSI point rise to confirm momentum turn
 HARD_STOP_PCT        = 0.05    # 5% drawdown from entry → forced market exit
@@ -51,9 +48,6 @@ LIMIT_BUF_MAX_PCT    = 0.015   # maximum limit-price buffer (1.5%)
 CONCENTRATION_WARN_PCT = 0.85  # deployed ≥ 85% of equity → warn, no new entries
 CONCENTRATION_HALT_PCT = 0.95  # deployed ≥ 95% of equity → halt all order activity
 REPRICE_DRIFT_MAX_PCT  = 0.02  # skip entry if price moved >2% since scan snapshot
-MIN_TREND_SEP        = 0.03    # kept for backtest compatibility
-FRIDAY_CLOSE_HOUR    = 15      # ET hour after which new entries are blocked (entry guard, not a forced-close)
-FRIDAY_MIN_PROFIT_PCT = 0.00   # backtest only — live engine does not force-close on Fridays
 
 # ── Session timing ────────────────────────────────────────────────────────────
 ENTRY_START          = (9, 35)   # first valid entry (5 min after open)
@@ -62,31 +56,17 @@ EXIT_END             = (16, 0)   # latest software exit — no market sells afte
 ENTRY_END            = (14, 0)
 VOL_MULT_FRIDAY      = 2.0       # Friday liquidity gate: 2× normal threshold
 PRE_ENTRY_SYNC_TIME  = (9, 44)   # pre-entry position re-sync + stop audit
+FRIDAY_CLOSE_HOUR    = 15        # ET hour after which new entries are blocked on Fridays
 
 # ── Indicators ────────────────────────────────────────────────────────────────
 RSI_PERIOD    = 14
 ATR_PERIOD    = 14
 MA_FAST       = 50
 MA_SLOW       = 200
-RSI_THRESHOLD = 55              # kept for backtest compatibility
-ADX_PERIOD    = 14
-ADX_THRESHOLD = 20              # kept for backtest compatibility
-HIGH200_MIN_PCT = 0.85          # kept for backtest compatibility
-SMA200_SLOPE_LOOKBACK = 5       # kept for backtest compatibility
-
-# Donchian Channel (kept for backtest compatibility — not used in live entry rules)
-DONCHIAN_PERIOD        = 2      # lookback for Donchian Channel bands
-DONCHIAN_FLOOR_TOL_PCT = 0.40   # kept for backtest
-BACKTEST_DONCHIAN_TOL_PCT = 0.40
-
-# RSI oversold lookback (kept for backtest compatibility — not used in live entry rules)
-RSI_OVERSOLD_THRESHOLD = 45
-RSI_OVERSOLD_LOOKBACK  = 50
-RSI_BOUNCE_MAX         = 86
+SMA200_SLOPE_LOOKBACK = 5
 
 # Day-strength gate (confirms price is recovering, not fading)
 DAY_STRENGTH_OPEN_PCT  = 0.005  # price must be ≥ 0.5% above today's open
-BACKTEST_MIN_BODY_PCT  = 0.010  # daily close must be ≥ 1.0% above open (backtest)
 
 # ── Alligator Swing Strategy (Bill Williams) ──────────────────────────────────
 # Three Smoothed Moving Averages with Fibonacci periods and chart offsets.
@@ -100,19 +80,18 @@ ALLIGATOR_MED_OFFSET   = 5     # chart displacement: look back 5 bars for medium
 ALLIGATOR_SLOW_OFFSET  = 8     # chart displacement: look back 8 bars for slow
 ALLIGATOR_CROSS_LOOKBACK = 10  # crossover must have occurred within this many bars
 
-# SPY regime (soft — bearish regime cuts size + tightens RVOL, does not block)
-# Disabled for Donchian bounce: mean-reversion works better without regime filter;
-# bear markets produce more Donchian floor setups, not fewer.
-SPY_FILTER_ENABLED  = False     # set True to re-enable soft SPY regime
-SPY_EMA_PERIOD      = 50        # EMA period used for SPY regime check
-SPY_REGIME_SIZE_CUT = 0.50      # reduce position bucket by 50% in bearish regime
-SPY_REGIME_RVOL_MULT = 1.33    # multiply RVOL threshold by this in bearish regime
+# ── SPY regime filter (soft — disabled by default) ────────────────────────────
+# When enabled: bearish regime cuts position size and tightens RVOL threshold.
+# Alligator swing works across regime types, so this is off unless explicitly re-enabled.
+SPY_FILTER_ENABLED   = False     # set True to re-enable soft SPY regime
+SPY_EMA_PERIOD       = 50        # EMA period used for SPY regime check
+SPY_REGIME_SIZE_CUT  = 0.50      # reduce position bucket by 50% in bearish regime
+SPY_REGIME_RVOL_MULT = 1.33      # multiply RVOL threshold by this in bearish regime
 
 # ── Scoring weights ────────────────────────────────────────────────────────────
 # Alligator Alignment (30) · RVOL (25) · RSI Momentum (25) · Liquidity (20)
 # + Analyst Consensus (15 bonus) — total capped at 100.
 SCORE_ALLIGATOR_MAX = 30.0     # SMMA spread — wider mouth = stronger trend signal
-SCORE_DONCHIAN_MAX  = SCORE_ALLIGATOR_MAX  # alias kept for backtest import compatibility
 SCORE_RVOL_MAX      = 25.0
 SCORE_RSI_DELTA_MAX = 25.0
 SCORE_LIQUIDITY_MAX = 20.0
@@ -151,7 +130,6 @@ TICKER_BLOCKLIST: set = {
 MIN_CANDLES          = 210     # minimum daily bars (SMA200 + slope buffer)
 RVOL_MIN             = 1.2     # minimum relative volume — aligned with backtest optimal (BACKTEST_RVOL_MIN)
 BACKTEST_RVOL_MIN    = 1.2     # daily close RVOL proxy — matches live RVOL_MIN after parameter alignment
-BACKTEST_HOLD_BARS   = 1
 BACKTEST_SLIPPAGE    = 0.001   # 0.1% entry slippage
 BACKTEST_EXIT_SLIPPAGE = 0.001
 SPREAD_MAX_PCT       = 0.005   # maximum bid-ask spread (0.5%)

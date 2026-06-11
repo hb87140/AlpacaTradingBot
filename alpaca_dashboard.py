@@ -29,12 +29,12 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from src.config import (
     STATE_FILE, DASHBOARD_FILE, EQUITY_HIST_FILE, LOG_FILE,
-    MAX_POSITIONS_CAP, MIN_BUCKET_SIZE, BUCKET_CASH_PCT, VIX_THRESHOLD, HOLD_TRADING_BARS,
+    MAX_POSITIONS_CAP, MIN_BUCKET_SIZE, BUCKET_CASH_PCT, VIX_THRESHOLD,
     SCAN_MIN_VOLUME, SCAN_MIN_DOLLAR_VOL,
     SPREAD_MAX_PCT, RVOL_MIN,
     CHANDELIER_PERIOD, CHANDELIER_MULT,
-    PROFIT_MIN_THRESHOLD, HARD_STOP_PCT, BREAK_EVEN_PCT,
-    FRIDAY_MIN_PROFIT_PCT, MAX_DAILY_LOSS_PCT, CORR_MAX, MAX_SECTOR_COUNT,
+    HARD_STOP_PCT, BREAK_EVEN_PCT,
+    MAX_DAILY_LOSS_PCT, CORR_MAX, MAX_SECTOR_COUNT,
     ENTRY_START, ENTRY_END, FRIDAY_CLOSE_HOUR,
     RSI_PERIOD, RSI_MIN_DELTA,
     ALLIGATOR_FAST, ALLIGATOR_MED, ALLIGATOR_SLOW, ALLIGATOR_CROSS_LOOKBACK,
@@ -228,7 +228,6 @@ def get_state():
         "paper_mode":        ALPACA_PAPER,
         "vix":               dash_data.get("vix"),
         "vix_threshold":     VIX_THRESHOLD,
-        "hold_trading_bars": HOLD_TRADING_BARS,
         "last_scan":         dash_data.get("last_scan"),
         "next_scan":         dash_data.get("next_scan"),
         "last_updated":      dash_data.get("last_updated"),
@@ -1186,12 +1185,10 @@ _COND_JS = (
     f'const EXIT_CONDITIONS = [\n'
     f'  ["1", "Chandelier Trail",   "ex", "TRAIL SELL at ATR({CHANDELIER_PERIOD})×{CHANDELIER_MULT:.1f} from peak price — Alpaca raises the stop automatically as price climbs; dollar distance fixed at entry"],\n'
     f'  ["2", "Alligator Reversal", "ex", "Fast SMMA({ALLIGATOR_FAST}) AND Med SMMA({ALLIGATOR_MED}) both cross below Slow SMMA({ALLIGATOR_SLOW}) — confirmed bearish reversal, trend structure broken"],\n'
-    f'  ["3", "Velocity Exit",      "ex", "After {HOLD_TRADING_BARS} trading session(s): if profit < {PROFIT_MIN_THRESHOLD*100:.0f}%, force-liquidate via Market SELL — frees capital for better setups"],\n'
-    f'  ["4", "Hard Stop",          "ex", "{HARD_STOP_PCT*100:.0f}% drawdown from fill price triggers immediate Market SELL regardless of ATR stop distance"],\n'
-    f'  ["5", "Break-Even Floor",   "ex", "Once profit ≥ {BREAK_EVEN_PCT*100:.0f}%, chandelier stop is floored at fill price — software-enforced, prevents winners from becoming losers"],\n'
-    f'  ["6", "Friday Close",       "ex", "After {FRIDAY_CLOSE_HOUR}:00 PM ET on Fridays, positions with < {FRIDAY_MIN_PROFIT_PCT*100:.0f}% profit are liquidated to eliminate weekend gap risk"],\n'
-    f'  ["7", "VIX Risk-Off",       "ex", "VIX > {VIX_THRESHOLD} blocks new entries; existing positions exit via chandelier stop, velocity exit, or hard stop as normal"],\n'
-    f'  ["8", "Daily Loss Halt",    "ex", "{MAX_DAILY_LOSS_PCT*100:.0f}% intraday equity drawdown halts all new entries for the rest of the trading day (circuit breaker)"]\n'
+    f'  ["3", "Hard Stop",          "ex", "{HARD_STOP_PCT*100:.0f}% drawdown from fill price triggers immediate Market SELL regardless of ATR stop distance"],\n'
+    f'  ["4", "Break-Even Floor",   "ex", "Once profit ≥ {BREAK_EVEN_PCT*100:.0f}%, chandelier stop is floored at fill price — software-enforced, prevents winners from becoming losers"],\n'
+    f'  ["5", "VIX Risk-Off",       "ex", "VIX > {VIX_THRESHOLD} blocks new entries; existing positions exit via chandelier stop or hard stop as normal"],\n'
+    f'  ["6", "Daily Loss Halt",    "ex", "{MAX_DAILY_LOSS_PCT*100:.0f}% intraday equity drawdown halts all new entries for the rest of the trading day (circuit breaker)"]\n'
     f'];\n'
 )
 _HTML = _HTML.replace("  __ENTRY_EXIT_CONDITIONS_PLACEHOLDER__", _COND_JS)
