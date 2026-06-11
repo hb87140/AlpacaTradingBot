@@ -1764,11 +1764,11 @@ class TestStopAuditUnprotectedPositions:
         # Mark today's audit as already done
         engine._last_audit_date = fake_now.strftime('%Y-%m-%d')
 
-        # Confirmed position with a valid stop distance
+        # Confirmed position with a valid stop distance and confirmed stop order ID
         state = {
             'AAPL': {
                 'fill_price': 150.0, 'qty': 10, 'stop_loss': 140.0,
-                'stop_dist': 10.0,  # protected — no re-audit needed
+                'stop_dist': 10.0, 'stop_order_id': 'abc-123',  # fully protected
                 'peak_price': 152.0, 'time': '2024-06-05T10:00:00', 'score': 75.0,
             }
         }

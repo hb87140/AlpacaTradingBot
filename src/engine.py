@@ -623,11 +623,12 @@ class VelocityEngine:
                 # position without stop_dist).  Without this, _has_unprotected fires
                 # every cycle and _update_position_prices skips the stop_loss update.
                 trail_dist = float(kept.trail_price or 0)
+                state_changed = False
                 if trail_dist > 0 and float(pos_data.get('stop_dist', 0)) <= 0:
                     entry_px = float(pos_data.get('fill_price') or pos_data.get('price', 0))
                     self.state[sym]['stop_dist'] = trail_dist
                     self.state[sym]['stop_loss'] = round(entry_px - trail_dist, 2)
-                    self.save_state()
+                    state_changed = True
                     logger.info(
                         f"AUDIT: {sym} — trailing stop confirmed; restored stop_dist "
                         f"(id={kept.id} trail_price=${trail_dist:.2f})"
@@ -637,6 +638,12 @@ class VelocityEngine:
                         f"AUDIT: {sym} — trailing stop confirmed "
                         f"(id={kept.id} trail_price=${kept.trail_price})"
                     )
+                # Persist the confirmed order ID so has_unprotected doesn't re-fire.
+                if self.state[sym].get('stop_order_id') != str(kept.id):
+                    self.state[sym]['stop_order_id'] = str(kept.id)
+                    state_changed = True
+                if state_changed:
+                    self.save_state()
                 continue
 
             # No trailing stop found — fetch bars and place one
@@ -659,9 +666,9 @@ class VelocityEngine:
                     continue
 
                 chandelier_dist = round(atr_chandelier * CHANDELIER_MULT, 2)
-                # Alpaca rejects trail_price > 25% of stock price
+                # Alpaca rejects trail_price > 25% of stock price; use 24% buffer.
                 entry_px_for_cap = float(pos_data.get('fill_price') or pos_data.get('price', 0))
-                max_trail = round(entry_px_for_cap * 0.25, 2) if entry_px_for_cap > 0 else chandelier_dist
+                max_trail = round(entry_px_for_cap * 0.24, 2) if entry_px_for_cap > 0 else chandelier_dist
                 trail_dist = min(chandelier_dist, max_trail)
                 if trail_dist < chandelier_dist:
                     logger.info(
@@ -689,6 +696,8 @@ class VelocityEngine:
                             f"AUDIT: {sym} — trailing stop rejected "
                             f"(status={status}); position UNPROTECTED."
                         )
+                        self.state[sym]['stop_dist'] = 0  # triggers retry next cycle
+                        self.save_state()
                         continue
                 except Exception:
                     pass
@@ -696,6 +705,7 @@ class VelocityEngine:
                 entry_px = float(pos_data.get('fill_price') or pos_data.get('price', 0))
                 self.state[sym]['stop_dist'] = trail_dist
                 self.state[sym]['stop_loss'] = round(entry_px - trail_dist, 2)
+                self.state[sym]['stop_order_id'] = str(stop_order.id)
                 self.save_state()
                 logger.info(
                     f"AUDIT: {sym} — chandelier stop placed "
@@ -705,6 +715,8 @@ class VelocityEngine:
                 logger.error(
                     f"AUDIT: {sym} — stop placement failed: {e}; position UNPROTECTED."
                 )
+                self.state[sym]['stop_dist'] = 0  # triggers has_unprotected on next cycle
+                self.save_state()
 
     # ── Market data helpers ───────────────────────────────────────────────────
     def _fetch_daily_bars(self, symbol: str) -> Optional[pd.DataFrame]:
@@ -1558,7 +1570,7 @@ class VelocityEngine:
         # positions are protected even when account summary or regime data is unavailable
         _audit_today = datetime.now(_TZ_NY).strftime('%Y-%m-%d')
         _has_unprotected = any(
-            float(d.get('stop_dist', 0)) <= 0
+            float(d.get('stop_dist', 0)) <= 0 or 'stop_order_id' not in d
             for d in self.state.values()
             if not d.get('pending') and not d.get('pending_exit')
         )
@@ -2035,8 +2047,9 @@ class VelocityEngine:
                 )
                 stop_order = None
             else:
-                # Alpaca rejects trail_price > 25% of stock price
-                max_trail_entry = round(fill_price * 0.25, 2)
+                # Alpaca rejects trail_price > 25% of stock price; use 24% to leave a
+                # buffer for intraday price movement between fill and stop submission.
+                max_trail_entry = round(fill_price * 0.24, 2)
                 trail_dist_entry = min(chandelier_dist, max_trail_entry)
                 if trail_dist_entry < chandelier_dist:
                     logger.info(
@@ -2052,13 +2065,14 @@ class VelocityEngine:
                 )
                 try:
                     stop_order = self.trading_client.submit_order(stop_req)
+                    chandelier_dist = trail_dist_entry  # use capped value in state write
                 except Exception as stop_err:
                     logger.error(
                         f"ENTRY {sym}: trailing stop placement failed ({stop_err}). "
                         "Position open WITHOUT stop — audit will retry next cycle."
                     )
                     stop_order = None
-                chandelier_dist = trail_dist_entry  # use capped value in state write
+                    chandelier_dist = 0  # triggers has_unprotected → audit retries
 
             # Update state with confirmed fill details
             self.state[sym] = {
