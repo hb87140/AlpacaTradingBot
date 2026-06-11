@@ -103,10 +103,16 @@ DAILY_HISTORY_DAYS = 400   # enough to produce 200+ trading-day bars
 
 # ── Scanner filters ───────────────────────────────────────────────────────────
 SCAN_MIN_PRICE      = 1.0               # Universe filter: price > $1 (excludes sub-penny stocks only)
-SCAN_MIN_VOLUME     = 1_000_000        # Universe filter: 20-day avg daily vol > 1M shares
-SCAN_MIN_GAIN_PCT   = 2.0              # minimum daily % gain (backtest coarse filter)
-SCAN_MIN_DOLLAR_VOL = 5_000_000        # 20-day avg dollar volume floor ($5M)
-SCAN_MIN_SCORE      = 20.0             # minimum composite score (0-100) before entry
+SCAN_MIN_VOLUME     = 500_000          # Universe filter: 20-day avg daily vol > 500K shares
+SCAN_MIN_GAIN_PCT   = 1.0              # minimum daily % gain (backtest coarse filter)
+SCAN_MIN_DOLLAR_VOL = 2_500_000        # 20-day avg dollar volume floor ($2.5M)
+SCAN_MIN_SCORE      = 50.0             # minimum composite score (0-100) before entry
+
+# ── Tiered profit exits ───────────────────────────────────────────────────────
+# At each tier the engine sells TIER_EXIT_PCT of the ORIGINAL entry qty (floor).
+# Remaining shares (~40%) ride the chandelier trailing stop to maximise winners.
+TIER_EXIT_PROFITS   = (0.02, 0.04, 0.06)  # 2 %, 4 %, 6 % profit thresholds
+TIER_EXIT_PCT       = 0.20                 # fraction of original qty to sell at each tier
 
 # ── Ticker blocklist ─────────────────────────────────────────────────────────
 TICKER_BLOCKLIST: set = {

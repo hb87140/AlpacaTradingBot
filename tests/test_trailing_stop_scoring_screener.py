@@ -1253,10 +1253,11 @@ class TestExitOrders:
         assert not tc.submit_order.called, "No sell must be placed without Alligator reversal signal"
 
     def test_velocity_exit_does_not_trigger_when_profitable(self):
-        """Profitable position held for multiple days must not be force-liquidated."""
+        """Profitable position below tier thresholds must not trigger any sell."""
         tc = _mock_trading_client()
         entry_price  = 100.0
-        profit_price = entry_price * 1.05  # 5% profit — clearly above any threshold
+        # 1.5% profit — below ALL tier thresholds (tier 1 fires at 2%)
+        profit_price = entry_price * 1.015
 
         engine = _make_engine(trading_client=tc)
         engine.state = {'WINNER': self._make_state_entry(price=entry_price, days_ago=14)}
@@ -2340,3 +2341,202 @@ class TestDashboardUnitPrice:
         pos = next(p for p in positions if p['symbol'] == 'NVDA')
         assert pos['unit_price'] is None, \
             "unit_price must be None when fill_price is absent"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tiered exit strategy
+# ─────────────────────────────────────────────────────────────────────────────
+class TestTieredExit:
+    """Tests for the three-tier partial profit exit (20% at 2%, 4%, 6%)."""
+
+    def _make_state(self, price=100.0, qty=10.0, tier_sold=0, original_qty=None):
+        tz_ny = pytz.timezone('US/Eastern')
+        return {
+            'price':        price,
+            'fill_price':   price,
+            'time':         datetime.now(tz_ny).isoformat(),
+            'qty':          qty,
+            'original_qty': original_qty if original_qty is not None else qty,
+            'tier_sold':    tier_sold,
+            'stop_loss':    price * 0.94,
+            'stop_dist':    price * 0.06,
+            'peak_price':   price,
+            'volume':       0,
+            'score':        60.0,
+        }
+
+    def test_tier1_fires_at_2pct_profit(self):
+        """At 2% profit, first tier (20% of original qty) is sold."""
+        tc = _mock_trading_client()
+        engine = _make_engine(trading_client=tc)
+        engine.state = {'AAA': self._make_state(price=100.0, qty=10.0)}
+        snap = _make_snapshot(price=102.5)  # 2.5% profit — above 2% tier
+        with patch.object(engine, '_fetch_snapshot', return_value=snap), \
+             patch.object(engine, 'save_state'), \
+             patch.object(tc, 'get_orders', return_value=[]):
+            engine.check_velocity_exits()
+        # _execute_tier_sell called submit_order
+        assert tc.submit_order.called, "Tier 1 sell must be submitted at 2% profit"
+        req = tc.submit_order.call_args[0][0]
+        assert isinstance(req, MarketOrderRequest)
+        assert req.qty == 2  # floor(10 * 0.20) = 2 shares
+
+    def test_tier1_not_fired_below_2pct(self):
+        """At 1.5% profit, no tier fires."""
+        tc = _mock_trading_client()
+        engine = _make_engine(trading_client=tc)
+        engine.state = {'BBB': self._make_state(price=100.0, qty=10.0)}
+        snap = _make_snapshot(price=101.5)  # 1.5% profit
+        with patch.object(engine, '_fetch_snapshot', return_value=snap), \
+             patch.object(engine, 'save_state'):
+            engine.check_velocity_exits()
+        assert not tc.submit_order.called, "No tier fires below 2% profit threshold"
+
+    def test_tier2_fires_when_tier1_already_sold(self):
+        """At 4% profit with tier_sold=1, second tier fires."""
+        tc = _mock_trading_client()
+        engine = _make_engine(trading_client=tc)
+        engine.state = {'CCC': self._make_state(price=100.0, qty=8.0, tier_sold=1, original_qty=10.0)}
+        snap = _make_snapshot(price=104.5)  # 4.5% profit — above 4% tier
+        with patch.object(engine, '_fetch_snapshot', return_value=snap), \
+             patch.object(engine, 'save_state'), \
+             patch.object(tc, 'get_orders', return_value=[]):
+            engine.check_velocity_exits()
+        assert tc.submit_order.called
+        req = tc.submit_order.call_args[0][0]
+        assert req.qty == 2  # floor(10 * 0.20) = 2 shares from original_qty
+
+    def test_all_3_tiers_done_no_partial_sell(self):
+        """Once tier_sold=3, no more tier exits fire regardless of profit."""
+        tc = _mock_trading_client()
+        engine = _make_engine(trading_client=tc)
+        engine.state = {'DDD': self._make_state(price=100.0, qty=4.0, tier_sold=3, original_qty=10.0)}
+        snap = _make_snapshot(price=120.0)  # 20% profit — way above all thresholds
+        with patch.object(engine, '_fetch_snapshot', return_value=snap), \
+             patch.object(engine, 'save_state'):
+            engine.check_velocity_exits()
+        # No tier sell — only the Alligator reversal check remains (bars unavailable here)
+        # submit_order must NOT be called (no FULL liquidation either)
+        for call in tc.submit_order.call_args_list:
+            req = call[0][0]
+            assert not isinstance(req, MarketOrderRequest), \
+                "No market sell should fire when all 3 tiers are complete"
+
+    def test_tier_sell_rounding_floors_to_nearest_whole_share(self):
+        """6 shares: 20% = 1.2 → floor = 1 share sold per tier."""
+        tc = _mock_trading_client()
+        engine = _make_engine(trading_client=tc)
+        engine.state = {'EEE': self._make_state(price=100.0, qty=6.0)}
+        snap = _make_snapshot(price=102.5)  # 2.5% → tier 1
+        with patch.object(engine, '_fetch_snapshot', return_value=snap), \
+             patch.object(engine, 'save_state'), \
+             patch.object(tc, 'get_orders', return_value=[]):
+            engine.check_velocity_exits()
+        assert tc.submit_order.called
+        req = tc.submit_order.call_args[0][0]
+        assert req.qty == 1, f"floor(6 × 0.20) = 1 share, got {req.qty}"
+
+    def test_no_tier_sell_when_qty_too_small(self):
+        """1 share: floor(1 × 0.20) = 0 — tier sell skipped, position held."""
+        tc = _mock_trading_client()
+        engine = _make_engine(trading_client=tc)
+        engine.state = {'FFF': self._make_state(price=100.0, qty=1.0)}
+        snap = _make_snapshot(price=103.0)  # 3% profit
+        with patch.object(engine, '_fetch_snapshot', return_value=snap), \
+             patch.object(engine, 'save_state'):
+            engine.check_velocity_exits()
+        assert not tc.submit_order.called, "Cannot sell 0 shares — tier skipped"
+
+    def test_execute_tier_sell_clears_stop_order_id(self):
+        """After a tier sell, stop_order_id is removed so the audit re-places the TRAIL."""
+        tc = _mock_trading_client()
+        engine = _make_engine(trading_client=tc)
+        engine.state = {'GGG': {**self._make_state(price=100.0, qty=10.0),
+                                 'stop_order_id': 'old-trail-id'}}
+        with patch.object(tc, 'get_orders', return_value=[]), \
+             patch.object(engine, 'save_state'):
+            engine._execute_tier_sell('GGG', 2, 1)
+        assert 'stop_order_id' not in engine.state.get('GGG', {}), \
+            "stop_order_id must be cleared so audit re-places TRAIL for reduced qty"
+
+    def test_execute_tier_sell_updates_tier_sold(self):
+        """After _execute_tier_sell, tier_sold increments to the completed tier number."""
+        tc = _mock_trading_client()
+        engine = _make_engine(trading_client=tc)
+        engine.state = {'HHH': self._make_state(price=100.0, qty=10.0, tier_sold=1)}
+        with patch.object(tc, 'get_orders', return_value=[]), \
+             patch.object(engine, 'save_state'):
+            engine._execute_tier_sell('HHH', 2, 2)
+        assert engine.state['HHH']['tier_sold'] == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Score persistence across restarts
+# ─────────────────────────────────────────────────────────────────────────────
+class TestScorePersistence:
+    """Score is re-computed via _try_rescore when state was lost on restart."""
+
+    def test_try_rescore_returns_float_on_success(self):
+        """_try_rescore returns a float score when get_technical_context succeeds."""
+        engine = _make_engine()
+        fake_ctx = _ctx(price=50.0)
+        with patch.object(engine, 'get_technical_context', return_value=fake_ctx):
+            score = engine._try_rescore('AAPL')
+        assert isinstance(score, float), "_try_rescore must return float on success"
+        assert 0.0 <= score <= 100.0
+
+    def test_try_rescore_returns_none_on_failure(self):
+        """_try_rescore returns None when get_technical_context raises or returns None."""
+        engine = _make_engine()
+        with patch.object(engine, 'get_technical_context', side_effect=Exception("API error")):
+            score = engine._try_rescore('AAPL')
+        assert score is None
+
+    def test_try_rescore_returns_none_when_ctx_is_none(self):
+        engine = _make_engine()
+        with patch.object(engine, 'get_technical_context', return_value=None):
+            score = engine._try_rescore('AAPL')
+        assert score is None
+
+    def test_sync_positions_calls_try_rescore_for_unknown_symbol(self):
+        """_sync_positions calls _try_rescore for a position found in Alpaca but not in state."""
+        tc = _mock_trading_client()
+        engine = _make_engine(trading_client=tc)
+        engine.state = {}
+
+        pos = MagicMock()
+        pos.symbol = 'NEWPOS'
+        pos.qty = '5'
+        pos.avg_entry_price = '120.00'
+        pos.created_at = None
+
+        tc.get_all_positions.return_value = [pos]
+        with patch.object(engine, '_try_rescore', return_value=72.5) as mock_rescore, \
+             patch.object(engine, 'save_state'), \
+             patch.object(engine, '_get_fill_time', return_value='2026-06-01T10:00:00'):
+            engine._sync_positions()
+
+        mock_rescore.assert_called_once_with('NEWPOS')
+        assert engine.state['NEWPOS']['score'] == 72.5
+
+    def test_sync_adds_original_qty_and_tier_sold_for_resynced_position(self):
+        """Re-synced positions from Alpaca get original_qty and tier_sold=0."""
+        tc = _mock_trading_client()
+        engine = _make_engine(trading_client=tc)
+        engine.state = {}
+
+        pos = MagicMock()
+        pos.symbol = 'RSYNC'
+        pos.qty = '8'
+        pos.avg_entry_price = '50.00'
+        pos.created_at = None
+
+        tc.get_all_positions.return_value = [pos]
+        with patch.object(engine, '_try_rescore', return_value=None), \
+             patch.object(engine, 'save_state'), \
+             patch.object(engine, '_get_fill_time', return_value='2026-06-01T10:00:00'):
+            engine._sync_positions()
+
+        d = engine.state['RSYNC']
+        assert d['original_qty'] == pytest.approx(8.0)
+        assert d['tier_sold'] == 0

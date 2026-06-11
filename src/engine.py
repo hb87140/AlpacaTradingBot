@@ -56,6 +56,7 @@ from src.config import (
     ALLIGATOR_FAST_OFFSET, ALLIGATOR_MED_OFFSET, ALLIGATOR_SLOW_OFFSET,
     ALLIGATOR_CROSS_LOOKBACK,
     SPY_EMA_PERIOD, SPY_REGIME_SIZE_CUT, SPY_REGIME_RVOL_MULT, SPY_FILTER_ENABLED,
+    TIER_EXIT_PROFITS, TIER_EXIT_PCT,
 )
 from src.indicators import apply_all, compute_ma
 from src.rules import (
@@ -1028,20 +1029,24 @@ class VelocityEngine:
                 continue
 
             if sym not in self.state:
-                fill_time = self._get_fill_time(sym)
+                fill_time     = self._get_fill_time(sym)
+                recomputed_score = self._try_rescore(sym)
                 self.state[sym] = {
-                    'price':      round(avg_cost, 2),
-                    'fill_price': round(avg_cost, 2),
-                    'peak_price': round(avg_cost, 2),
-                    'time':       fill_time,
-                    'qty':        round(qty, 4),
-                    'stop_loss':  0.0,
-                    'volume':     0,
-                    'score':      None,
+                    'price':        round(avg_cost, 2),
+                    'fill_price':   round(avg_cost, 2),
+                    'peak_price':   round(avg_cost, 2),
+                    'time':         fill_time,
+                    'qty':          round(qty, 4),
+                    'original_qty': round(qty, 4),
+                    'tier_sold':    0,
+                    'stop_loss':    0.0,
+                    'volume':       0,
+                    'score':        recomputed_score,
                 }
+                score_note = f"recomputed score={recomputed_score:.1f}" if recomputed_score is not None else "score=None (no bars)"
                 logger.info(
                     f"SYNC: Added {sym} from Alpaca "
-                    f"(qty={qty} avg_entry=${avg_cost:.2f} filled_at={fill_time})"
+                    f"(qty={qty} avg_entry=${avg_cost:.2f} filled_at={fill_time}); {score_note}"
                 )
                 changed = True
             else:
@@ -1330,6 +1335,76 @@ class VelocityEngine:
         """
         return score_candidate(ctx)
 
+    def _try_rescore(self, sym: str) -> Optional[float]:
+        """Attempt to re-compute the entry score from current technical data.
+
+        Called when a position is found in Alpaca but not in local state (e.g.
+        after an ephemeral-filesystem restart on Render).  Returns None if bars
+        are unavailable or if any step raises an exception.
+        """
+        try:
+            ctx = self.get_technical_context(sym)
+            if ctx is None:
+                return None
+            return round(self._score_candidate(ctx), 2)
+        except Exception as e:
+            logger.debug(f"RESCORE {sym}: failed ({e})")
+            return None
+
+    def _execute_tier_sell(self, symbol: str, tier_qty: int, tier_num: int) -> bool:
+        """Partial market sell for a tiered profit exit.
+
+        Flow:
+        1. Cancel ALL open orders for the symbol — Alpaca blocks sells while the
+           GTC trailing stop holds the full qty.
+        2. Submit a market SELL for tier_qty shares.
+        3. Clear stop_order_id so _has_unprotected fires and _audit_stop_orders
+           re-places the TRAIL for the reduced remaining qty on the next cycle.
+
+        Returns True if the sell was submitted without error.
+        """
+        # Step 1: cancel open orders (including the trailing stop)
+        try:
+            open_orders = self.trading_client.get_orders(
+                GetOrdersRequest(status=QueryOrderStatus.OPEN)
+            )
+            for o in open_orders:
+                if o.symbol == symbol:
+                    try:
+                        self.trading_client.cancel_order_by_id(o.id)
+                    except Exception as ce:
+                        logger.warning(f"TIER SELL {symbol}: cancel {o.id} failed: {ce}")
+            if any(o.symbol == symbol for o in open_orders):
+                time.sleep(0.5)
+        except Exception as e:
+            logger.error(f"TIER SELL {symbol}: failed to fetch open orders: {e}")
+            return False
+
+        # Step 2: submit partial market sell
+        sell_req = MarketOrderRequest(
+            symbol=symbol,
+            qty=tier_qty,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+        )
+        try:
+            self.trading_client.submit_order(sell_req)
+        except Exception as e:
+            logger.error(f"TIER SELL {symbol}: market sell {tier_qty} shares failed: {e}")
+            return False
+
+        logger.info(
+            f"TIER EXIT {symbol}: sold {tier_qty} shares at tier {tier_num}/3 "
+            f"({TIER_EXIT_PROFITS[tier_num - 1] * 100:.0f}% profit threshold)"
+        )
+
+        # Step 3: update state — qty is reconciled by _sync_positions next cycle
+        if symbol in self.state:
+            self.state[symbol]['tier_sold'] = tier_num
+            self.state[symbol].pop('stop_order_id', None)  # triggers audit to re-place TRAIL
+            self.save_state()
+        return True
+
     # ── Exit management ───────────────────────────────────────────────────────
     def check_velocity_exits(self) -> Dict[str, float]:
         """Manage all software-enforced exits: hard stop, break-even, Alligator reversal.
@@ -1407,7 +1482,29 @@ class VelocityEngine:
                 self.liquidate(sym)
                 continue
 
-            # 3. Alligator reversal exit — re-fetch daily bars to get current SMMA state.
+            # 3. Tiered profit exits — sell 20% at 2 %, 4 %, 6 % profit thresholds.
+            # Remaining ~40 % rides the chandelier trailing stop.
+            tier_sold = int(data.get('tier_sold', 0))
+            if tier_sold < len(TIER_EXIT_PROFITS):
+                tier_threshold = TIER_EXIT_PROFITS[tier_sold]
+                profit_pct = (cur - entry_price) / entry_price
+                if profit_pct >= tier_threshold:
+                    original_qty = float(data.get('original_qty', 0) or 0)
+                    if original_qty <= 0:
+                        original_qty = float(data.get('qty', 0))
+                    tier_qty = int(original_qty * TIER_EXIT_PCT)  # floor = nearest round number
+                    current_qty = int(float(data.get('qty', 0)))
+                    if tier_qty >= 1 and tier_qty <= current_qty:
+                        logger.info(
+                            f"TIER EXIT {sym}: profit={profit_pct*100:.1f}% ≥ "
+                            f"{tier_threshold*100:.0f}% — selling {tier_qty}/{current_qty} "
+                            f"shares (tier {tier_sold+1}/3)"
+                        )
+                        self._execute_tier_sell(sym, tier_qty, tier_sold + 1)
+                        prefetched[sym] = cur
+                        continue  # remaining shares handled next cycle
+
+            # 4. Alligator reversal exit — re-fetch daily bars to get current SMMA state.
             # Full confirmed reversal: both fast and medium SMMAs cross below slow.
             # Only fires when SMMA values are available (requires fetched daily bars).
             try:
@@ -1968,6 +2065,8 @@ class VelocityEngine:
                 'price':    limit_price,
                 'time':     datetime.now(_TZ_NY).isoformat(),
                 'qty':      qty,
+                'original_qty': qty,
+                'tier_sold': 0,
                 'stop_loss': round(limit_price - chandelier_dist, 2),
                 'stop_dist': chandelier_dist,
                 'peak_price': limit_price,
@@ -2074,6 +2173,8 @@ class VelocityEngine:
                 'entry_order_id': str(buy_order.id),
                 'time':           datetime.now(_TZ_NY).isoformat(),
                 'qty':            filled_qty,
+                'original_qty':   filled_qty,
+                'tier_sold':      0,
                 'stop_loss':      round(fill_price - chandelier_dist, 2),
                 'stop_dist':      chandelier_dist,
                 'peak_price':     round(fill_price, 2),

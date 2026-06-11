@@ -190,15 +190,16 @@ def check_day_strength(ctx: dict) -> Tuple[bool, str]:
 
 # Permanent day-level rules: computed once per day per symbol; result cached in
 # _daily_scan_skip.  These should be filters whose inputs change at most daily.
+# Both volume filters use 20-day historical averages — they never change intraday.
 PERMANENT_DAY_RULES: List[Rule] = [
     ('dollar_vol', check_dollar_vol),
+    ('volume',     check_volume),
 ]
 
 # Cycle-level rules: evaluated on every scan cycle.
 # Order: cheapest / most-selective checks first for fast rejection.
 CYCLE_RULES: List[Rule] = [
     ('spread',            check_spread),
-    ('volume',            check_volume),
     ('alligator_bullish', check_alligator_bullish),
     ('rsi_trend',         check_rsi_trend),
     ('rvol',              check_rvol),
