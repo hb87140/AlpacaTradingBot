@@ -1468,6 +1468,19 @@ class VelocityEngine:
                 self.liquidate(sym)
                 continue
 
+            # 1b. Software stop_loss enforcement — safety net for when the Alpaca GTC
+            # trailing stop is absent (e.g., cancelled during a tier sell and not yet
+            # re-placed) or was rejected. stop_loss is the break-even-floored chandelier
+            # level written by _update_position_prices each cycle.
+            sl = float(data.get('stop_loss', 0))
+            if sl > 0 and cur <= sl:
+                logger.warning(
+                    f"STOP LOSS HIT: {sym} price ${cur:.2f} ≤ stop_loss ${sl:.2f} "
+                    f"(entry=${entry_price:.2f}). Alpaca GTC may be absent — forcing exit."
+                )
+                self.liquidate(sym)
+                continue
+
             # 2. Break-even floor — software exit to catch what the TRAIL can miss
             peak_price = max(
                 float(data.get('peak_price', entry_price) or entry_price), cur

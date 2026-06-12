@@ -2020,6 +2020,123 @@ class TestHardStop:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 13b. SOFTWARE STOP_LOSS ENFORCEMENT — safety net when Alpaca GTC is absent
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSoftwareStopLoss:
+    """Software enforces stop_loss level even when Alpaca GTC order is absent.
+
+    Scenario: price above entry so hard stop (-5%) doesn't fire, but price
+    dropped below the chandelier stop level stored in stop_loss.  Engine must
+    liquidate to cover the gap left by a cancelled or unplaced GTC order.
+    """
+
+    def _make_state(self, entry, cur, stop_loss, tz_ny):
+        return {
+            'price':       entry,
+            'qty':         5.0,
+            'current_price': cur,
+            'stop_loss':   stop_loss,
+            'peak_price':  entry * 1.03,
+            'volume':      0,
+            'score':       60,
+            'time':        datetime.now(tz_ny).isoformat(),
+        }
+
+    def test_software_stop_fires_when_price_at_stop_loss(self):
+        """Price at stop_loss level forces liquidation even though hard stop hasn't triggered."""
+        tc = _mock_trading_client()
+        pos = MagicMock(); pos.qty = '5.0'
+        tc.get_open_position.side_effect = None
+        tc.get_open_position.return_value = pos
+        tc.get_orders.return_value = []
+
+        tz_ny = pytz.timezone('US/Eastern')
+        engine = _make_engine(trading_client=tc)
+        # entry=100, stop_loss=97 (hard stop fires at 95 — stop_loss is the binding constraint)
+        engine.state = {'STP': self._make_state(100.0, 97.0, 97.0, tz_ny)}
+
+        snap = _make_snapshot(price=97.0)
+        safe_now = tz_ny.localize(datetime(2024, 6, 5, 10, 30))
+        with patch.object(engine, '_fetch_snapshot', return_value=snap), \
+             patch.object(engine, 'save_state'), \
+             patch('src.engine.time.sleep'), \
+             patch('src.engine.datetime') as mock_dt:
+            mock_dt.now.return_value = safe_now
+            mock_dt.fromisoformat    = datetime.fromisoformat
+            engine.check_velocity_exits()
+
+        assert engine.state.get('STP', {}).get('pending_exit') is True, \
+            "Software stop must mark pending_exit when price <= stop_loss"
+        assert tc.submit_order.called
+
+    def test_software_stop_fires_when_price_below_stop_loss(self):
+        """Price below stop_loss (but above hard stop) forces liquidation."""
+        tc = _mock_trading_client()
+        pos = MagicMock(); pos.qty = '5.0'
+        tc.get_open_position.side_effect = None
+        tc.get_open_position.return_value = pos
+        tc.get_orders.return_value = []
+
+        tz_ny = pytz.timezone('US/Eastern')
+        engine = _make_engine(trading_client=tc)
+        # entry=100, stop_loss=98, cur=96.5 (above hard-stop floor 95, below stop_loss)
+        engine.state = {'STP': self._make_state(100.0, 96.5, 98.0, tz_ny)}
+
+        snap = _make_snapshot(price=96.5)
+        safe_now = tz_ny.localize(datetime(2024, 6, 5, 10, 30))
+        with patch.object(engine, '_fetch_snapshot', return_value=snap), \
+             patch.object(engine, 'save_state'), \
+             patch('src.engine.time.sleep'), \
+             patch('src.engine.datetime') as mock_dt:
+            mock_dt.now.return_value = safe_now
+            mock_dt.fromisoformat    = datetime.fromisoformat
+            engine.check_velocity_exits()
+
+        assert engine.state.get('STP', {}).get('pending_exit') is True
+        assert tc.submit_order.called
+
+    def test_software_stop_does_not_fire_when_price_above_stop_loss(self):
+        """Price above stop_loss must leave position open."""
+        tc = _mock_trading_client()
+        tz_ny = pytz.timezone('US/Eastern')
+        engine = _make_engine(trading_client=tc)
+        # entry=100, stop_loss=97, cur=99 — above stop, no exit
+        engine.state = {'STP': self._make_state(100.0, 99.0, 97.0, tz_ny)}
+
+        snap = _make_snapshot(price=99.0)
+        safe_now = tz_ny.localize(datetime(2024, 6, 5, 10, 30))
+        with patch.object(engine, '_fetch_snapshot', return_value=snap), \
+             patch.object(engine, 'save_state'), \
+             patch('src.engine.datetime') as mock_dt:
+            mock_dt.now.return_value = safe_now
+            mock_dt.fromisoformat    = datetime.fromisoformat
+            engine.check_velocity_exits()
+
+        assert 'STP' in engine.state
+        assert not tc.submit_order.called
+
+    def test_software_stop_skipped_when_stop_loss_is_zero(self):
+        """stop_loss=0 (not yet set) must not trigger a spurious liquidation."""
+        tc = _mock_trading_client()
+        tz_ny = pytz.timezone('US/Eastern')
+        engine = _make_engine(trading_client=tc)
+        engine.state = {'STP': self._make_state(100.0, 98.0, 0.0, tz_ny)}
+
+        snap = _make_snapshot(price=98.0)
+        safe_now = tz_ny.localize(datetime(2024, 6, 5, 10, 30))
+        with patch.object(engine, '_fetch_snapshot', return_value=snap), \
+             patch.object(engine, 'save_state'), \
+             patch('src.engine.datetime') as mock_dt:
+            mock_dt.now.return_value = safe_now
+            mock_dt.fromisoformat    = datetime.fromisoformat
+            engine.check_velocity_exits()
+
+        assert 'STP' in engine.state, "stop_loss=0 must never trigger exit"
+        assert not tc.submit_order.called
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 14. FRIDAY CLOSE — close under-performing positions before weekend
 # ─────────────────────────────────────────────────────────────────────────────
 
