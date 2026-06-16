@@ -207,6 +207,8 @@ def get_state():
             "hold_trading_days": hold_trading_days,
             "entry_time":        entry_ts,
             "score":             d.get("score"),
+            "tier_sold":         int(d.get("tier_sold", 0)),
+            "original_qty":      float(d.get("original_qty", 0) or 0),
             "analyst_buy":       d.get("analyst_buy",  0),
             "analyst_hold":      d.get("analyst_hold", 0),
             "analyst_sell":      d.get("analyst_sell", 0),
@@ -1020,6 +1022,9 @@ function render(d) {
     if (p.stop_loss >= p.entry_price) badges += '<span class="badge badge-be">BREAK-EVEN ↑</span> ';
     if (velWin && unrP < 5)           badges += '<span class="badge badge-vel">VEL WINDOW ⚠</span> ';
     if (unrP >= 10)                    badges += `<span class="badge badge-strong">STRONG +${unrP.toFixed(1)}%</span> `;
+    const ts = p.tier_sold ?? 0;
+    if (ts === 1) badges += '<span class="badge badge-be">TIER 1 ✓</span> ';
+    if (ts >= 2)  badges += '<span class="badge badge-strong">TIER 2 ✓</span> ';
 
     // mini pnl bar
     const mW = Math.min(100, Math.abs(unrP)/10*100).toFixed(0);
