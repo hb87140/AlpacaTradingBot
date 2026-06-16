@@ -1,11 +1,11 @@
 services:
   - type: web
     name: velocity-trading-bot
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python main.py
+    runtime: docker
     healthCheckPath: /health
     # Render free tier: web service with auto-assigned PORT
+    # Docker build uses Dockerfile (python:3.13-slim) — bypasses Render's
+    # native Python runtime which auto-upgraded to 3.14 and has a deadlock bug.
     envVars:
       - key: ALPACA_API_KEY
         sync: false          # set manually in Render dashboard
