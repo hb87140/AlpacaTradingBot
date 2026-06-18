@@ -925,7 +925,7 @@ class VelocityEngine:
             else:
                 buy, hold, sell = 0, 0, 0
         except Exception as exc:
-            logger.debug(f"ANALYST {symbol}: ratings unavailable ({exc})")
+            logger.warning(f"ANALYST {symbol}: ratings unavailable — {type(exc).__name__}: {exc}")
             buy, hold, sell = 0, 0, 0
         result = {'analyst_buy': buy, 'analyst_hold': hold, 'analyst_sell': sell}
         self._analyst_cache[symbol] = result
