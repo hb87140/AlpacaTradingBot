@@ -434,16 +434,19 @@ class TestVelocityExit:
 
 # ── Break-even floor enforcement ──────────────────────────────────────────────
 class TestBreakEvenExitEnforcement:
-    """check_velocity_exits() must exit programmatically when price retraces
-    below entry after break-even was previously triggered (peak ≥ entry×1.04)."""
+    """After BREAK_EVEN_PCT peak, _update_position_prices floors stop_loss at
+    entry_price. Exit 1b (software stop_loss floor) then fires when price
+    retraces to/below entry. The old dedicated break-even exit was removed as
+    redundant — this class now verifies the exit-1b path covers that case."""
 
-    def _make_state(self, entry, peak, cur_price):
+    def _make_state(self, entry, peak, cur_price, stop_loss=0.0):
         engine = _make_engine()
         fresh  = datetime.now(_TZ_NY).isoformat()
         engine.state = {
             'AAPL': {
                 'price':      entry,
                 'peak_price': peak,
+                'stop_loss':  stop_loss,
                 'time':       fresh,
                 'qty':        10,
             }
@@ -451,12 +454,14 @@ class TestBreakEvenExitEnforcement:
         return engine
 
     def test_exit_triggered_when_price_below_entry_after_break_even(self):
+        """exit 1b fires when stop_loss was floored at entry by
+        _update_position_prices after peak hit BREAK_EVEN_PCT."""
         from src.config import BREAK_EVEN_PCT
         entry = 100.0
         peak  = entry * (1 + BREAK_EVEN_PCT + 0.01)
         cur   = entry - 0.50
-
-        engine = self._make_state(entry, peak, cur)
+        # _update_position_prices would have set stop_loss = entry once peak hit break-even
+        engine = self._make_state(entry, peak, cur, stop_loss=entry)
         _safe_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))
         with patch.object(engine, '_fetch_snapshot', return_value=_make_snapshot(cur)), \
              patch.object(engine, 'liquidate') as mock_liq, \
@@ -469,12 +474,12 @@ class TestBreakEvenExitEnforcement:
         mock_liq.assert_called_once_with('AAPL')
 
     def test_no_exit_when_price_above_entry_after_break_even(self):
+        """exit 1b does NOT fire when cur > stop_loss even if break-even was hit."""
         from src.config import BREAK_EVEN_PCT
         entry = 100.0
         peak  = entry * (1 + BREAK_EVEN_PCT + 0.01)
         cur   = entry + 0.01
-
-        engine = self._make_state(entry, peak, cur)
+        engine = self._make_state(entry, peak, cur, stop_loss=entry)
         _safe_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))
         with patch.object(engine, '_fetch_snapshot', return_value=_make_snapshot(cur)), \
              patch.object(engine, 'liquidate') as mock_liq, \

@@ -1481,19 +1481,18 @@ class VelocityEngine:
                 self.liquidate(sym)
                 continue
 
-            # 2. Break-even floor — software exit to catch what the TRAIL can miss
+            # 2. Keep peak_price current so _update_position_prices (which runs after
+            # this method) uses the latest price when recomputing the chandelier stop.
             peak_price = max(
                 float(data.get('peak_price', entry_price) or entry_price), cur
             )
             if peak_price != float(data.get('peak_price', 0) or 0):
                 self.state[sym]['peak_price'] = round(peak_price, 2)
-            if peak_price >= entry_price * (1 + BREAK_EVEN_PCT) and cur <= entry_price:
-                logger.warning(
-                    f"BREAK-EVEN EXIT: {sym} gave back {BREAK_EVEN_PCT*100:.0f}%+ profit "
-                    f"(peak=${peak_price:.2f}, cur=${cur:.2f}, entry=${entry_price:.2f})."
-                )
-                self.liquidate(sym)
-                continue
+
+            # NOTE: break-even retrace exit removed — exit 1b (software stop_loss
+            # floor) already covers it. stop_loss is floored at entry_price once
+            # peak >= BREAK_EVEN_PCT, so `cur <= stop_loss` fires at the same
+            # price level. Keeping both was redundant dead code.
 
             # 3. Tiered profit exits — sell 25% at 0.75R and 1.25R ATR multiples.
             # R = stop_dist (chandelier ATR distance set at entry), so thresholds scale
