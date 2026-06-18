@@ -528,6 +528,66 @@ class TestBreakEvenExitEnforcement:
         mock_liq.assert_called_once_with('AAPL')
 
 
+# ── Analyst ratings (FMP) ─────────────────────────────────────────────────────
+class TestGetAnalystRatings:
+    """_get_analyst_ratings fetches from FMP and maps field names correctly."""
+
+    def _make_fmp_row(self, strong_buy=5, buy=10, hold=4, sell=2, strong_sell=0):
+        return [{
+            'analystRatingsStrongBuy': strong_buy,
+            'analystRatingsbuy':       buy,
+            'analystRatingsHold':      hold,
+            'analystRatingsSell':      sell,
+            'analystRatingsStrongSell': strong_sell,
+        }]
+
+    def test_returns_zeros_when_no_api_key(self):
+        engine = _make_engine()
+        with patch('src.engine.FMP_API_KEY', ''):
+            result = engine._get_analyst_ratings('AAPL')
+        assert result == {'analyst_buy': 0, 'analyst_hold': 0, 'analyst_sell': 0}
+
+    def test_maps_fmp_fields_correctly(self):
+        engine = _make_engine()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_fmp_row(strong_buy=3, buy=7, hold=5, sell=1, strong_sell=1)
+        mock_resp.raise_for_status.return_value = None
+        with patch('src.engine.FMP_API_KEY', 'test-key'), \
+             patch('src.engine.httpx.get', return_value=mock_resp):
+            result = engine._get_analyst_ratings('AAPL')
+        assert result['analyst_buy']  == 10   # 3+7
+        assert result['analyst_hold'] == 5
+        assert result['analyst_sell'] == 2    # 1+1
+
+    def test_returns_zeros_on_http_error(self):
+        engine = _make_engine()
+        with patch('src.engine.FMP_API_KEY', 'test-key'), \
+             patch('src.engine.httpx.get', side_effect=Exception("timeout")):
+            result = engine._get_analyst_ratings('AAPL')
+        assert result == {'analyst_buy': 0, 'analyst_hold': 0, 'analyst_sell': 0}
+
+    def test_returns_zeros_on_empty_response(self):
+        engine = _make_engine()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = []
+        mock_resp.raise_for_status.return_value = None
+        with patch('src.engine.FMP_API_KEY', 'test-key'), \
+             patch('src.engine.httpx.get', return_value=mock_resp):
+            result = engine._get_analyst_ratings('AAPL')
+        assert result == {'analyst_buy': 0, 'analyst_hold': 0, 'analyst_sell': 0}
+
+    def test_session_cache_avoids_second_http_call(self):
+        engine = _make_engine()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_fmp_row()
+        mock_resp.raise_for_status.return_value = None
+        with patch('src.engine.FMP_API_KEY', 'test-key'), \
+             patch('src.engine.httpx.get', return_value=mock_resp) as mock_get:
+            engine._get_analyst_ratings('AAPL')
+            engine._get_analyst_ratings('AAPL')
+        mock_get.assert_called_once()   # second call hits cache
+
+
 # ── Position limit ────────────────────────────────────────────────────────────
 class TestPositionLimit:
     def test_max_positions_cap(self):

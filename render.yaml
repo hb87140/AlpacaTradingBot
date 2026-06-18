@@ -15,3 +15,5 @@ services:
         value: "true"        # change to "false" for live trading
       - key: ALPACA_DATA_FEED
         value: "iex"         # free feed; use "sip" for full tape on paid plan
+      - key: FMP_API_KEY
+        sync: false          # set manually in Render dashboard (financialmodelingprep.com free tier)

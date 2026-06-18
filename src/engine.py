@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from logging.handlers import TimedRotatingFileHandler
 from typing import Dict, List, Optional, Tuple
 
+import httpx
 import numpy as np
 import pandas as pd
 import pytz
@@ -28,7 +29,7 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from src.config import (
     BASE_DIR, STATE_FILE, DASHBOARD_FILE, EQUITY_HIST_FILE, LOG_DIR, LOG_FILE,
-    ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_PAPER, ALPACA_DATA_FEED,
+    ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_PAPER, ALPACA_DATA_FEED, FMP_API_KEY,
     MAX_POSITIONS_CAP, MIN_BUCKET_SIZE, BUCKET_CASH_PCT,
     VIX_THRESHOLD,
     ENTRY_START, ENTRY_END, EXIT_START, EXIT_END, VOL_MULT_FRIDAY, PRE_ENTRY_SYNC_TIME,
@@ -908,26 +909,32 @@ class VelocityEngine:
         return sector
 
     def _get_analyst_ratings(self, symbol: str) -> dict:
-        """Return analyst buy/hold/sell counts via yfinance, cached for the session.
+        """Return analyst buy/hold/sell counts via Financial Modeling Prep, session-cached.
 
+        Uses /api/v3/analyst-stock-recommendations (most recent month).
         strongBuy+buy → analyst_buy; hold → analyst_hold; sell+strongSell → analyst_sell.
-        Returns zeros on any error so scoring degrades gracefully.
+        Returns zeros when FMP_API_KEY is unset or on any network/parse error so
+        scoring degrades gracefully (0 bonus, no penalty).
         """
         if symbol in self._analyst_cache:
             return self._analyst_cache[symbol]
+        result = {'analyst_buy': 0, 'analyst_hold': 0, 'analyst_sell': 0}
+        if not FMP_API_KEY:
+            self._analyst_cache[symbol] = result
+            return result
         try:
-            summ = yf.Ticker(symbol).recommendations_summary
-            if summ is not None and not summ.empty:
-                row  = summ.iloc[0]
-                buy  = int(row.get('strongBuy', 0)) + int(row.get('buy', 0))
-                hold = int(row.get('hold', 0))
-                sell = int(row.get('sell', 0)) + int(row.get('strongSell', 0))
-            else:
-                buy, hold, sell = 0, 0, 0
+            url  = f"https://financialmodelingprep.com/api/v3/analyst-stock-recommendations/{symbol}"
+            resp = httpx.get(url, params={"limit": 1, "apikey": FMP_API_KEY}, timeout=5.0)
+            resp.raise_for_status()
+            data = resp.json()
+            if data and isinstance(data, list):
+                row  = data[0]
+                buy  = int(row.get('analystRatingsStrongBuy', 0)) + int(row.get('analystRatingsbuy', 0))
+                hold = int(row.get('analystRatingsHold', 0))
+                sell = int(row.get('analystRatingsSell', 0)) + int(row.get('analystRatingsStrongSell', 0))
+                result = {'analyst_buy': buy, 'analyst_hold': hold, 'analyst_sell': sell}
         except Exception as exc:
-            logger.warning(f"ANALYST {symbol}: ratings unavailable — {type(exc).__name__}: {exc}")
-            buy, hold, sell = 0, 0, 0
-        result = {'analyst_buy': buy, 'analyst_hold': hold, 'analyst_sell': sell}
+            logger.warning(f"ANALYST {symbol}: FMP fetch failed — {type(exc).__name__}: {exc}")
         self._analyst_cache[symbol] = result
         return result
 

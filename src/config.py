@@ -18,6 +18,12 @@ ALPACA_PAPER      = os.getenv("ALPACA_PAPER", "true").strip().lower() not in {"0
 # For paper trading IEX is sufficient; switch to "sip" when live.
 ALPACA_DATA_FEED  = os.getenv("ALPACA_DATA_FEED", "iex").strip().lower()
 
+# ── Financial Modeling Prep ────────────────────────────────────────────────────
+# Free tier: 250 req/day. Used for analyst buy/hold/sell consensus.
+# Register at financialmodelingprep.com; set FMP_API_KEY env var.
+# If unset, analyst bonus is skipped (scores degrade gracefully to 0 pts bonus).
+FMP_API_KEY = os.getenv("FMP_API_KEY", "")
+
 # ── Capital, position sizing, and broker-derived values ───────────────────────
 # Live capital always comes from Alpaca account.portfolio_value / account.cash.
 # Backtests still need explicit assumptions.
