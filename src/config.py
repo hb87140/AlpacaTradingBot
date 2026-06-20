@@ -40,7 +40,7 @@ BUCKET_CASH_PCT   = 0.90   # deploy 90% of bucket; 10% reserve avoids overdraft
 
 # ── Chandelier Exit trailing stop ─────────────────────────────────────────────
 CHANDELIER_PERIOD = 14     # lookback for ATR and highest-high
-CHANDELIER_MULT   = 2.5    # ATR multiplier — stop = peak − ATR(14) × 2.5
+CHANDELIER_MULT   = 1.0    # ATR multiplier — stop = peak − ATR(14) × 1.0
 
 # ── Risk rules ────────────────────────────────────────────────────────────────
 VIX_THRESHOLD        = 35
@@ -113,14 +113,6 @@ SCAN_MIN_VOLUME     = 500_000          # Universe filter: 20-day avg daily vol >
 SCAN_MIN_GAIN_PCT   = 1.0              # minimum daily % gain (backtest coarse filter)
 SCAN_MIN_DOLLAR_VOL = 2_500_000        # 20-day avg dollar volume floor ($2.5M)
 SCAN_MIN_SCORE      = 50.0             # minimum composite score (0-100) before entry
-
-# ── Tiered profit exits ───────────────────────────────────────────────────────
-# At each tier the engine sells TIER_EXIT_PCT of the ORIGINAL entry qty (floor).
-# Thresholds are R-multiples of the initial dollar stop distance (ATR × CHANDELIER_MULT),
-# so exits scale with volatility rather than using fixed percentage targets.
-# Remaining 50 % rides the chandelier trailing stop to maximise winners.
-TIER_EXIT_R_MULTIPLES = (0.75, 1.25)  # 0.75R and 1.25R ATR-based profit thresholds
-TIER_EXIT_PCT         = 0.25          # fraction of original qty to sell at each tier (25 %)
 
 # ── Ticker blocklist ─────────────────────────────────────────────────────────
 TICKER_BLOCKLIST: set = {

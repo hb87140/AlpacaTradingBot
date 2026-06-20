@@ -82,7 +82,6 @@ from src.config import (
     ALLIGATOR_FAST_OFFSET, ALLIGATOR_MED_OFFSET, ALLIGATOR_SLOW_OFFSET,
     ALLIGATOR_CROSS_LOOKBACK, DAY_STRENGTH_OPEN_PCT,
     FRIDAY_CLOSE_HOUR,
-    TIER_EXIT_R_MULTIPLES, TIER_EXIT_PCT,
 )
 from src.indicators import apply_all
 
@@ -896,44 +895,6 @@ class VelocityBacktest:
                     exit_reason = "alligator_reversal"
                     exit_price  = round(float(row['open']) * (1 - BACKTEST_EXIT_SLIPPAGE), 4)
 
-                # Tiered profit exits — mirror live engine logic.
-                # Execute all triggered tiers using today's close as exit price.
-                # Thresholds are R-multiples of the chandelier stop distance set at entry,
-                # so they scale with volatility rather than using fixed percentage targets.
-                if not exit_reason:
-                    tier_sold_count = t.__dict__.get('_tier_sold', 0)
-                    original_qty    = t.__dict__.get('_original_qty', t.qty)
-                    _today_idx_t    = _date_to_idx.get(today, -1)
-                    close_price     = float(row['close'])
-                    _chand_dist_bt  = t.__dict__.get('_chand_dist', 0)
-                    while tier_sold_count < len(TIER_EXIT_R_MULTIPLES):
-                        tier_threshold = TIER_EXIT_R_MULTIPLES[tier_sold_count]
-                        if _chand_dist_bt <= 0 or (close_price - t.entry_price) < tier_threshold * _chand_dist_bt:
-                            break  # threshold not yet reached
-                        tier_qty = int(original_qty * TIER_EXIT_PCT)  # floor
-                        if tier_qty < 1 or tier_qty > t.qty:
-                            break  # nothing meaningful to sell
-                        partial = Trade(
-                            symbol      = sym,
-                            entry_date  = t.entry_date,
-                            entry_price = t.entry_price,
-                            exit_date   = today.date() if hasattr(today, 'date') else today,
-                            exit_price  = round(close_price, 4),
-                            exit_reason = f"tier_{tier_sold_count + 1}",
-                            qty         = tier_qty,
-                            round_trip_commission = self._round_trip_cost,
-                        )
-                        _partial_proceeds = partial.exit_price * tier_qty - self._round_trip_cost
-                        if _today_idx_t + 1 < len(all_dates):
-                            pending_settlements.append((all_dates[_today_idx_t + 1], _partial_proceeds))
-                        else:
-                            settled_cash += _partial_proceeds
-                        self._filter_stats['tier_exits'] = self._filter_stats.get('tier_exits', 0) + 1
-                        trades.append(partial)
-                        t.qty -= tier_qty
-                        tier_sold_count += 1
-                        t.__dict__['_tier_sold'] = tier_sold_count
-
                 if exit_reason:
                     t.exit_date   = today.date() if hasattr(today, 'date') else today
                     t.exit_price  = exit_price
@@ -1099,8 +1060,6 @@ class VelocityBacktest:
                         t.__dict__['_atr_chand']     = atr_chand_val
                         t.__dict__['_peak_high']     = entry_price
                         t.__dict__['_bars_held']     = 0
-                        t.__dict__['_original_qty']  = qty   # fixed at entry for tier sizing
-                        t.__dict__['_tier_sold']     = 0
                         open_positions[sym]          = t
                         self._filter_stats['entries_taken'] += 1
 

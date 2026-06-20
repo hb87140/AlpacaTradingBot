@@ -57,7 +57,6 @@ from src.config import (
     ALLIGATOR_FAST_OFFSET, ALLIGATOR_MED_OFFSET, ALLIGATOR_SLOW_OFFSET,
     ALLIGATOR_CROSS_LOOKBACK,
     SPY_EMA_PERIOD, SPY_REGIME_SIZE_CUT, SPY_REGIME_RVOL_MULT, SPY_FILTER_ENABLED,
-    TIER_EXIT_R_MULTIPLES, TIER_EXIT_PCT,
 )
 from src.indicators import apply_all, compute_ma
 from src.rules import (
@@ -1044,8 +1043,6 @@ class VelocityEngine:
                     'peak_price':   round(avg_cost, 2),
                     'time':         fill_time,
                     'qty':          round(qty, 4),
-                    'original_qty': round(qty, 4),
-                    'tier_sold':    0,
                     'stop_loss':    0.0,
                     'volume':       0,
                     'score':        recomputed_score,
@@ -1358,60 +1355,6 @@ class VelocityEngine:
             logger.debug(f"RESCORE {sym}: failed ({e})")
             return None
 
-    def _execute_tier_sell(self, symbol: str, tier_qty: int, tier_num: int) -> bool:
-        """Partial market sell for a tiered profit exit.
-
-        Flow:
-        1. Cancel ALL open orders for the symbol — Alpaca blocks sells while the
-           GTC trailing stop holds the full qty.
-        2. Submit a market SELL for tier_qty shares.
-        3. Clear stop_order_id so _has_unprotected fires and _audit_stop_orders
-           re-places the TRAIL for the reduced remaining qty on the next cycle.
-
-        Returns True if the sell was submitted without error.
-        """
-        # Step 1: cancel open orders (including the trailing stop)
-        try:
-            open_orders = self.trading_client.get_orders(
-                GetOrdersRequest(status=QueryOrderStatus.OPEN)
-            )
-            for o in open_orders:
-                if o.symbol == symbol:
-                    try:
-                        self.trading_client.cancel_order_by_id(o.id)
-                    except Exception as ce:
-                        logger.warning(f"TIER SELL {symbol}: cancel {o.id} failed: {ce}")
-            if any(o.symbol == symbol for o in open_orders):
-                time.sleep(0.5)
-        except Exception as e:
-            logger.error(f"TIER SELL {symbol}: failed to fetch open orders: {e}")
-            return False
-
-        # Step 2: submit partial market sell
-        sell_req = MarketOrderRequest(
-            symbol=symbol,
-            qty=tier_qty,
-            side=OrderSide.SELL,
-            time_in_force=TimeInForce.DAY,
-        )
-        try:
-            self.trading_client.submit_order(sell_req)
-        except Exception as e:
-            logger.error(f"TIER SELL {symbol}: market sell {tier_qty} shares failed: {e}")
-            return False
-
-        logger.info(
-            f"TIER EXIT {symbol}: sold {tier_qty} shares at tier {tier_num}/2 "
-            f"({TIER_EXIT_R_MULTIPLES[tier_num - 1]:.2f}R ATR threshold)"
-        )
-
-        # Step 3: update state — qty is reconciled by _sync_positions next cycle
-        if symbol in self.state:
-            self.state[symbol]['tier_sold'] = tier_num
-            self.state[symbol].pop('stop_order_id', None)  # triggers audit to re-place TRAIL
-            self.save_state()
-        return True
-
     # ── Exit management ───────────────────────────────────────────────────────
     def check_velocity_exits(self) -> Dict[str, float]:
         """Manage all software-enforced exits: hard stop, break-even, Alligator reversal.
@@ -1501,32 +1444,7 @@ class VelocityEngine:
             # peak >= BREAK_EVEN_PCT, so `cur <= stop_loss` fires at the same
             # price level. Keeping both was redundant dead code.
 
-            # 3. Tiered profit exits — sell 25% at 0.75R and 1.25R ATR multiples.
-            # R = stop_dist (chandelier ATR distance set at entry), so thresholds scale
-            # with volatility rather than using fixed percentage targets.
-            # Remaining 50% rides the chandelier trailing stop.
-            tier_sold = int(data.get('tier_sold', 0))
-            if tier_sold < len(TIER_EXIT_R_MULTIPLES):
-                tier_threshold = TIER_EXIT_R_MULTIPLES[tier_sold]
-                stop_dist = float(data.get('stop_dist', 0))
-                profit_pts = cur - entry_price
-                if stop_dist > 0 and profit_pts >= tier_threshold * stop_dist:
-                    original_qty = float(data.get('original_qty', 0) or 0)
-                    if original_qty <= 0:
-                        original_qty = float(data.get('qty', 0))
-                    tier_qty = int(original_qty * TIER_EXIT_PCT)  # floor = nearest round number
-                    current_qty = int(float(data.get('qty', 0)))
-                    if tier_qty >= 1 and tier_qty <= current_qty:
-                        logger.info(
-                            f"TIER EXIT {sym}: profit=${profit_pts:.2f} ≥ {tier_threshold:.2f}R "
-                            f"(R=${stop_dist:.2f}) — selling {tier_qty}/{current_qty} "
-                            f"shares (tier {tier_sold+1}/2)"
-                        )
-                        self._execute_tier_sell(sym, tier_qty, tier_sold + 1)
-                        prefetched[sym] = cur
-                        continue  # remaining shares handled next cycle
-
-            # 4. Alligator reversal exit — re-fetch daily bars to get current SMMA state.
+            # 3. Alligator reversal exit — re-fetch daily bars to get current SMMA state.
             # Full confirmed reversal: both fast and medium SMMAs cross below slow.
             # Only fires when SMMA values are available (requires fetched daily bars).
             try:
@@ -2087,8 +2005,6 @@ class VelocityEngine:
                 'price':    limit_price,
                 'time':     datetime.now(_TZ_NY).isoformat(),
                 'qty':      qty,
-                'original_qty': qty,
-                'tier_sold': 0,
                 'stop_loss': round(limit_price - chandelier_dist, 2),
                 'stop_dist': chandelier_dist,
                 'peak_price': limit_price,
@@ -2195,8 +2111,6 @@ class VelocityEngine:
                 'entry_order_id': str(buy_order.id),
                 'time':           datetime.now(_TZ_NY).isoformat(),
                 'qty':            filled_qty,
-                'original_qty':   filled_qty,
-                'tier_sold':      0,
                 'stop_loss':      round(fill_price - chandelier_dist, 2),
                 'stop_dist':      chandelier_dist,
                 'peak_price':     round(fill_price, 2),
