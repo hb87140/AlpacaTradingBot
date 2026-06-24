@@ -69,7 +69,7 @@ from src.config import (
     SCAN_MIN_PRICE, SCAN_MIN_VOLUME, SCAN_MIN_DOLLAR_VOL,
     VIX_THRESHOLD,
     MIN_CANDLES, BACKTEST_RVOL_MIN,
-    CHANDELIER_PERIOD, CHANDELIER_MULT,
+    CHANDELIER_PERIOD, TRAIL_STOP_PCT,
     RSI_MIN_DELTA, HARD_STOP_PCT,
     RISK_PER_TRADE_PCT, BREAK_EVEN_PCT,
     BACKTEST_COMMISSION_PER_ORDER,
@@ -198,7 +198,7 @@ class VelocityBacktest:
         rvol_min:             float = BACKTEST_RVOL_MIN,
         min_score:            float = SCAN_MIN_SCORE,
         break_even_pct:       float = BREAK_EVEN_PCT,
-        chandelier_mult:      float = CHANDELIER_MULT,
+        trail_stop_pct:       float = TRAIL_STOP_PCT,
         chandelier_period:    int   = CHANDELIER_PERIOD,
         rsi_min_delta:        float = RSI_MIN_DELTA,
         commission_per_order: float = BACKTEST_COMMISSION_PER_ORDER,
@@ -220,7 +220,7 @@ class VelocityBacktest:
         self._rvol_min               = rvol_min
         self._min_score              = min_score
         self._break_even_pct         = break_even_pct
-        self._chandelier_mult        = chandelier_mult
+        self._trail_stop_pct         = trail_stop_pct
         self._chandelier_period      = chandelier_period
         self._rsi_min_delta          = rsi_min_delta
         self._round_trip_cost        = max(0.0, float(commission_per_order)) * 2.0
@@ -853,8 +853,7 @@ class VelocityBacktest:
                 t.__dict__['_bars_held'] = t.__dict__.get('_bars_held', 0) + 1
                 bars_held = t.__dict__['_bars_held']
 
-                atr_chand  = t.__dict__.get('_atr_chand', float(row['ATR']))
-                chand_dist = t.__dict__.get('_chand_dist', atr_chand * self._chandelier_mult)
+                chand_dist = t.__dict__.get('_chand_dist', round(t.entry_price * self._trail_stop_pct, 4))
 
                 # Track peak high since entry (Chandelier ratchet)
                 peak_high = max(t.__dict__.get('_peak_high', t.entry_price),
@@ -1023,9 +1022,8 @@ class VelocityBacktest:
                         if entry_price < SCAN_MIN_PRICE:
                             continue
 
-                        # ATR-based position sizing: risk 2% of equity per trade
-                        atr_chand_val   = float(row['ATR_CHAND'])
-                        chand_dist      = atr_chand_val * self._chandelier_mult
+                        # Percentage-based position sizing: risk 2% of equity per trade
+                        chand_dist      = round(entry_price * self._trail_stop_pct, 4)
                         hard_stop_dist  = entry_price * self._hard_stop_pct
                         # The tighter stop is the one that fires first → defines risk
                         risk_stop_dist  = min(chand_dist, hard_stop_dist)
@@ -1057,7 +1055,6 @@ class VelocityBacktest:
                         # Stop always stays exactly chand_dist below the peak,
                         # rising with the price but never changing in dollar terms.
                         t.__dict__['_chand_dist']    = chand_dist
-                        t.__dict__['_atr_chand']     = atr_chand_val
                         t.__dict__['_peak_high']     = entry_price
                         t.__dict__['_bars_held']     = 0
                         open_positions[sym]          = t

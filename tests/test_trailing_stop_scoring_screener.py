@@ -2,11 +2,11 @@
 Comprehensive validation of three critical VelocityEngine subsystems (Alpaca edition):
 
   1. Entry order construction (2-order structure: LMT BUY + TrailingStop SELL)
-     - chandelier_dist = ATR_CHAND × CHANDELIER_MULT (1.0)  — dollar amount
+     - trail_dist = fill_price × TRAIL_STOP_PCT (flat dollar amount, e.g. 4% of $100 = $4)
      - BUY order: LimitOrderRequest, time_in_force=DAY
-     - TRAIL stop: TrailingStopOrderRequest, trail_price=chandelier_dist, time_in_force=GTC
-     - state.stop_loss  = fill - chandelier_dist (dollar level for internal tracking)
-     - state.stop_dist  = chandelier_dist
+     - TRAIL stop: TrailingStopOrderRequest, trail_price=trail_dist, time_in_force=GTC
+     - state.stop_loss  = fill - trail_dist (dollar level for internal tracking)
+     - state.stop_dist  = trail_dist
      - No goodAfterTime on either order (Alpaca is commission-free, stateless REST)
 
   2. Screener (Alpaca get_candidates — gainers + most-actives)
@@ -245,17 +245,16 @@ class TestEntryOrderConstruction:
     """
     Verify that run_cycle() submits:
       1st call: LimitOrderRequest(side=BUY, time_in_force=DAY)
-      2nd call: TrailingStopOrderRequest(trail_price=chandelier_dist, time_in_force=GTC)
+      2nd call: TrailingStopOrderRequest(trail_price=fill_price × TRAIL_STOP_PCT, time_in_force=GTC)
 
     And that state records fill_price, stop_dist, stop_loss, score.
     """
 
-    ATR_CHAND  = 3.00
     ENTRY      = 100.00
-    CHAND_DIST = round(3.00 * 1.0, 2)   # 3.00
 
     def _setup(self, equity=2500.0, cash=2500.0):
-        from src.config import CHANDELIER_MULT
+        from src.config import TRAIL_STOP_PCT
+        self.TRAIL_DIST = round(self.ENTRY * TRAIL_STOP_PCT, 2)
         tc = _mock_trading_client(equity, cash)
 
         # get_order_by_id: first call is "filled" (buy poll), subsequent is stop confirmation
@@ -274,8 +273,7 @@ class TestEntryOrderConstruction:
         engine = _make_engine(equity, cash, trading_client=tc)
         ctx = _ctx(
             price=self.ENTRY,
-            atr=self.ATR_CHAND,
-            atr_chandelier=self.ATR_CHAND,
+            atr=3.0,
             orb=self.ENTRY - 5,
             ma50=self.ENTRY - 3,
             ma200=self.ENTRY - 15,
@@ -283,11 +281,10 @@ class TestEntryOrderConstruction:
         )
         return tc, engine, ctx
 
-    def test_chandelier_dist_equals_atr_chandelier_times_mult(self):
-        from src.config import CHANDELIER_MULT
-        assert CHANDELIER_MULT == 1.0
-        chandelier_dist = round(self.ATR_CHAND * CHANDELIER_MULT, 2)
-        assert chandelier_dist == self.CHAND_DIST
+    def test_trail_dist_equals_entry_price_times_trail_stop_pct(self):
+        from src.config import TRAIL_STOP_PCT
+        tc, engine, ctx = self._setup()
+        assert self.TRAIL_DIST == pytest.approx(self.ENTRY * TRAIL_STOP_PCT, abs=0.01)
 
     def test_two_submit_order_calls_placed(self):
         """Exactly 2 submit_order calls: LMT BUY + TrailingStop SELL."""
@@ -323,30 +320,25 @@ class TestEntryOrderConstruction:
         req = tc.submit_order.call_args_list[1][0][0]
         assert req.time_in_force == TimeInForce.GTC
 
-    def test_stop_trail_price_equals_chandelier_dist(self):
-        """trail_price = ATR_CHAND × CHANDELIER_MULT (dollar amount)."""
-        from src.config import CHANDELIER_MULT
+    def test_stop_trail_price_equals_pct_of_fill(self):
+        """trail_price = fill_price × TRAIL_STOP_PCT (flat dollar amount)."""
         tc, engine, ctx = self._setup()
         _run_entry_cycle(engine, ctx)
         req = tc.submit_order.call_args_list[1][0][0]
-        expected = round(self.ATR_CHAND * CHANDELIER_MULT, 2)
-        assert req.trail_price == pytest.approx(expected, abs=0.01)
+        assert req.trail_price == pytest.approx(self.TRAIL_DIST, abs=0.01)
 
-    def test_state_stop_dist_equals_chandelier_dist(self):
-        from src.config import CHANDELIER_MULT
+    def test_state_stop_dist_equals_trail_dist(self):
         tc, engine, ctx = self._setup()
         _run_entry_cycle(engine, ctx, sym='TSLA')
         assert 'TSLA' in engine.state
-        assert engine.state['TSLA']['stop_dist'] == pytest.approx(
-            round(self.ATR_CHAND * CHANDELIER_MULT, 2), abs=0.01
-        )
+        assert engine.state['TSLA']['stop_dist'] == pytest.approx(self.TRAIL_DIST, abs=0.01)
 
-    def test_state_stop_loss_equals_fill_minus_chandelier_dist(self):
+    def test_state_stop_loss_equals_fill_minus_trail_dist(self):
         tc, engine, ctx = self._setup()
         _run_entry_cycle(engine, ctx, sym='TSLA')
         assert 'TSLA' in engine.state
         sl = engine.state['TSLA']['stop_loss']
-        assert sl == pytest.approx(self.ENTRY - self.CHAND_DIST, abs=0.01)
+        assert sl == pytest.approx(self.ENTRY - self.TRAIL_DIST, abs=0.01)
 
     def test_state_has_no_take_profit(self):
         tc, engine, ctx = self._setup()
@@ -386,7 +378,7 @@ class TestEntryOrderConstruction:
         tc.get_order_by_id.return_value = cancelled
 
         engine = _make_engine(trading_client=tc)
-        ctx = _ctx(price=self.ENTRY, atr=self.ATR_CHAND, atr_chandelier=self.ATR_CHAND,
+        ctx = _ctx(price=self.ENTRY, atr=3.0,
                    orb=self.ENTRY - 5, ma50=self.ENTRY - 3, ma200=self.ENTRY - 15,
                    rsi=42.0, rsi_prev=37.0)
 
@@ -397,7 +389,7 @@ class TestEntryOrderConstruction:
         """limit_price above bucket_size → int qty_by_bucket = 0 → skip."""
         tc = _mock_trading_client(equity=2500.0, cash=2500.0)
         engine = _make_engine(equity=2500.0, cash=2500.0, trading_client=tc)
-        ctx = _ctx(price=2000.0, atr=10.0, atr_chandelier=10.0,
+        ctx = _ctx(price=2000.0, atr=10.0,
                    orb=1990.0, ma50=1990.0, ma200=1900.0,
                    rsi=42.0, rsi_prev=37.0)
         _run_entry_cycle(engine, ctx, equity=2500.0, cash=2500.0)
@@ -1373,22 +1365,13 @@ class TestEdgeCases:
         assert tc.submit_order.call_count == 0, "No order must be placed when ATR=NaN"
         assert 'TSLA' not in engine.state
 
-    def test_entry_skipped_when_atr_chandelier_is_nan(self):
-        """atr_chandelier=NaN must be caught before computing trail_price or state write."""
+    def test_entry_skipped_when_atr_is_nan(self):
+        """atr=NaN must be caught before order submission."""
         tc = _mock_trading_client()
         engine = _make_engine(trading_client=tc)
-        ctx = _ctx(price=100.0, atr=2.0, atr_chandelier=float('nan'))
+        ctx = _ctx(price=100.0, atr=float('nan'))
         _run_entry_cycle(engine, ctx)
-        assert tc.submit_order.call_count == 0, "No order must be placed when ATR_CHAND=NaN"
-        assert 'TSLA' not in engine.state
-
-    def test_entry_skipped_when_atr_chandelier_is_zero(self):
-        """atr_chandelier=0 must be caught — a zero-width trail stop is invalid."""
-        tc = _mock_trading_client()
-        engine = _make_engine(trading_client=tc)
-        ctx = _ctx(price=100.0, atr=2.0, atr_chandelier=0.0)
-        _run_entry_cycle(engine, ctx)
-        assert tc.submit_order.call_count == 0, "No order must be placed when ATR_CHAND=0"
+        assert tc.submit_order.call_count == 0, "No order must be placed when ATR=NaN"
         assert 'TSLA' not in engine.state
 
     # ── Scoring: MA200 = 0 guard ─────────────────────────────────────────────

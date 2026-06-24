@@ -47,7 +47,7 @@ from src.config import (
     FRIDAY_CLOSE_HOUR,
     MIN_CANDLES, RVOL_MIN, SPREAD_MAX_PCT,
     CORR_MAX, CORR_LOOKBACK, MAX_SECTOR_COUNT, SMA200_SLOPE_LOOKBACK,
-    CHANDELIER_PERIOD, CHANDELIER_MULT,
+    CHANDELIER_PERIOD, TRAIL_STOP_PCT,
     LIMIT_BUF_MIN_PCT, LIMIT_BUF_MAX_PCT,
     RISK_PER_TRADE_PCT,
     SCAN_MIN_SCORE,
@@ -647,34 +647,19 @@ class VelocityEngine:
                 continue
 
             # No trailing stop found — fetch bars and place one
-            logger.info(f"AUDIT: {sym} — no trailing stop found; placing chandelier stop...")
+            logger.info(f"AUDIT: {sym} — no trailing stop found; placing % trail stop...")
             try:
-                df = self._fetch_daily_bars(sym)
-                if df is None or len(df) < CHANDELIER_PERIOD:
-                    logger.error(
-                        f"AUDIT: {sym} — insufficient history; position UNPROTECTED."
-                    )
+                entry_price = float(pos_data.get('fill_price') or pos_data.get('price', 0))
+                if entry_price <= 0:
+                    logger.error(f"AUDIT: {sym} — no entry price in state; position UNPROTECTED.")
                     continue
-
-                df_ind = apply_all(df, RSI_PERIOD, ATR_PERIOD, MA_FAST, MA_SLOW,
-                                   SMA200_SLOPE_LOOKBACK, CHANDELIER_PERIOD)
-                atr_chandelier = float(df_ind['ATR_CHAND'].iloc[-1])
-                if np.isnan(atr_chandelier) or atr_chandelier <= 0:
-                    logger.error(
-                        f"AUDIT: {sym} — ATR_CHAND invalid; position UNPROTECTED."
-                    )
+                trail_dist = round(entry_price * TRAIL_STOP_PCT, 2)
+                if trail_dist <= 0:
+                    logger.error(f"AUDIT: {sym} — trail dist is zero; position UNPROTECTED.")
                     continue
-
-                chandelier_dist = round(atr_chandelier * CHANDELIER_MULT, 2)
-                # Alpaca rejects trail_price > 25% of stock price; use 24% buffer.
-                entry_px_for_cap = float(pos_data.get('fill_price') or pos_data.get('price', 0))
-                max_trail = round(entry_px_for_cap * 0.24, 2) if entry_px_for_cap > 0 else chandelier_dist
-                trail_dist = min(chandelier_dist, max_trail)
-                if trail_dist < chandelier_dist:
-                    logger.info(
-                        f"AUDIT: {sym} — chandelier dist ${chandelier_dist:.2f} capped "
-                        f"to ${trail_dist:.2f} (Alpaca 25% limit on ${entry_px_for_cap:.2f})"
-                    )
+                # Sync stop_dist in state in case it was set by a previous ATR-based run
+                if abs(float(pos_data.get('stop_dist', 0)) - trail_dist) > 0.01:
+                    self.state[sym]['stop_dist'] = trail_dist
                 stop_req = TrailingStopOrderRequest(
                     symbol=sym,
                     qty=qty,
@@ -708,8 +693,8 @@ class VelocityEngine:
                 self.state[sym]['stop_order_id'] = str(stop_order.id)
                 self.save_state()
                 logger.info(
-                    f"AUDIT: {sym} — chandelier stop placed "
-                    f"(trail_price=${trail_dist:.2f} id={stop_order.id})"
+                    f"AUDIT: {sym} — trailing stop placed "
+                    f"(trail_price=${trail_dist:.2f} = {TRAIL_STOP_PCT*100:.0f}% of entry, id={stop_order.id})"
                 )
             except Exception as e:
                 logger.error(
@@ -1938,15 +1923,11 @@ class VelocityEngine:
                 price   = ctx['live_price']
                 ask_now = ctx.get('ask', 0.0)
 
-            atr          = ctx['atr']
-            atr_chand    = ctx['atr_chandelier']
-            rvol_now     = ctx.get('rvol', RVOL_MIN)
+            atr      = ctx['atr']
+            rvol_now = ctx.get('rvol', RVOL_MIN)
 
             if np.isnan(atr) or atr <= 0:
                 logger.warning(f"SKIP {sym}: invalid ATR ({atr:.4f})")
-                continue
-            if np.isnan(atr_chand) or atr_chand <= 0:
-                logger.warning(f"SKIP {sym}: invalid ATR_CHAND ({atr_chand:.4f}) — zero-width trail stop")
                 continue
 
             # Adaptive limit price — ATR/RVOL scaled slippage buffer above ask
@@ -1963,9 +1944,9 @@ class VelocityEngine:
                 f"→ limit=${limit_price:.2f}"
             )
 
-            chandelier_dist = round(atr_chand * CHANDELIER_MULT, 2)
-            hard_stop_dist  = round(limit_price * HARD_STOP_PCT, 2)
-            risk_stop_dist  = max(min(chandelier_dist, hard_stop_dist), 0.01)
+            trail_dist     = round(limit_price * TRAIL_STOP_PCT, 2)
+            hard_stop_dist = round(limit_price * HARD_STOP_PCT, 2)
+            risk_stop_dist = max(min(trail_dist, hard_stop_dist), 0.01)
 
             risk_per_trade = equity * RISK_PER_TRADE_PCT
             qty_by_risk    = int(risk_per_trade / risk_stop_dist) if risk_stop_dist > 0 else 0
@@ -2005,8 +1986,8 @@ class VelocityEngine:
                 'price':    limit_price,
                 'time':     datetime.now(_TZ_NY).isoformat(),
                 'qty':      qty,
-                'stop_loss': round(limit_price - chandelier_dist, 2),
-                'stop_dist': chandelier_dist,
+                'stop_loss': round(limit_price - trail_dist, 2),
+                'stop_dist': trail_dist,
                 'peak_price': limit_price,
                 'volume':   ctx.get('volume', 0),
                 'score':    score,
@@ -2021,7 +2002,7 @@ class VelocityEngine:
             logger.info(
                 f"BUY SUBMITTED: {sym} | score={score:.1f} qty={qty} "
                 f"limit=${limit_price:.2f} | "
-                f"Chandelier dist=${chandelier_dist:.2f} | "
+                f"Trail dist=${trail_dist:.2f} ({TRAIL_STOP_PCT*100:.0f}%) | "
                 f"order_id={buy_order.id}"
             )
 
@@ -2067,8 +2048,9 @@ class VelocityEngine:
                 )
                 continue
 
-            # ── Submit chandelier trailing stop ───────────────────────────────
+            # ── Submit % trailing stop ────────────────────────────────────────
             # Deferred until EXIT_START to avoid opening-print volatility fills.
+            trail_dist_fill = round(fill_price * TRAIL_STOP_PCT, 2)
             now_for_stop = datetime.now(_TZ_NY)
             if (now_for_stop.hour, now_for_stop.minute) < EXIT_START:
                 logger.info(
@@ -2077,32 +2059,22 @@ class VelocityEngine:
                 )
                 stop_order = None
             else:
-                # Alpaca rejects trail_price > 25% of stock price; use 24% to leave a
-                # buffer for intraday price movement between fill and stop submission.
-                max_trail_entry = round(fill_price * 0.24, 2)
-                trail_dist_entry = min(chandelier_dist, max_trail_entry)
-                if trail_dist_entry < chandelier_dist:
-                    logger.info(
-                        f"ENTRY {sym}: chandelier dist ${chandelier_dist:.2f} capped "
-                        f"to ${trail_dist_entry:.2f} (Alpaca 25% limit on ${fill_price:.2f})"
-                    )
                 stop_req = TrailingStopOrderRequest(
                     symbol=sym,
                     qty=filled_qty,
                     side=OrderSide.SELL,
                     time_in_force=TimeInForce.GTC,
-                    trail_price=trail_dist_entry,
+                    trail_price=trail_dist_fill,
                 )
                 try:
                     stop_order = self.trading_client.submit_order(stop_req)
-                    chandelier_dist = trail_dist_entry  # use capped value in state write
                 except Exception as stop_err:
                     logger.error(
                         f"ENTRY {sym}: trailing stop placement failed ({stop_err}). "
                         "Position open WITHOUT stop — audit will retry next cycle."
                     )
                     stop_order = None
-                    chandelier_dist = 0  # triggers has_unprotected → audit retries
+                    trail_dist_fill = 0  # triggers has_unprotected → audit retries
 
             # Update state with confirmed fill details
             self.state[sym] = {
@@ -2111,8 +2083,8 @@ class VelocityEngine:
                 'entry_order_id': str(buy_order.id),
                 'time':           datetime.now(_TZ_NY).isoformat(),
                 'qty':            filled_qty,
-                'stop_loss':      round(fill_price - chandelier_dist, 2),
-                'stop_dist':      chandelier_dist,
+                'stop_loss':      round(fill_price - trail_dist_fill, 2),
+                'stop_dist':      trail_dist_fill,
                 'peak_price':     round(fill_price, 2),
                 'volume':         ctx.get('volume', 0),
                 'score':          score,
@@ -2136,8 +2108,8 @@ class VelocityEngine:
             logger.info(
                 f"ORDER CONFIRMED: {sym} | score={score:.1f} qty={filled_qty:g} "
                 f"limit=${limit_price:.2f} fill=${fill_price:.2f} "
-                f"chandelier=${round(fill_price-chandelier_dist,2):.2f} "
-                f"(dist=${chandelier_dist:.2f}) | settled remaining=${settled:.2f}"
+                f"trail_stop=${round(fill_price-trail_dist_fill,2):.2f} "
+                f"(dist=${trail_dist_fill:.2f} = {TRAIL_STOP_PCT*100:.0f}%) | settled remaining=${settled:.2f}"
             )
 
         self._update_position_prices(prefetched)

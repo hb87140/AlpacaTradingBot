@@ -38,9 +38,11 @@ MIN_BUCKET_SIZE   = float(os.getenv("VELOCITY_MIN_BUCKET_SIZE", "500.0"))
 MAX_POSITIONS_CAP = int(os.getenv("VELOCITY_MAX_POSITIONS_CAP", "8"))
 BUCKET_CASH_PCT   = 0.90   # deploy 90% of bucket; 10% reserve avoids overdraft
 
-# ── Chandelier Exit trailing stop ─────────────────────────────────────────────
-CHANDELIER_PERIOD = 14     # lookback for ATR and highest-high
-CHANDELIER_MULT   = 1.0    # ATR multiplier — stop = peak − ATR(14) × 1.0
+# ── Trailing stop ─────────────────────────────────────────────────────────────
+# Flat percentage of entry price. Example: entry=$100, TRAIL_STOP_PCT=0.04
+# → trail=$4, Alpaca GTC trail_price=$4, initial stop=$96.
+TRAIL_STOP_PCT    = 0.04
+CHANDELIER_PERIOD = 14     # ATR period still used by indicators.apply_all (ATR_CHAND column)
 
 # ── Risk rules ────────────────────────────────────────────────────────────────
 VIX_THRESHOLD        = 35

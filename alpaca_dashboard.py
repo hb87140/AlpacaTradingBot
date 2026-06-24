@@ -32,7 +32,7 @@ from src.config import (
     MAX_POSITIONS_CAP, MIN_BUCKET_SIZE, BUCKET_CASH_PCT, VIX_THRESHOLD,
     SCAN_MIN_VOLUME, SCAN_MIN_DOLLAR_VOL,
     SPREAD_MAX_PCT, RVOL_MIN,
-    CHANDELIER_PERIOD, CHANDELIER_MULT,
+    CHANDELIER_PERIOD, TRAIL_STOP_PCT,
     HARD_STOP_PCT, BREAK_EVEN_PCT,
     MAX_DAILY_LOSS_PCT, CORR_MAX, MAX_SECTOR_COUNT,
     ENTRY_START, ENTRY_END, FRIDAY_CLOSE_HOUR,
@@ -1204,7 +1204,7 @@ _COND_JS = (
     f'  ["11", "Score Gate",       "en", "Composite score ≥ {SCAN_MIN_SCORE:.0f}/100 required: Alligator {SCORE_ALLIGATOR_MAX:.0f}pts + RVOL {SCORE_RVOL_MAX:.0f}pts + RSI {SCORE_RSI_DELTA_MAX:.0f}pts + Liquidity {SCORE_LIQUIDITY_MAX:.0f}pts + Analyst Consensus {SCORE_ANALYST_MAX:.0f}pts bonus (total capped 100)"]\n'
     f'];\n'
     f'const EXIT_CONDITIONS = [\n'
-    f'  ["1", "Chandelier Trail",   "ex", "TRAIL SELL at ATR({CHANDELIER_PERIOD})×{CHANDELIER_MULT:.1f} from peak price — Alpaca raises the stop automatically as price climbs; dollar distance fixed at entry"],\n'
+    f'  ["1", "% Trail Stop",       "ex", "TRAIL SELL at {TRAIL_STOP_PCT*100:.0f}% of fill price below peak — Alpaca raises the stop as price climbs; dollar distance fixed at entry"],\n'
     f'  ["2", "Alligator Reversal", "ex", "Fast SMMA({ALLIGATOR_FAST}) AND Med SMMA({ALLIGATOR_MED}) both cross below Slow SMMA({ALLIGATOR_SLOW}) — confirmed bearish reversal, trend structure broken"],\n'
     f'  ["3", "Hard Stop",          "ex", "{HARD_STOP_PCT*100:.0f}% drawdown from fill price triggers immediate Market SELL regardless of ATR stop distance"],\n'
     f'  ["4", "Break-Even Floor",   "ex", "Once profit ≥ {BREAK_EVEN_PCT*100:.0f}%, chandelier stop is floored at fill price — software-enforced, prevents winners from becoming losers"],\n'

@@ -1236,7 +1236,8 @@ class TestSectorClusteringFilter:
 
         existing = {
             f'HELD{i}': {'price': 100.0, 'qty': 5, 'time': '2026-05-19T10:00:00',
-                         'stop_loss': 93.0, 'volume': 0, 'score': 80.0}
+                         'stop_loss': 93.0, 'stop_dist': 4.0, 'stop_order_id': f'trail-{i}',
+                         'volume': 0, 'score': 80.0}
             for i in range(MAX_SECTOR_COUNT)
         }
         tc = _mock_trading_client(equity=10000.0, cash=10000.0)
@@ -1258,6 +1259,7 @@ class TestSectorClusteringFilter:
         }
 
         with patch.object(engine, '_sync_positions'), \
+             patch.object(engine, '_audit_stop_orders'), \
              patch.object(engine, 'check_velocity_exits', return_value={}), \
              patch.object(engine, '_update_position_prices'), \
              patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
@@ -1290,6 +1292,7 @@ class TestCorrelationFilter:
         tc = _mock_trading_client(equity=5000.0, cash=5000.0)
         engine = _make_engine(trading_client=tc, state={
             'AAPL': {'price': 150.0, 'qty': 10, 'stop_loss': 139.5,
+                     'stop_dist': 6.0, 'stop_order_id': 'trail-aapl',
                      'time': '2026-05-19T10:00:00', 'volume': 0, 'score': 80.0}
         })
 
@@ -1314,6 +1317,7 @@ class TestCorrelationFilter:
         }
 
         with patch.object(engine, '_sync_positions'), \
+             patch.object(engine, '_audit_stop_orders'), \
              patch.object(engine, 'check_velocity_exits', return_value={}), \
              patch.object(engine, '_update_position_prices'), \
              patch.object(engine, '_fetch_spy_trend', return_value=_SPY_BULL_REGIME), \
