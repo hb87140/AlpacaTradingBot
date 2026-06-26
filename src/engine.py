@@ -617,34 +617,51 @@ class VelocityEngine:
                 time.sleep(1)
 
             if trail_orders:
-                kept = trail_orders[0]
-                # Restore stop_dist from the live order if state is missing it
-                # (happens after a crash restart where _sync_positions re-adds the
-                # position without stop_dist).  Without this, _has_unprotected fires
-                # every cycle and _update_position_prices skips the stop_loss update.
-                trail_dist = float(kept.trail_price or 0)
-                state_changed = False
-                if trail_dist > 0 and float(pos_data.get('stop_dist', 0)) <= 0:
-                    entry_px = float(pos_data.get('fill_price') or pos_data.get('price', 0))
-                    self.state[sym]['stop_dist'] = trail_dist
-                    self.state[sym]['stop_loss'] = round(entry_px - trail_dist, 2)
-                    state_changed = True
+                kept            = trail_orders[0]
+                trail_dist_live = float(kept.trail_price or 0)
+
+                # Replace stale stop if trail_price doesn't match current TRAIL_STOP_PCT.
+                # Catches migrations (ATR-based → % flat) and config changes mid-run.
+                entry_px_chk = float(pos_data.get('fill_price') or pos_data.get('price', 0))
+                target_dist  = round(entry_px_chk * TRAIL_STOP_PCT, 2) if entry_px_chk > 0 else 0
+                if target_dist > 0 and trail_dist_live > 0 and abs(trail_dist_live - target_dist) > 0.01:
                     logger.info(
-                        f"AUDIT: {sym} — trailing stop confirmed; restored stop_dist "
-                        f"(id={kept.id} trail_price=${trail_dist:.2f})"
+                        f"AUDIT: {sym} — replacing stale trailing stop "
+                        f"(current=${trail_dist_live:.2f}, target=${target_dist:.2f} "
+                        f"= {TRAIL_STOP_PCT*100:.0f}% of entry ${entry_px_chk:.2f}, id={kept.id})"
                     )
+                    try:
+                        self.trading_client.cancel_order_by_id(kept.id)
+                        time.sleep(1)
+                    except Exception as e:
+                        logger.warning(f"AUDIT: {sym} — cancel stale stop failed: {e}")
+                    self.state[sym].pop('stop_order_id', None)
+                    self.state[sym]['stop_dist'] = 0
+                    # fall through to the placement block below
                 else:
-                    logger.info(
-                        f"AUDIT: {sym} — trailing stop confirmed "
-                        f"(id={kept.id} trail_price=${kept.trail_price})"
-                    )
-                # Persist the confirmed order ID so has_unprotected doesn't re-fire.
-                if self.state[sym].get('stop_order_id') != str(kept.id):
-                    self.state[sym]['stop_order_id'] = str(kept.id)
-                    state_changed = True
-                if state_changed:
-                    self.save_state()
-                continue
+                    # Correct stop already in place — restore state if needed.
+                    trail_dist    = trail_dist_live
+                    state_changed = False
+                    if trail_dist > 0 and float(pos_data.get('stop_dist', 0)) <= 0:
+                        entry_px = float(pos_data.get('fill_price') or pos_data.get('price', 0))
+                        self.state[sym]['stop_dist'] = trail_dist
+                        self.state[sym]['stop_loss'] = round(entry_px - trail_dist, 2)
+                        state_changed = True
+                        logger.info(
+                            f"AUDIT: {sym} — trailing stop confirmed; restored stop_dist "
+                            f"(id={kept.id} trail_price=${trail_dist:.2f})"
+                        )
+                    else:
+                        logger.info(
+                            f"AUDIT: {sym} — trailing stop confirmed "
+                            f"(id={kept.id} trail_price=${kept.trail_price})"
+                        )
+                    if self.state[sym].get('stop_order_id') != str(kept.id):
+                        self.state[sym]['stop_order_id'] = str(kept.id)
+                        state_changed = True
+                    if state_changed:
+                        self.save_state()
+                    continue
 
             # No trailing stop found — fetch bars and place one
             logger.info(f"AUDIT: {sym} — no trailing stop found; placing % trail stop...")

@@ -2008,9 +2008,12 @@ class TestAuditRestoresStopDist:
         return engine
 
     def test_audit_restores_stop_dist_from_existing_trail(self):
-        """When the audit finds an existing TRAIL for a re-synced position with
-        stop_dist=0, it must restore stop_dist and compute stop_loss correctly."""
-        engine = self._make_engine_with_trail_order(trail_dist=5.0, fill_price=100.0)
+        """When the audit finds an existing TRAIL at the correct % for a re-synced position
+        with stop_dist=0, it must restore stop_dist and compute stop_loss correctly."""
+        from src.config import TRAIL_STOP_PCT
+        fill_price  = 100.0
+        trail_dist  = round(fill_price * TRAIL_STOP_PCT, 2)   # e.g. 100*0.02 = 2.0
+        engine = self._make_engine_with_trail_order(trail_dist=trail_dist, fill_price=fill_price)
 
         _safe_now = _TZ_NY.localize(datetime(2024, 6, 5, 10, 30))
         with patch('src.engine.datetime') as mock_dt:
@@ -2018,23 +2021,26 @@ class TestAuditRestoresStopDist:
             mock_dt.fromisoformat    = datetime.fromisoformat
             engine._audit_stop_orders()
 
-        assert engine.state['AAPL']['stop_dist'] == 5.0, (
+        assert engine.state['AAPL']['stop_dist'] == pytest.approx(trail_dist, abs=0.01), (
             "stop_dist must be restored from the confirmed TRAIL's trail_price"
         )
-        assert engine.state['AAPL']['stop_loss'] == 95.0, (
-            "stop_loss must equal fill_price - trail_dist = 100.0 - 5.0 = 95.0"
+        assert engine.state['AAPL']['stop_loss'] == pytest.approx(fill_price - trail_dist, abs=0.01), (
+            "stop_loss must equal fill_price - trail_dist"
         )
 
     def test_audit_does_not_overwrite_valid_stop_dist(self):
-        """When stop_dist is already set (normal entry path), the audit must not
-        overwrite it — only re-synced positions with stop_dist=0 need restoration."""
+        """When stop_dist and trail_price already match TRAIL_STOP_PCT, the audit
+        must not overwrite stop_dist or stop_loss — position is correctly protected."""
+        from src.config import TRAIL_STOP_PCT
+        fill_price = 100.0
+        trail_dist = round(fill_price * TRAIL_STOP_PCT, 2)   # correct % trail
         engine = _make_engine()
         engine.state['AAPL'] = {
-            'fill_price': 100.0,
-            'price':      100.0,
+            'fill_price': fill_price,
+            'price':      fill_price,
             'qty':        10.0,
-            'stop_loss':  92.0,
-            'stop_dist':  8.0,   # already set from original entry
+            'stop_loss':  round(fill_price - trail_dist, 2),
+            'stop_dist':  trail_dist,   # already set correctly at entry
             'time':       '2024-06-05T10:30:00',
         }
 
@@ -2043,16 +2049,16 @@ class TestAuditRestoresStopDist:
         trail_order.side        = 'sell'
         trail_order.order_type  = 'trailing_stop'
         trail_order.id          = 'trail-order-id'
-        trail_order.trail_price = '6.0'   # different value — must NOT be applied
+        trail_order.trail_price = str(trail_dist)   # matches — must NOT be replaced
 
         engine.trading_client.get_orders.return_value = [trail_order]
         engine._audit_stop_orders()
 
-        assert engine.state['AAPL']['stop_dist'] == 8.0, (
-            "stop_dist must remain at the original entry value when already > 0"
+        assert engine.state['AAPL']['stop_dist'] == pytest.approx(trail_dist, abs=0.01), (
+            "stop_dist must remain unchanged when trail_price matches TRAIL_STOP_PCT"
         )
-        assert engine.state['AAPL']['stop_loss'] == 92.0, (
-            "stop_loss must remain unchanged when stop_dist was already set"
+        assert engine.state['AAPL']['stop_loss'] == pytest.approx(fill_price - trail_dist, abs=0.01), (
+            "stop_loss must remain unchanged when position is correctly protected"
         )
 
     def test_audit_restore_in_source(self):

@@ -39,9 +39,9 @@ MAX_POSITIONS_CAP = int(os.getenv("VELOCITY_MAX_POSITIONS_CAP", "8"))
 BUCKET_CASH_PCT   = 0.90   # deploy 90% of bucket; 10% reserve avoids overdraft
 
 # ── Trailing stop ─────────────────────────────────────────────────────────────
-# Flat percentage of entry price. Example: entry=$100, TRAIL_STOP_PCT=0.04
-# → trail=$4, Alpaca GTC trail_price=$4, initial stop=$96.
-TRAIL_STOP_PCT    = 0.04
+# Flat percentage of entry price. Example: entry=$100, TRAIL_STOP_PCT=0.02
+# → trail=$2, Alpaca GTC trail_price=$2, initial stop=$98.
+TRAIL_STOP_PCT    = 0.02
 CHANDELIER_PERIOD = 14     # ATR period still used by indicators.apply_all (ATR_CHAND column)
 
 # ── Risk rules ────────────────────────────────────────────────────────────────

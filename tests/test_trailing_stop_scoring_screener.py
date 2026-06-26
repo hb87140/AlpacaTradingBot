@@ -2,7 +2,7 @@
 Comprehensive validation of three critical VelocityEngine subsystems (Alpaca edition):
 
   1. Entry order construction (2-order structure: LMT BUY + TrailingStop SELL)
-     - trail_dist = fill_price × TRAIL_STOP_PCT (flat dollar amount, e.g. 4% of $100 = $4)
+     - trail_dist = fill_price × TRAIL_STOP_PCT (flat dollar amount, e.g. 2% of $100 = $2)
      - BUY order: LimitOrderRequest, time_in_force=DAY
      - TRAIL stop: TrailingStopOrderRequest, trail_price=trail_dist, time_in_force=GTC
      - state.stop_loss  = fill - trail_dist (dollar level for internal tracking)
@@ -2243,9 +2243,12 @@ class TestAuditStopOrders:
         }
 
     def test_existing_trail_stop_confirmed_no_new_order(self):
-        """If trailing stop already exists, no new submit_order called."""
+        """If trailing stop already exists with the correct % trail_price, no new order placed."""
+        from src.config import TRAIL_STOP_PCT
         tc = _mock_trading_client()
-        tc.get_orders.return_value = [self._trail_order('AAPL')]
+        # Trail price must match entry_price × TRAIL_STOP_PCT to be treated as current.
+        correct_trail = round(100.0 * TRAIL_STOP_PCT, 2)
+        tc.get_orders.return_value = [self._trail_order('AAPL', trail_price=correct_trail)]
 
         engine = _make_engine(trading_client=tc)
         engine.state = self._state_with_position('AAPL')
@@ -2254,8 +2257,37 @@ class TestAuditStopOrders:
              patch('src.engine.time.sleep'):
             engine._audit_stop_orders()
 
-        # submit_order should not be called — trail already exists
+        # submit_order should not be called — correct trail already exists
         assert tc.submit_order.call_count == 0
+
+    def test_stale_trail_stop_cancelled_and_replaced(self):
+        """A trailing stop with wrong trail_price (e.g., ATR-based) is cancelled and replaced."""
+        from src.config import TRAIL_STOP_PCT
+        tc = _mock_trading_client()
+        stale = self._trail_order('AAPL', trail_price=6.0, order_id='trail-stale')
+        tc.get_orders.return_value = [stale]
+
+        accepted = MagicMock(id='trail-new', status='accepted')
+        tc.submit_order.return_value = accepted
+        tc.get_order_by_id.return_value = MagicMock(status='accepted')
+
+        engine = _make_engine(trading_client=tc)
+        engine.state = self._state_with_position('AAPL')  # fill_price=100.0
+
+        _safe_now = pytz.timezone('US/Eastern').localize(datetime(2024, 6, 5, 10, 30))
+        with patch.object(engine, 'save_state'), \
+             patch('src.engine.time.sleep'), \
+             patch('src.engine.datetime') as mock_dt:
+            mock_dt.now.return_value = _safe_now
+            mock_dt.fromisoformat    = datetime.fromisoformat
+            engine._audit_stop_orders()
+
+        cancelled = [c[0][0] for c in tc.cancel_order_by_id.call_args_list]
+        assert 'trail-stale' in cancelled, "Stale (ATR-based) trailing stop must be cancelled"
+        assert tc.submit_order.call_count == 1
+        req = tc.submit_order.call_args[0][0]
+        assert isinstance(req, TrailingStopOrderRequest)
+        assert req.trail_price == pytest.approx(round(100.0 * TRAIL_STOP_PCT, 2), abs=0.01)
 
     def test_non_trail_sell_cancelled_before_new_stop(self):
         """Non-trailing-stop SELL is cancelled before placing new trailing stop."""
@@ -2333,10 +2365,12 @@ class TestAuditStopOrders:
 
     def test_duplicate_trail_stops_deduped(self):
         """Multiple trailing stops for same symbol → oldest cancelled, newest kept."""
+        from src.config import TRAIL_STOP_PCT
         tc = _mock_trading_client()
-        older = self._trail_order('AAPL', trail_price=6.0, order_id='trail-old')
+        correct_trail = round(100.0 * TRAIL_STOP_PCT, 2)
+        older = self._trail_order('AAPL', trail_price=correct_trail, order_id='trail-old')
         older.created_at = datetime(2024, 6, 5, 9, 0)
-        newer = self._trail_order('AAPL', trail_price=6.0, order_id='trail-new')
+        newer = self._trail_order('AAPL', trail_price=correct_trail, order_id='trail-new')
         newer.created_at = datetime(2024, 6, 5, 10, 0)
         tc.get_orders.return_value = [older, newer]
 
