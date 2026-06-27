@@ -35,7 +35,7 @@ BACKTEST_COMMISSION_PER_ORDER = float(os.getenv("VELOCITY_BACKTEST_COMMISSION_PE
 # New entries are further constrained by settled cash so the cash account never
 # spends unsettled proceeds.
 MIN_BUCKET_SIZE   = float(os.getenv("VELOCITY_MIN_BUCKET_SIZE", "500.0"))
-MAX_POSITIONS_CAP = int(os.getenv("VELOCITY_MAX_POSITIONS_CAP", "8"))
+MAX_POSITIONS_CAP = int(os.getenv("VELOCITY_MAX_POSITIONS_CAP", "12"))
 BUCKET_CASH_PCT   = 0.90   # deploy 90% of bucket; 10% reserve avoids overdraft
 
 # ── Trailing stop ─────────────────────────────────────────────────────────────
@@ -61,7 +61,7 @@ REPRICE_DRIFT_MAX_PCT  = 0.02  # skip entry if price moved >2% since scan snapsh
 ENTRY_START          = (9, 35)   # first valid entry (5 min after open)
 EXIT_START           = (9, 32)   # earliest software exit (avoids opening-print volatility)
 EXIT_END             = (16, 0)   # latest software exit — no market sells after close
-ENTRY_END            = (14, 0)
+ENTRY_END            = (15, 0)
 VOL_MULT_FRIDAY      = 2.0       # Friday liquidity gate: 2× normal threshold
 PRE_ENTRY_SYNC_TIME  = (9, 44)   # pre-entry position re-sync + stop audit
 FRIDAY_CLOSE_HOUR    = 15        # ET hour after which new entries are blocked on Fridays
@@ -111,9 +111,9 @@ DAILY_HISTORY_DAYS = 400   # enough to produce 200+ trading-day bars
 
 # ── Scanner filters ───────────────────────────────────────────────────────────
 SCAN_MIN_PRICE      = 1.0               # Universe filter: price > $1 (excludes sub-penny stocks only)
-SCAN_MIN_VOLUME     = 500_000          # Universe filter: 20-day avg daily vol > 500K shares
+SCAN_MIN_VOLUME     = 250_000          # Universe filter: 20-day avg daily vol > 250K shares
 SCAN_MIN_GAIN_PCT   = 1.0              # minimum daily % gain (backtest coarse filter)
-SCAN_MIN_DOLLAR_VOL = 2_500_000        # 20-day avg dollar volume floor ($2.5M)
+SCAN_MIN_DOLLAR_VOL = 1_000_000        # 20-day avg dollar volume floor ($1M; spread filter guards quality)
 SCAN_MIN_SCORE      = 50.0             # minimum composite score (0-100) before entry
 
 # ── Ticker blocklist ─────────────────────────────────────────────────────────

@@ -261,8 +261,8 @@ class TestExpertFilter:
         assert self._engine_passes(ctx) is False
 
     def test_fails_when_dollar_volume_below_threshold(self):
-        """Dollar volume 2M < SCAN_MIN_DOLLAR_VOL=2.5M fails dollar_vol rule."""
-        ctx = self._base_ctx(); ctx['dollar_vol_20d'] = 2_000_000
+        """Dollar volume 500K < SCAN_MIN_DOLLAR_VOL=1M fails dollar_vol rule."""
+        ctx = self._base_ctx(); ctx['dollar_vol_20d'] = 500_000
         assert self._engine_passes(ctx) is False
 
     def test_passes_when_dollar_volume_at_threshold(self):
@@ -874,7 +874,7 @@ class TestDailyScanSkip:
         engine = _make_engine()
         engine.state = {}
 
-        # dollar_vol_20d=2M < SCAN_MIN_DOLLAR_VOL=2.5M → PERMANENT_DAY_RULES fail
+        # dollar_vol_20d=500K < SCAN_MIN_DOLLAR_VOL=1M → PERMANENT_DAY_RULES fail
         ctx = {
             'live_price': 100.0,
             'rsi': 38.0, 'rsi_prev': 35.0,
@@ -882,7 +882,7 @@ class TestDailyScanSkip:
             'intraday_open': 99.0, 'intraday_high': 100.5, 'intraday_low': 97.0,
             'atr': 2.0, 'atr_chandelier': 2.0,
             'rvol': 3.0, 'spread_pct': 0.002,
-            'dollar_vol_20d': 2_000_000,   # below 2.5M threshold → permanent fail
+            'dollar_vol_20d': 500_000,   # below 1M threshold → permanent fail
             'avg_20d_vol': 5_000_000, 'volume': 5_000_000,
             'close': 99.5,
             'price_fetched_at': _TZ_NY.localize(datetime(2024, 6, 5, 10, 30)),
