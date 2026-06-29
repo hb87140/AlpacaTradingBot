@@ -668,7 +668,6 @@ footer a:hover{color:var(--text2);}
           <th>UNREALIZED P&amp;L</th>
           <th>STOP LOSS</th>
           <th>TRAIL STOP</th>
-          <th>RISK TO STOP</th>
           <th>HOLD</th>
           <th>STATUS</th>
         </tr>
@@ -1000,15 +999,10 @@ function render(d) {
     const scCol = p.score!=null ? (p.score>=70?'var(--green)':p.score>=45?'var(--yellow)':'var(--red)') : 'var(--text3)';
     const scW   = p.score!=null ? p.score.toFixed(0) : 0;
 
-    // chandelier trailing stop: peak_price − stop_dist (raw ATR-based, no break-even floor)
+    // % trailing stop level: peak_price − stop_dist (Alpaca GTC trails peak upward)
     const chanStop    = p.chandelier_stop != null ? p.chandelier_stop : null;
     const chanPct     = chanStop!=null && p.current_price>0 ? (p.current_price-chanStop)/p.current_price*100 : null;
     const peakPx      = p.peak_price ?? p.entry_price;
-
-    // risk
-    const riskUsd = p.stop_loss>0 ? (p.current_price-p.stop_loss)*p.qty : 0;
-    const riskPct = p.stop_loss>0&&p.current_price>0 ? (p.current_price-p.stop_loss)/p.current_price*100 : 0;
-    const rCls    = riskPct>5?'pos':riskPct>2?'warn':'neg';
 
     // hold
     const hd     = p.hold_trading_days ?? 0;
@@ -1071,12 +1065,6 @@ function render(d) {
                <span class="risk-dist d" style="font-size:10px">peak ${$f(peakPx)}</span>
                <span class="risk-dist pos" style="font-size:10px">${chanPct.toFixed(2)}% away</span>`
             : `<span class="d" style="font-size:10px">—</span>`}
-        </div>
-      </td>
-      <td>
-        <div class="risk-cell">
-          <span class="num ${rCls}" style="font-weight:700">-${$f(riskUsd)}</span>
-          <span class="risk-dist ${rCls}">${riskPct.toFixed(2)}% to stop</span>
         </div>
       </td>
       <td>
@@ -1194,7 +1182,7 @@ _COND_JS = (
     f'["1",  "Alligator Align",   "en", "Fast SMMA({ALLIGATOR_FAST}) > Med SMMA({ALLIGATOR_MED}) > Slow SMMA({ALLIGATOR_SLOW}) — all three lines stacked bullish (mouth open upward)"],\n'
     f'  ["2",  "Fresh Crossover",  "en", "Bullish crossover occurred within the last {ALLIGATOR_CROSS_LOOKBACK} bars — catches the start of the move, not an exhausted tail"],\n'
     f'  ["3",  "RSI Trend",        "en", "RSI({RSI_PERIOD}) ≥ 50 AND rising ≥ {RSI_MIN_DELTA:.0f} pt — stock in bullish territory with building momentum, not yet overextended"],\n'
-    f'  ["4",  "Scanner Universe", "en", "Alpaca scan: Top gainers + most actives + full Alligator crossover universe | Avg vol > {SCAN_MIN_VOLUME/1e6:.0f}M shares | Avg dollar vol > ${SCAN_MIN_DOLLAR_VOL/1e6:.0f}M/day"],\n'
+    f'  ["4",  "Scanner Universe", "en", "Alpaca scan: Top gainers + most actives + full Alligator crossover universe | Avg vol > {SCAN_MIN_VOLUME//1000:.0f}K shares | Avg dollar vol > ${SCAN_MIN_DOLLAR_VOL/1e6:.1f}M/day"],\n'
     f'  ["5",  "Spread Filter",    "en", "Bid-ask spread ≤ {SPREAD_MAX_PCT*100:.1f}% — filters illiquid stocks where slippage would erode edge"],\n'
     f'  ["6",  "RVOL Gate",        "en", "Intraday relative volume ≥ {RVOL_MIN:.1f}× (time-adjusted CDF normalizer) — confirms unusual buying activity above typical pace"],\n'
     f'  ["7",  "Day Strength",     "en", "Price ≥ {DAY_STRENGTH_OPEN_PCT*100:.1f}% above today\'s open — sustained buying pressure, not a dead-cat bounce fading into close"],\n'
@@ -1206,8 +1194,8 @@ _COND_JS = (
     f'const EXIT_CONDITIONS = [\n'
     f'  ["1", "% Trail Stop",       "ex", "TRAIL SELL at {TRAIL_STOP_PCT*100:.0f}% of fill price below peak — Alpaca raises the stop as price climbs; dollar distance fixed at entry"],\n'
     f'  ["2", "Alligator Reversal", "ex", "Fast SMMA({ALLIGATOR_FAST}) AND Med SMMA({ALLIGATOR_MED}) both cross below Slow SMMA({ALLIGATOR_SLOW}) — confirmed bearish reversal, trend structure broken"],\n'
-    f'  ["3", "Hard Stop",          "ex", "{HARD_STOP_PCT*100:.0f}% drawdown from fill price triggers immediate Market SELL regardless of ATR stop distance"],\n'
-    f'  ["4", "Break-Even Floor",   "ex", "Once profit ≥ {BREAK_EVEN_PCT*100:.0f}%, chandelier stop is floored at fill price — software-enforced, prevents winners from becoming losers"],\n'
+    f'  ["3", "Hard Stop",          "ex", "{HARD_STOP_PCT*100:.0f}% drawdown from fill price triggers immediate Market SELL — overrides the trailing stop"],\n'
+    f'  ["4", "Break-Even Floor",   "ex", "Once profit ≥ {BREAK_EVEN_PCT*100:.0f}%, trailing stop is floored at fill price — software-enforced, prevents winners from becoming losers"],\n'
     f'  ["5", "VIX Risk-Off",       "ex", "VIX > {VIX_THRESHOLD} blocks new entries; existing positions exit via chandelier stop or hard stop as normal"],\n'
     f'  ["6", "Daily Loss Halt",    "ex", "{MAX_DAILY_LOSS_PCT*100:.0f}% intraday equity drawdown halts all new entries for the rest of the trading day (circuit breaker)"]\n'
     f'];\n'
